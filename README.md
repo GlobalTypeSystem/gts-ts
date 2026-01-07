@@ -190,6 +190,16 @@ gts --path ./examples list -l 100
 
 The package includes a non-production web server with REST API for testing and development:
 
+### Building the Server
+
+```bash
+# install dependencies
+npm ci
+
+# build the server
+npm run build
+```
+
 ### Starting the Server
 
 ```bash
