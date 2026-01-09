@@ -18,64 +18,11 @@ const SEGMENT_TOKEN_REGEX = /^[a-z_][a-z0-9_]*$/;
 
 export class Gts {
   static parseGtsID(id: string): GtsID {
-    const raw = id.trim();
-
-    if (raw !== raw.toLowerCase()) {
-      throw new InvalidGtsIDError(id, 'Must be lower case');
+    // If ID contains wildcard, validate as wildcard first
+    if (id.includes('*')) {
+      return this.validateWildcard(id);
     }
-
-    if (raw.includes('-')) {
-      throw new InvalidGtsIDError(id, "Must not contain '-'");
-    }
-
-    if (!raw.startsWith(GTS_PREFIX)) {
-      throw new InvalidGtsIDError(id, `Does not start with '${GTS_PREFIX}'`);
-    }
-
-    if (raw.length > MAX_ID_LENGTH) {
-      throw new InvalidGtsIDError(id, 'Too long');
-    }
-
-    // Additional validation
-    if (raw.includes('..')) {
-      throw new InvalidGtsIDError(id, 'Double dots not allowed');
-    }
-    if (raw.endsWith('.')) {
-      throw new InvalidGtsIDError(id, 'Cannot end with a dot');
-    }
-    if (raw.includes('~~')) {
-      throw new InvalidGtsIDError(id, 'Double tildes not allowed');
-    }
-    if (raw === GTS_PREFIX || raw === GTS_PREFIX + '~') {
-      throw new InvalidGtsIDError(id, 'ID cannot be just the prefix');
-    }
-
-    const gtsId: GtsID = {
-      id: raw,
-      segments: [],
-    };
-
-    const remainder = raw.substring(GTS_PREFIX.length);
-    const parts = this.splitPreservingTilde(remainder);
-
-    let offset = GTS_PREFIX.length;
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      if (part === '') {
-        continue;
-      }
-
-      const segment = this.parseSegment(i + 1, offset, part);
-      gtsId.segments.push(segment);
-      offset += part.length;
-    }
-
-    // Ensure we have at least one segment
-    if (gtsId.segments.length === 0) {
-      throw new InvalidGtsIDError(id, 'No valid segments found');
-    }
-
-    return gtsId;
+    return this.parseGtsIDInternal(id, false);
   }
 
   private static splitPreservingTilde(s: string): string[] {
@@ -264,13 +211,20 @@ export class Gts {
   }
 
   static validateGtsID(id: string): ValidationResult {
+    const isWildcard = id.includes('*');
     try {
-      this.parseGtsID(id);
+      if (isWildcard) {
+        // For wildcard patterns, use validateWildcard
+        this.validateWildcard(id);
+      } else {
+        this.parseGtsID(id);
+      }
       return {
         id,
         ok: true,
         valid: true,
         error: '',
+        is_wildcard: isWildcard,
       };
     } catch (error) {
       return {
@@ -278,6 +232,7 @@ export class Gts {
         ok: false,
         valid: false,
         error: error instanceof Error ? error.message : String(error),
+        is_wildcard: isWildcard,
       };
     }
   }
@@ -325,8 +280,14 @@ export class Gts {
   static matchIDPattern(candidate: string, pattern: string): MatchResult {
     try {
       // Validate and parse candidate
+      // If candidate contains '*', validate it as a wildcard pattern first
+      // This catches malformed wildcards like 'a*' (wildcard not on token boundary)
       let candidateId: GtsID;
       try {
+        if (candidate.includes('*')) {
+          // Validate candidate as a wildcard pattern first
+          this.validateWildcard(candidate);
+        }
         candidateId = this.parseGtsID(candidate);
       } catch (error) {
         return {
@@ -382,15 +343,111 @@ export class Gts {
       throw new InvalidGtsIDError(pattern, "The wildcard '*' token is allowed only once");
     }
 
-    // If wildcard exists, must be at the end
+    // If wildcard exists, validate its position
     if (wildcardCount === 1) {
-      if (!p.endsWith('.*') && !p.endsWith('~*')) {
+      // Wildcard must be at a token boundary at the end (either .* or ~*)
+      // Pattern like "gts.a.b.c.d.v1~a.*" is valid (wildcard at end after .)
+      // Pattern like "gts.a.b.c.d.v1~a.*~" is invalid (wildcard not at end of pattern)
+      // Pattern like "gts.a.b.c.d.v1~a*" is invalid (wildcard not at token boundary)
+      // Pattern like "gts.a.b.c.*.v1~a.*" is invalid (wildcard in middle of segment)
+
+      const wildcardIndex = p.indexOf('*');
+
+      // Check if wildcard is at the very end
+      if (wildcardIndex !== p.length - 1) {
         throw new InvalidGtsIDError(pattern, "The wildcard '*' token is allowed only at the end of the pattern");
+      }
+
+      // Check if wildcard is preceded by . or ~ (token boundary)
+      if (wildcardIndex > 0 && p[wildcardIndex - 1] !== '.' && p[wildcardIndex - 1] !== '~') {
+        throw new InvalidGtsIDError(pattern, "The wildcard '*' must be preceded by '.' or '~' (token boundary)");
+      }
+
+      // Check that there's no wildcard in the middle of a segment (before a ~)
+      // Split by ~ to get segments, check if any segment except the last has a wildcard
+      const segments = p.split('~');
+      for (let i = 0; i < segments.length - 1; i++) {
+        if (segments[i].includes('*')) {
+          throw new InvalidGtsIDError(pattern, "The wildcard '*' token cannot appear in the middle of a chained ID");
+        }
       }
     }
 
-    // Try to parse as a GtsID
-    return this.parseGtsID(p);
+    // Parse the pattern - parseGtsID will handle the segment validation
+    return this.parseGtsIDInternal(p, true);
+  }
+
+  // Internal parse method that can be called with wildcard mode
+  private static parseGtsIDInternal(id: string, allowWildcard: boolean = false): GtsID {
+    const raw = id.trim();
+
+    if (raw !== raw.toLowerCase()) {
+      throw new InvalidGtsIDError(id, 'Must be lower case');
+    }
+
+    if (raw.includes('-')) {
+      throw new InvalidGtsIDError(id, "Must not contain '-'");
+    }
+
+    if (!raw.startsWith(GTS_PREFIX)) {
+      throw new InvalidGtsIDError(id, `Does not start with '${GTS_PREFIX}'`);
+    }
+
+    if (raw.length > MAX_ID_LENGTH) {
+      throw new InvalidGtsIDError(id, 'Too long');
+    }
+
+    // Additional validation
+    if (raw.includes('..')) {
+      throw new InvalidGtsIDError(id, 'Double dots not allowed');
+    }
+    if (raw.endsWith('.') && !raw.endsWith('.*')) {
+      throw new InvalidGtsIDError(id, 'Cannot end with a dot');
+    }
+    if (raw.includes('~~')) {
+      throw new InvalidGtsIDError(id, 'Double tildes not allowed');
+    }
+    if (raw === GTS_PREFIX || raw === GTS_PREFIX + '~') {
+      throw new InvalidGtsIDError(id, 'ID cannot be just the prefix');
+    }
+
+    const gtsId: GtsID = {
+      id: raw,
+      segments: [],
+    };
+
+    const remainder = raw.substring(GTS_PREFIX.length);
+    const parts = this.splitPreservingTilde(remainder);
+
+    let offset = GTS_PREFIX.length;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (part === '') {
+        continue;
+      }
+
+      const segment = this.parseSegment(i + 1, offset, part);
+      gtsId.segments.push(segment);
+      offset += part.length;
+    }
+
+    // Ensure we have at least one segment
+    if (gtsId.segments.length === 0) {
+      throw new InvalidGtsIDError(id, 'No valid segments found');
+    }
+
+    // v0.7: Single-segment instance IDs are prohibited (skip for wildcard patterns)
+    if (!allowWildcard && !raw.includes('*')) {
+      const lastSegment = gtsId.segments[gtsId.segments.length - 1];
+      if (!lastSegment.isType && gtsId.segments.length === 1) {
+        throw new InvalidGtsIDError(
+          id,
+          'Single-segment instance IDs are prohibited. Instance IDs must be chained with a type segment (e.g., gts.vendor.pkg.ns.type.v1~instance.segment.v1)'
+        );
+      }
+    }
+
+    return gtsId;
   }
 
   private static wildcardMatch(candidate: GtsID, pattern: GtsID): boolean {

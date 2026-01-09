@@ -26,12 +26,15 @@ export interface ValidationResult {
   ok: boolean;
   valid?: boolean;
   error: string;
+  is_wildcard?: boolean;
 }
 
 export interface ParseResult {
   ok: boolean;
   segments: GtsIDSegment[];
   error?: string;
+  is_schema?: boolean;
+  is_wildcard?: boolean;
 }
 
 export interface MatchResult {
@@ -49,7 +52,7 @@ export interface UUIDResult {
 
 export interface ExtractResult {
   id: string;
-  schema_id: string;
+  schema_id: string | null;
   selected_entity_field?: string;
   selected_schema_id_field?: string;
   is_schema: boolean;
@@ -102,7 +105,7 @@ export interface GtsConfig {
 
 export interface JsonEntity {
   id: string;
-  schemaId: string;
+  schemaId: string | null;
   content: Record<string, any>;
   isSchema: boolean;
   references: Set<string>;

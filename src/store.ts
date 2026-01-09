@@ -179,24 +179,59 @@ export class GtsStore {
   }
 
   private normalizeSchema(schema: any): any {
-    const normalized: any = {};
+    return this.normalizeSchemaRecursive(schema);
+  }
 
-    for (const [key, value] of Object.entries(schema)) {
-      switch (key) {
-        case '$$id':
-          normalized['$id'] = value;
-          break;
-        case '$$schema':
-          normalized['$schema'] = value;
-          break;
-        default:
-          normalized[key] = value;
-      }
+  private normalizeSchemaRecursive(obj: any): any {
+    if (obj === null || typeof obj !== 'object') {
+      return obj;
     }
 
+    if (Array.isArray(obj)) {
+      return obj.map((item) => this.normalizeSchemaRecursive(item));
+    }
+
+    const normalized: any = {};
+
+    for (const [key, value] of Object.entries(obj)) {
+      let newKey = key;
+      let newValue = value;
+
+      // Convert $$ prefixed keys to $ prefixed keys
+      switch (key) {
+        case '$$id':
+          newKey = '$id';
+          break;
+        case '$$schema':
+          newKey = '$schema';
+          break;
+        case '$$ref':
+          newKey = '$ref';
+          break;
+        case '$$defs':
+          newKey = '$defs';
+          break;
+      }
+
+      // Recursively normalize nested objects
+      if (value && typeof value === 'object') {
+        newValue = this.normalizeSchemaRecursive(value);
+      }
+
+      normalized[newKey] = newValue;
+    }
+
+    // Normalize $id values
     if (normalized['$id'] && typeof normalized['$id'] === 'string') {
       if (normalized['$id'].startsWith(GTS_URI_PREFIX)) {
         normalized['$id'] = normalized['$id'].substring(GTS_URI_PREFIX.length);
+      }
+    }
+
+    // Normalize $ref values
+    if (normalized['$ref'] && typeof normalized['$ref'] === 'string') {
+      if (normalized['$ref'].startsWith(GTS_URI_PREFIX)) {
+        normalized['$ref'] = normalized['$ref'].substring(GTS_URI_PREFIX.length);
       }
     }
 

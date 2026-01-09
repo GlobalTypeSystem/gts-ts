@@ -1,4 +1,4 @@
-import { ExtractResult, GTS_URI_PREFIX } from './types';
+import { ExtractResult, GTS_URI_PREFIX, GTS_PREFIX } from './types';
 import { Gts } from './gts';
 
 export interface GtsConfig {
@@ -9,7 +9,18 @@ export interface GtsConfig {
 export function getDefaultConfig(): GtsConfig {
   return {
     entityIdFields: ['$id', '$$id', 'gtsId', 'gtsIid', 'gtsOid', 'gtsI', 'gts_id', 'gts_oid', 'gts_iid', 'id'],
-    schemaIdFields: ['$schema', '$$schema', 'gtsTid', 'gtsT', 'gts_t', 'gts_tid', 'type', 'schema'],
+    schemaIdFields: [
+      '$schema',
+      '$$schema',
+      'gtsTid',
+      'gtsType',
+      'gtsT',
+      'gts_t',
+      'gts_tid',
+      'gts_type',
+      'type',
+      'schema',
+    ],
   };
 }
 
@@ -63,41 +74,15 @@ export class GtsExtractor {
     }
 
     // Check for JSON Schema meta-schema
+    // Issue #25: A document is a schema ONLY if $schema field is present
     const schemaField = content['$schema'] || content['$$schema'];
     if (typeof schemaField === 'string') {
-      if (schemaField.includes('json-schema.org') || schemaField.startsWith('gts://')) {
+      // Standard JSON Schema meta-schema URLs
+      if (schemaField.includes('json-schema.org')) {
         return true;
       }
-
-      // If $schema points to a GTS type ID
-      if (schemaField.startsWith('gts.')) {
-        // Check if entity ID ends with ~ (indicates schema)
-        const config = getDefaultConfig();
-        const entityResult = this.findFirstValidField(content, config.entityIdFields);
-        if (entityResult && entityResult.value.endsWith('~')) {
-          return true;
-        }
-
-        // Check for schema-like properties
-        if (schemaField.endsWith('~')) {
-          if ('type' in content || 'properties' in content || 'items' in content || 'enum' in content) {
-            return true;
-          }
-        }
-      }
-    }
-
-    // Check if $id or $$id ends with ~ (schema marker)
-    if (content['$$id'] && typeof content['$$id'] === 'string') {
-      const id = this.normalizeValue(content['$$id'], '$$id');
-      if (id.endsWith('~')) {
-        return true;
-      }
-    }
-
-    if (content['$id'] && typeof content['$id'] === 'string') {
-      const id = this.normalizeValue(content['$id'], '$id');
-      if (id.endsWith('~')) {
+      // GTS schema reference (ends with ~)
+      if (schemaField.startsWith(GTS_URI_PREFIX) || schemaField.startsWith(GTS_PREFIX)) {
         return true;
       }
     }
@@ -108,46 +93,109 @@ export class GtsExtractor {
   static extractID(content: any, schemaContent?: any): ExtractResult {
     const config = getDefaultConfig();
     let id = '';
-    let schemaId = '';
+    let schemaId: string | null = null;
     let selectedEntityField: string | undefined;
     let selectedSchemaIdField: string | undefined;
     const isSchema = this.isJsonSchema(content);
 
     if (typeof content === 'object' && content !== null) {
-      // Extract entity ID
+      // Extract entity ID (look for any non-empty value, preferring valid GTS IDs)
       const entityResult = this.findFirstValidField(content, config.entityIdFields);
       if (entityResult) {
         id = entityResult.value;
         selectedEntityField = entityResult.field;
       }
 
-      // Extract schema ID
-      const schemaResult = this.findFirstValidField(content, config.schemaIdFields);
-      if (schemaResult) {
-        schemaId = schemaResult.value;
-        selectedSchemaIdField = schemaResult.field;
-      }
+      // Check if entity ID is a valid GTS ID
+      const isValidGtsId = id && Gts.isValidGtsID(id);
 
-      // If no schema ID found but entity ID is a type ID (ends with ~), use it as schema ID
-      if (!schemaId && id && id.endsWith('~')) {
-        schemaId = id;
-        // Don't set selectedSchemaIdField - the entity ID itself is a type
-      }
+      // An ID has a "chain" if there's a ~ somewhere in the middle (not just at the end)
+      // e.g., "gts.a.b.c.d.v1~x.y.z.w.v2" or "gts.a.b.c.d.v1~x.y.z.w.v2~" both have chains
+      // but "gts.a.b.c.d.v1~" does NOT have a chain (it's a base type)
+      const hasChain =
+        isValidGtsId &&
+        (() => {
+          // Find first ~
+          const firstTilde = id.indexOf('~');
+          if (firstTilde === -1) return false;
+          // Check if there's anything meaningful after the first ~
+          const afterTilde = id.substring(firstTilde + 1);
+          // If ends with ~, remove it for chain check
+          const checkPart = afterTilde.endsWith('~') ? afterTilde.slice(0, -1) : afterTilde;
+          return checkPart.length > 0;
+        })();
 
-      // If entity ID contains ~, extract schema ID from it
-      if (!schemaId && id && id.includes('~')) {
-        const lastTilde = id.lastIndexOf('~');
-        if (lastTilde > 0) {
-          schemaId = id.substring(0, lastTilde + 1);
-          if (!selectedSchemaIdField && selectedEntityField) {
+      if (isSchema) {
+        // For schemas: extract schema_id based on rules
+        // Rule: For base schemas, schema_id is the $schema field value
+        // Rule: For derived schemas (chained $id), schema_id is the parent type from the chain
+        if (hasChain && id.endsWith('~')) {
+          // Derived schema - extract parent type from chain
+          // e.g., "gts.x.core.events.type.v1~x.commerce.orders.order_placed.v1.0~"
+          // -> schema_id = "gts.x.core.events.type.v1~"
+          const withoutTrailingTilde = id.slice(0, -1);
+          const lastTilde = withoutTrailingTilde.lastIndexOf('~');
+          if (lastTilde > 0) {
+            schemaId = id.substring(0, lastTilde + 1);
+            selectedSchemaIdField = selectedEntityField;
+          }
+        } else if (hasChain && !id.endsWith('~')) {
+          // Chained instance ID in schema (shouldn't happen, but handle it)
+          const lastTilde = id.lastIndexOf('~');
+          if (lastTilde > 0) {
+            schemaId = id.substring(0, lastTilde + 1);
+            selectedSchemaIdField = selectedEntityField;
+          }
+        } else {
+          // Base schema (single segment type or no $id) - use $schema field value
+          const schemaResult = this.findFirstValidField(content, ['$schema', '$$schema']);
+          if (schemaResult) {
+            schemaId = schemaResult.value;
+            selectedSchemaIdField = schemaResult.field;
+          }
+        }
+      } else {
+        // For instances (non-schemas):
+        // $id without $schema means the doc is an instance, NOT a schema
+        // Even if $id ends with ~, without $schema it's not treated as a schema
+        // So we should NOT derive schema_id from $id alone
+
+        // Skip $id for non-schemas - $id without $schema should not be used for schema_id
+        const isIdFromDollarId = selectedEntityField === '$id' || selectedEntityField === '$$id';
+
+        if (hasChain && !isIdFromDollarId) {
+          // Extract schema ID from chain (only if not from $id)
+          const lastTilde = id.lastIndexOf('~');
+          if (lastTilde > 0 && !id.endsWith('~')) {
+            schemaId = id.substring(0, lastTilde + 1);
+            selectedSchemaIdField = selectedEntityField;
+          }
+        }
+
+        if (schemaId === null && !isIdFromDollarId) {
+          // No chain or chain didn't provide schema_id - try explicit schema fields
+          // But don't use schema_id_fields that are $id variants (they were already checked above)
+          const explicitSchemaFields = config.schemaIdFields.filter((f) => f !== '$id' && f !== '$$id');
+          const schemaResult = this.findFirstValidField(content, explicitSchemaFields, true);
+          if (schemaResult) {
+            schemaId = schemaResult.value;
+            selectedSchemaIdField = schemaResult.field;
+          }
+        }
+
+        // If schema_id is still null, check regular chained ID (including from $id)
+        if (schemaId === null && hasChain && !id.endsWith('~')) {
+          const lastTilde = id.lastIndexOf('~');
+          if (lastTilde > 0) {
+            schemaId = id.substring(0, lastTilde + 1);
             selectedSchemaIdField = selectedEntityField;
           }
         }
       }
     }
 
-    // Try to extract from schemaContent if provided
-    if (!schemaId && schemaContent && typeof schemaContent === 'object') {
+    // Try to extract from schemaContent if provided and schemaId is still null
+    if (schemaId === null && schemaContent && typeof schemaContent === 'object') {
       const schemaEntityResult = this.findFirstValidField(schemaContent, config.entityIdFields);
       if (schemaEntityResult) {
         schemaId = schemaEntityResult.value;
