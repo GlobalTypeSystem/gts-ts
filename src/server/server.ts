@@ -143,13 +143,42 @@ export class GtsServer {
   private async handleAddEntity(
     request: FastifyRequest<{
       Body: any;
-      Querystring: { validation?: string };
+      Querystring: { validate?: string; validation?: string };
     }>,
-    _reply: FastifyReply
+    reply: FastifyReply
   ): Promise<OperationResult> {
     try {
       const content = request.body;
+      const validate = request.query.validate === 'true' || request.query.validation === 'true';
       const entity = createJsonEntity(content);
+
+      // Strict validation for schemas when validate=true
+      if (validate && entity.isSchema) {
+        const validationError = this.validateSchemaStrict(content);
+        if (validationError) {
+          reply.code(422);
+          return {
+            ok: false,
+            error: validationError,
+          };
+        }
+      }
+
+      // Strict validation for instances when validate=true
+      if (validate && !entity.isSchema) {
+        // Check if entity has recognizable GTS fields
+        if (!entity.id || !gts.isValidGtsID(entity.id)) {
+          // Check if there's a valid type field
+          const hasValidType = entity.schemaId && gts.isValidGtsID(entity.schemaId);
+          if (!hasValidType) {
+            reply.code(422);
+            return {
+              ok: false,
+              error: 'Instance must have a valid GTS ID or type field',
+            };
+          }
+        }
+      }
 
       if (!entity.id) {
         return {
@@ -159,22 +188,16 @@ export class GtsServer {
       }
 
       // Validate schema with x-gts-ref if it's a schema
+      // x-gts-ref validation always returns 422 on failure (not just when validate=true)
       if (entity.isSchema) {
         const xGtsRefValidator = new XGtsRefValidator(this.store['store']);
         const xGtsRefErrors = xGtsRefValidator.validateSchema(content);
         if (xGtsRefErrors.length > 0) {
           const errorMsgs = xGtsRefErrors.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ');
-          // For explicit validation requests, return the full error message
-          if (request.query.validation === 'true') {
-            return {
-              ok: false,
-              error: `x-gts-ref validation failed: ${errorMsgs}`,
-            };
-          }
-          // For implicit validation, return a generic message
+          reply.code(422);
           return {
             ok: false,
-            error: `Validation failed: x-gts-ref ${errorMsgs}`,
+            error: `x-gts-ref validation failed: ${errorMsgs}`,
           };
         }
       }
@@ -182,18 +205,14 @@ export class GtsServer {
       // Register the entity
       this.store.register(content);
 
-      // Validate if requested
-      if (request.query.validation === 'true') {
-        if (entity.isSchema) {
-          // Schema validation was already done above
-        } else {
-          const result = this.store.validateInstance(entity.id);
-          if (!result.ok) {
-            return {
-              ok: false,
-              error: result.error,
-            };
-          }
+      // Validate instance if requested
+      if (validate && !entity.isSchema) {
+        const result = this.store.validateInstance(entity.id);
+        if (!result.ok) {
+          return {
+            ok: false,
+            error: result.error,
+          };
         }
       }
 
@@ -207,6 +226,103 @@ export class GtsServer {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  private validateSchemaStrict(content: any): string | null {
+    // Check for $id or $$id
+    const schemaId = content['$id'] || content['$$id'];
+    if (!schemaId) {
+      return 'Schema must have a $id or $$id field';
+    }
+
+    // Normalize the ID
+    let normalizedId = schemaId;
+    if (typeof normalizedId === 'string') {
+      // Check if it starts with gts:// prefix
+      if (normalizedId.startsWith('gts://')) {
+        normalizedId = normalizedId.substring(6);
+      } else if (normalizedId.startsWith('gts.')) {
+        // Plain gts. prefix without gts:// is not allowed for JSON Schema $id
+        return 'Schema $id with GTS identifier must use gts:// URI format (e.g., gts://gts.vendor.pkg.ns.type.v1~)';
+      } else {
+        // Non-GTS $id is not allowed
+        return 'Schema $id must be a valid GTS identifier with gts:// URI format';
+      }
+
+      // Check for wildcards in schema ID
+      if (normalizedId.includes('*')) {
+        return 'Schema $id cannot contain wildcards';
+      }
+
+      // Validate the GTS ID
+      if (!gts.isValidGtsID(normalizedId)) {
+        return `Schema $id is not a valid GTS identifier: ${normalizedId}`;
+      }
+    }
+
+    // Validate $ref fields
+    const refErrors = this.validateSchemaRefs(content, '');
+    if (refErrors.length > 0) {
+      return refErrors[0];
+    }
+
+    return null;
+  }
+
+  private validateSchemaRefs(obj: any, path: string): string[] {
+    const errors: string[] = [];
+
+    if (!obj || typeof obj !== 'object') {
+      return errors;
+    }
+
+    // Check $ref or $$ref
+    const ref = obj['$ref'] || obj['$$ref'];
+    if (typeof ref === 'string') {
+      const refPath = path ? `${path}/$ref` : '$ref';
+
+      // Local refs (#/...) are allowed
+      if (ref.startsWith('#')) {
+        // OK - local ref
+      } else if (ref.startsWith('gts://')) {
+        // gts:// URI is allowed - validate the GTS ID
+        const normalizedRef = ref.substring(6);
+
+        // Check for wildcards
+        if (normalizedRef.includes('*')) {
+          errors.push(`Invalid $ref at ${refPath}: wildcards are not allowed in $ref`);
+        } else if (!gts.isValidGtsID(normalizedRef)) {
+          errors.push(`Invalid $ref at ${refPath}: ${normalizedRef} is not a valid GTS identifier`);
+        }
+      } else if (ref.startsWith('gts.')) {
+        // Plain gts. prefix without gts:// is not allowed
+        errors.push(`Invalid $ref at ${refPath}: GTS references must use gts:// URI format`);
+      } else if (ref.startsWith('http://') || ref.startsWith('https://')) {
+        // External HTTP refs are not allowed (except json-schema.org for $schema)
+        if (!ref.includes('json-schema.org')) {
+          errors.push(`Invalid $ref at ${refPath}: external HTTP references are not allowed`);
+        }
+      }
+    }
+
+    // Recurse into nested objects
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === '$ref' || key === '$$ref') continue;
+      if (value && typeof value === 'object') {
+        const nestedPath = path ? `${path}/${key}` : key;
+        if (Array.isArray(value)) {
+          value.forEach((item, idx) => {
+            if (item && typeof item === 'object') {
+              errors.push(...this.validateSchemaRefs(item, `${nestedPath}[${idx}]`));
+            }
+          });
+        } else {
+          errors.push(...this.validateSchemaRefs(value, nestedPath));
+        }
+      }
+    }
+
+    return errors;
   }
 
   private async handleAddEntities(
@@ -292,6 +408,7 @@ export class GtsServer {
     }
 
     const result = gts.parseGtsID(id);
+    const isWildcard = id.includes('*');
 
     // Convert segments to match test format (snake_case)
     const segments =
@@ -305,11 +422,16 @@ export class GtsServer {
         is_type: seg.isType,
       })) || [];
 
+    // is_schema: true if ends with ~ and not a wildcard ending with ~*
+    const isSchema = id.endsWith('~') && !isWildcard;
+
     return {
       id,
       ok: result.ok,
       segments,
       error: result.error || '',
+      is_schema: isSchema,
+      is_wildcard: isWildcard,
     };
   }
 
