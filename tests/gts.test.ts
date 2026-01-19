@@ -4,7 +4,8 @@ describe('GTS Core Operations', () => {
   describe('OP#1 - ID Validation', () => {
     test('validates correct GTS IDs', () => {
       expect(isValidGtsID('gts.vendor.pkg.ns.type.v1~')).toBe(true);
-      expect(isValidGtsID('gts.vendor.pkg.ns.type.v1.0')).toBe(true);
+      // v0.7: Single-segment instances are prohibited, must use chained IDs
+      expect(isValidGtsID('gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.0')).toBe(true);
       // Chained identifiers per spec section 2.2
       expect(isValidGtsID('gts.x.core.events.type.v1~ven.app._.custom_event.v1~')).toBe(true);
       expect(isValidGtsID('gts.x.core.events.topic.v1~ven.app._.custom_event_topic.v1.2')).toBe(true);
@@ -15,6 +16,12 @@ describe('GTS Core Operations', () => {
       expect(isValidGtsID('GTS.vendor.pkg.ns.type.v1~')).toBe(false);
       expect(isValidGtsID('gts.vendor-pkg.ns.type.v1~')).toBe(false);
       expect(isValidGtsID('gts.vendor.pkg.ns.type')).toBe(false);
+    });
+
+    test('rejects single-segment instance IDs (v0.7)', () => {
+      // Single-segment instance IDs are prohibited in v0.7
+      expect(isValidGtsID('gts.vendor.pkg.ns.type.v1.0')).toBe(false);
+      expect(isValidGtsID('gts.vendor.pkg.ns.type.v1.2')).toBe(false);
     });
 
     test('validateGtsID returns detailed validation result', () => {
@@ -45,6 +52,7 @@ describe('GTS Core Operations', () => {
     test('extracts GTS ID from schema', () => {
       const schema = {
         $$id: 'gts.vendor.pkg.ns.type.v1~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {},
       };
@@ -57,6 +65,7 @@ describe('GTS Core Operations', () => {
     test('handles GTS URI prefix', () => {
       const schema = {
         $id: 'gts://gts.vendor.pkg.ns.type.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
       };
 
@@ -83,10 +92,10 @@ describe('GTS Core Operations', () => {
     });
 
     test('parses instance ID with minor version', () => {
-      const result = parseGtsID('gts.vendor.pkg.ns.type.v1.2');
+      const result = parseGtsID('gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.2');
       expect(result.ok).toBe(true);
 
-      const segment = result.segments[0];
+      const segment = result.segments[1];
       expect(segment.verMajor).toBe(1);
       expect(segment.verMinor).toBe(2);
       expect(segment.isType).toBe(false);
@@ -117,22 +126,30 @@ describe('GTS Core Operations', () => {
 
   describe('OP#4 - Pattern Matching', () => {
     test('matches exact patterns', () => {
-      const result = matchIDPattern('gts.vendor.pkg.ns.type.v1.0', 'gts.vendor.pkg.ns.type.v1.0');
+      const candidate = 'gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.0';
+      const pattern = 'gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.0';
+      const result = matchIDPattern(candidate, pattern);
       expect(result.match).toBe(true);
     });
 
     test('matches wildcard patterns', () => {
-      const result = matchIDPattern('gts.vendor.pkg.ns.type.v1.0', 'gts.vendor.pkg.*');
+      const candidate = 'gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.0';
+      const pattern = 'gts.vendor.pkg.*';
+      const result = matchIDPattern(candidate, pattern);
       expect(result.match).toBe(true);
     });
 
     test('rejects non-matching patterns', () => {
-      const result = matchIDPattern('gts.vendor.pkg.ns.type.v1.0', 'gts.other.pkg.*');
+      const candidate = 'gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.0';
+      const pattern = 'gts.other.pkg.*';
+      const result = matchIDPattern(candidate, pattern);
       expect(result.match).toBe(false);
     });
 
     test('matches partial wildcards', () => {
-      const result = matchIDPattern('gts.vendor.pkg.ns.type.v1.0', 'gts.vendor.pkg.ns.*');
+      const candidate = 'gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.0';
+      const pattern = 'gts.vendor.pkg.ns.*';
+      const result = matchIDPattern(candidate, pattern);
       expect(result.match).toBe(true);
     });
   });
@@ -166,6 +183,7 @@ describe('GTS Store Operations', () => {
     test('validates instance against schema', () => {
       const schema = {
         $$id: 'gts.test.pkg.ns.person.v1~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -175,14 +193,14 @@ describe('GTS Store Operations', () => {
       };
 
       const validInstance = {
-        gtsId: 'gts.test.pkg.ns.person.v1.0',
+        gtsId: 'gts.test.pkg.ns.person.v1~test.pkg.ns.john.v1.0',
         $schema: 'gts.test.pkg.ns.person.v1~',
         name: 'John Doe',
         age: 30,
       };
 
       const invalidInstance = {
-        gtsId: 'gts.test.pkg.ns.person.v1.1',
+        gtsId: 'gts.test.pkg.ns.person.v1~test.pkg.ns.jane.v1.1',
         $schema: 'gts.test.pkg.ns.person.v1~',
         age: 30,
       };
@@ -191,10 +209,10 @@ describe('GTS Store Operations', () => {
       gts.register(validInstance);
       gts.register(invalidInstance);
 
-      const validResult = gts.validateInstance('gts.test.pkg.ns.person.v1.0');
+      const validResult = gts.validateInstance('gts.test.pkg.ns.person.v1~test.pkg.ns.john.v1.0');
       expect(validResult.ok).toBe(true);
 
-      const invalidResult = gts.validateInstance('gts.test.pkg.ns.person.v1.1');
+      const invalidResult = gts.validateInstance('gts.test.pkg.ns.person.v1~test.pkg.ns.jane.v1.1');
       expect(invalidResult.ok).toBe(false);
       expect(invalidResult.error).toContain('required');
     });
@@ -204,6 +222,7 @@ describe('GTS Store Operations', () => {
     test('resolves relationships between entities', () => {
       const schema = {
         $$id: 'gts.test.pkg.ns.person.v1~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -212,18 +231,18 @@ describe('GTS Store Operations', () => {
       };
 
       const instance = {
-        gtsId: 'gts.test.pkg.ns.person.v1.0',
+        gtsId: 'gts.test.pkg.ns.person.v1~test.pkg.ns.john.v1.0',
         $schema: 'gts.test.pkg.ns.person.v1~',
         name: 'John',
-        friend: { $ref: 'gts.test.pkg.ns.person.v1.1' },
+        friend: { $ref: 'gts.test.pkg.ns.person.v1~test.pkg.ns.jane.v1.1' },
       };
 
       gts.register(schema);
       gts.register(instance);
 
-      const result = gts.resolveRelationships('gts.test.pkg.ns.person.v1.0');
+      const result = gts.resolveRelationships('gts.test.pkg.ns.person.v1~test.pkg.ns.john.v1.0');
       expect(result.relationships).toContain('gts.test.pkg.ns.person.v1~');
-      expect(result.brokenReferences).toContain('gts.test.pkg.ns.person.v1.1');
+      expect(result.brokenReferences).toContain('gts.test.pkg.ns.person.v1~test.pkg.ns.jane.v1.1');
     });
   });
 
@@ -231,6 +250,7 @@ describe('GTS Store Operations', () => {
     test('checks backward compatibility', () => {
       const schemaV1 = {
         $$id: 'gts.test.pkg.ns.person.v1~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -241,6 +261,7 @@ describe('GTS Store Operations', () => {
 
       const schemaV2 = {
         $$id: 'gts.test.pkg.ns.person.v2~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -260,6 +281,7 @@ describe('GTS Store Operations', () => {
     test('detects incompatible changes', () => {
       const schemaV1 = {
         $$id: 'gts.test.pkg.ns.person.v1~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -269,6 +291,7 @@ describe('GTS Store Operations', () => {
 
       const schemaV2 = {
         $$id: 'gts.test.pkg.ns.person.v2~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           fullName: { type: 'string' },
@@ -289,6 +312,7 @@ describe('GTS Store Operations', () => {
     test('casts instance between compatible versions', () => {
       const schemaV1 = {
         $$id: 'gts.test.pkg.ns.person.v1~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -299,6 +323,7 @@ describe('GTS Store Operations', () => {
 
       const schemaV2 = {
         $$id: 'gts.test.pkg.ns.person.v2~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -309,7 +334,7 @@ describe('GTS Store Operations', () => {
       };
 
       const instance = {
-        gtsId: 'gts.test.pkg.ns.person.v1.0',
+        gtsId: 'gts.test.pkg.ns.person.v1~test.pkg.ns.john.v1.0',
         $schema: 'gts.test.pkg.ns.person.v1~',
         name: 'John',
         age: 30,
@@ -319,7 +344,7 @@ describe('GTS Store Operations', () => {
       gts.register(schemaV2);
       gts.register(instance);
 
-      const result = gts.castInstance('gts.test.pkg.ns.person.v1.0', 'gts.test.pkg.ns.person.v2~');
+      const result = gts.castInstance('gts.test.pkg.ns.person.v1~test.pkg.ns.john.v1.0', 'gts.test.pkg.ns.person.v2~');
 
       expect(result.ok).toBe(true);
       expect(result.result).toBeDefined();
@@ -331,35 +356,35 @@ describe('GTS Store Operations', () => {
   describe('OP#10 - Query Execution', () => {
     test('queries entities with patterns', () => {
       gts.register({
-        gtsId: 'gts.vendor.pkg1.ns.type.v1.0',
+        gtsId: 'gts.vendor.pkg1.ns.type.v1~vendor.pkg1.ns.instance.v1.0',
         data: 'test1',
       });
       gts.register({
-        gtsId: 'gts.vendor.pkg2.ns.type.v1.0',
+        gtsId: 'gts.vendor.pkg2.ns.type.v1~vendor.pkg2.ns.instance.v1.0',
         data: 'test2',
       });
       gts.register({
-        gtsId: 'gts.other.pkg.ns.type.v1.0',
+        gtsId: 'gts.other.pkg.ns.type.v1~other.pkg.ns.instance.v1.0',
         data: 'test3',
       });
 
       const result = gts.query('gts.vendor.*');
       expect(result.count).toBe(2);
       const ids = result.items.map((item: any) => item.gtsId);
-      expect(ids).toContain('gts.vendor.pkg1.ns.type.v1.0');
-      expect(ids).toContain('gts.vendor.pkg2.ns.type.v1.0');
+      expect(ids).toContain('gts.vendor.pkg1.ns.type.v1~vendor.pkg1.ns.instance.v1.0');
+      expect(ids).toContain('gts.vendor.pkg2.ns.type.v1~vendor.pkg2.ns.instance.v1.0');
     });
 
     test('supports wildcard patterns', () => {
-      gts.register({ gtsId: 'gts.a.b.c.d.v1.0' });
-      gts.register({ gtsId: 'gts.a.b.c.e.v1.0' });
-      gts.register({ gtsId: 'gts.a.x.c.d.v1.0' });
+      gts.register({ gtsId: 'gts.a.b.c.d.v1~a.b.c.d.v1.0' });
+      gts.register({ gtsId: 'gts.a.b.c.e.v1~a.b.c.e.v1.0' });
+      gts.register({ gtsId: 'gts.a.x.c.d.v1~a.x.c.d.v1.0' });
 
       const result = gts.query('gts.a.b.*');
       expect(result.count).toBe(2);
       const ids = result.items.map((item: any) => item.gtsId);
-      expect(ids).toContain('gts.a.b.c.d.v1.0');
-      expect(ids).toContain('gts.a.b.c.e.v1.0');
+      expect(ids).toContain('gts.a.b.c.d.v1~a.b.c.d.v1.0');
+      expect(ids).toContain('gts.a.b.c.e.v1~a.b.c.e.v1.0');
     });
   });
 
@@ -386,6 +411,115 @@ describe('GTS Store Operations', () => {
 
       const missingResult = gts.getAttribute('gts.test.pkg.ns.person.v1.0@missing');
       expect(missingResult.resolved).toBe(false);
+    });
+  });
+
+  describe('OP#12 - Wildcard Validation (v0.7)', () => {
+    test('validates wildcard patterns', () => {
+      const result = validateGtsID('gts.vendor.pkg.*');
+      expect(result.ok).toBe(true);
+      expect(result.is_wildcard).toBe(true);
+    });
+
+    test('rejects wildcards not at token boundaries', () => {
+      expect(isValidGtsID('gts.vendor.pkg.a*')).toBe(false);
+      expect(isValidGtsID('gts.vendor.pkg.*a')).toBe(false);
+    });
+
+    test('rejects wildcards in middle of chain', () => {
+      expect(isValidGtsID('gts.vendor.*.ns.type.v1~')).toBe(false);
+    });
+
+    test('allows wildcards at end of chain', () => {
+      expect(isValidGtsID('gts.vendor.pkg.ns.type.v1~vendor.*')).toBe(true);
+    });
+  });
+
+  describe('OP#13 - Schema Detection (v0.7)', () => {
+    test('detects schema with $schema field', () => {
+      const schema = {
+        $id: 'gts.vendor.pkg.ns.type.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+      };
+      const result = extractID(schema);
+      expect(result.is_schema).toBe(true);
+    });
+
+    test('does not detect schema without $schema field', () => {
+      const notSchema = {
+        $id: 'gts.vendor.pkg.ns.type.v1~',
+        type: 'object',
+        properties: {},
+      };
+      const result = extractID(notSchema);
+      expect(result.is_schema).toBe(false);
+    });
+
+    test('detects schema with GTS $schema reference', () => {
+      const schema = {
+        $id: 'gts.vendor.pkg.ns.derived.v1~',
+        $schema: 'gts://gts.vendor.pkg.ns.type.v1~',
+        type: 'object',
+      };
+      const result = extractID(schema);
+      expect(result.is_schema).toBe(true);
+    });
+  });
+
+  describe('OP#14 - Schema ID Extraction (v0.7)', () => {
+    test('extracts schema_id from chain for instances without explicit schema field', () => {
+      const instance = {
+        gtsId: 'gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.0',
+        data: 'test',
+      };
+      const result = extractID(instance);
+      // v0.7: schema_id is extracted from the chain
+      expect(result.schema_id).toBe('gts.vendor.pkg.ns.type.v1~');
+    });
+
+    test('extracts schema_id from chained instance ID', () => {
+      const instance = {
+        gtsId: 'gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.0',
+        $schema: 'gts.vendor.pkg.ns.type.v1~',
+        data: 'test',
+      };
+      const result = extractID(instance);
+      expect(result.schema_id).toBe('gts.vendor.pkg.ns.type.v1~');
+    });
+
+    test('extracts parent type from derived schema chain', () => {
+      const schema = {
+        $id: 'gts.x.core.events.type.v1~x.commerce.orders.order_placed.v1.0~',
+        $schema: 'gts://gts.x.core.events.type.v1~',
+        type: 'object',
+      };
+      const result = extractID(schema);
+      expect(result.schema_id).toBe('gts.x.core.events.type.v1~');
+    });
+  });
+
+  describe('OP#15 - ParseResult Fields (v0.7)', () => {
+    test('parseGtsID successfully parses type IDs', () => {
+      const result = parseGtsID('gts.vendor.pkg.ns.type.v1~');
+      expect(result.ok).toBe(true);
+      expect(result.segments).toHaveLength(1);
+      expect(result.segments[0].isType).toBe(true);
+    });
+
+    test('parseGtsID successfully parses wildcard patterns', () => {
+      const result = parseGtsID('gts.vendor.pkg.*');
+      expect(result.ok).toBe(true);
+      expect(result.segments).toHaveLength(1);
+      expect(result.segments[0].isWildcard).toBe(true);
+    });
+
+    test('parseGtsID successfully parses chained instance IDs', () => {
+      const result = parseGtsID('gts.vendor.pkg.ns.type.v1~vendor.pkg.ns.instance.v1.0');
+      expect(result.ok).toBe(true);
+      expect(result.segments).toHaveLength(2);
+      expect(result.segments[0].isType).toBe(true);
+      expect(result.segments[1].isType).toBe(false);
     });
   });
 });
