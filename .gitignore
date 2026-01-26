@@ -36,7 +36,6 @@ logs/
 *.log
 
 # Package manager files
-package-lock.json
 yarn.lock
 pnpm-lock.yaml
 
@@ -112,3 +111,6 @@ public/
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Python virtual environment
+.venv/

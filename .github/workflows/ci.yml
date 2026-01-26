@@ -1,0 +1,198 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  pull_request:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+
+# Cancel previous runs for the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_ENV: test
+
+jobs:
+  test:
+    name: Test Suite (${{ matrix.os }}, node=${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        node: [ '20' ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Show Node version
+        run: node --version
+
+      # Formatting check (fast fail for style issues)
+      - name: prettier (check)
+        run: npx prettier --check "src/**/*.ts" "tests/**/*.ts"
+
+      # Linting
+      - name: eslint
+        run: npm run lint
+
+      # Type checking
+      - name: typecheck
+        run: npm run typecheck
+
+      # Build
+      - name: build
+        run: npm run build
+
+      # Unit tests
+      - name: jest
+        run: npm run test
+
+  security:
+    name: Security (npm audit on Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Run security audit but do not fail CI (as requested).
+      - name: npm audit
+        run: npm audit
+        continue-on-error: true
+
+  coverage:
+    name: Code Coverage (jest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Generate coverage report
+      - name: Coverage
+        run: npx jest --coverage --coverageReporters=lcov --coverageReporters=text
+
+      # Upload to Codecov; do not fail CI if Codecov is down/misconfigured.
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: false
+          # token: ${{ secrets.CODECOV_TOKEN }}  # Uncomment if required for private repos
+
+  e2e:
+    name: E2E Tests (gts-spec)
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest and dependencies
+        run: pip install pytest requests httprunner
+
+      - name: Run e2e tests
+        run: |
+          # Start server in background with logs
+          node dist/server/index.js --port 8000 > .server.log 2>&1 &
+          SERVER_PID=$!
+          echo "Started GTS server with PID $SERVER_PID"
+
+          # Wait for server to be ready
+          echo "Waiting for GTS server to start..."
+          for i in $(seq 1 30); do
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "ERROR: Server process died unexpectedly"
+              echo "=== Server logs ==="
+              cat .server.log || true
+              exit 1
+            fi
+            if curl -sf http://127.0.0.1:8000/entities > /dev/null 2>&1; then
+              echo "GTS server is ready!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "ERROR: GTS server failed to start within 30 seconds"
+              echo "=== Server logs ==="
+              cat .server.log || true
+              kill $SERVER_PID 2>/dev/null || true
+              exit 1
+            fi
+            echo "Attempt $i/30: Server not ready yet, waiting..."
+            sleep 1
+          done
+
+          # Run tests
+          pytest -p no:cacheprovider ./.gts-spec/tests -v
+          TEST_EXIT=$?
+
+          # Stop server
+          echo "Stopping GTS server..."
+          kill $SERVER_PID 2>/dev/null || true
+          wait $SERVER_PID 2>/dev/null || true
+
+          exit $TEST_EXIT
