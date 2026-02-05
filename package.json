@@ -47,7 +47,7 @@
     "ajv": "^8.12.0",
     "ajv-formats": "^2.1.1",
     "commander": "^12.0.0",
-    "fastify": "^4.26.0",
+    "fastify": "^5.7.3",
     "fastify-cors": "^6.1.0",
     "uuid": "^9.0.1"
   }
