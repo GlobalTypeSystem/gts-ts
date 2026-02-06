@@ -112,7 +112,7 @@ program
     const gts = loadStore(command.parent);
     const result = gts.checkCompatibility(options.old, options.new, options.mode);
     console.log(JSON.stringify(result, null, 2));
-    process.exit(result.compatible ? 0 : 1);
+    process.exit(result.is_fully_compatible ? 0 : 1);
   });
 
 // OP#9 - Cast

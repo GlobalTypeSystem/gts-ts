@@ -60,12 +60,12 @@ export class GtsCast {
 
       const compatCheck = GtsCompatibility.checkCompatibility(store, fromEntity.schemaId, toSchemaId, 'full');
 
-      if (!compatCheck.compatible) {
+      if (!compatCheck.is_fully_compatible) {
         return {
           ok: false,
           fromId,
           toId: toSchemaId,
-          error: `Schemas are not compatible: ${compatCheck.errors.join('; ')}`,
+          error: `Schemas are not compatible: ${compatCheck.incompatibility_reasons.join('; ')}`,
         };
       }
 
