@@ -275,7 +275,7 @@ describe('GTS Store Operations', () => {
       gts.register(schemaV2);
 
       const result = gts.checkCompatibility('gts.test.pkg.ns.person.v1~', 'gts.test.pkg.ns.person.v2~', 'backward');
-      expect(result.compatible).toBe(true);
+      expect(result.is_fully_compatible).toBe(true);
     });
 
     test('detects incompatible changes', () => {
@@ -303,8 +303,8 @@ describe('GTS Store Operations', () => {
       gts.register(schemaV2);
 
       const result = gts.checkCompatibility('gts.test.pkg.ns.person.v1~', 'gts.test.pkg.ns.person.v2~', 'backward');
-      expect(result.compatible).toBe(false);
-      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.is_fully_compatible).toBe(false);
+      expect(result.incompatibility_reasons.length).toBeGreaterThan(0);
     });
   });
 

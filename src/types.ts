@@ -82,12 +82,20 @@ export interface RelationshipResult {
 }
 
 export interface CompatibilityResult {
-  compatible: boolean;
-  oldId: string;
-  newId: string;
-  mode: 'backward' | 'forward' | 'full';
-  errors: string[];
-  warnings: string[];
+  from: string;
+  to: string;
+  old: string;
+  new: string;
+  direction: string;
+  added_properties: string[];
+  removed_properties: string[];
+  changed_properties: Array<Record<string, string>>;
+  is_fully_compatible: boolean;
+  is_backward_compatible: boolean;
+  is_forward_compatible: boolean;
+  incompatibility_reasons: string[];
+  backward_errors: string[];
+  forward_errors: string[];
 }
 
 export interface CastResult {

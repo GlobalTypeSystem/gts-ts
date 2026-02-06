@@ -7,10 +7,10 @@ export class GtsCompatibility {
     store: GtsStore,
     oldId: string,
     newId: string,
-    mode: 'backward' | 'forward' | 'full' = 'full'
+    _mode: 'backward' | 'forward' | 'full' = 'full'
   ): CompatibilityResult {
-    const errors: string[] = [];
-    const warnings: string[] = [];
+    const backwardErrors: string[] = [];
+    const forwardErrors: string[] = [];
 
     try {
       const oldGtsId = Gts.parseGtsID(oldId);
@@ -20,110 +20,133 @@ export class GtsCompatibility {
       const newEntity = store.get(newGtsId.id);
 
       if (!oldEntity) {
-        errors.push(`Old schema not found: ${oldId}`);
-        return { compatible: false, oldId, newId, mode, errors, warnings };
+        backwardErrors.push(`Old schema not found: ${oldId}`);
+        return this.buildResult(oldId, newId, false, false, false, backwardErrors, forwardErrors);
       }
 
       if (!newEntity) {
-        errors.push(`New schema not found: ${newId}`);
-        return { compatible: false, oldId, newId, mode, errors, warnings };
+        backwardErrors.push(`New schema not found: ${newId}`);
+        return this.buildResult(oldId, newId, false, false, false, backwardErrors, forwardErrors);
       }
 
       if (!oldEntity.isSchema) {
-        errors.push(`Old entity is not a schema: ${oldId}`);
-        return { compatible: false, oldId, newId, mode, errors, warnings };
+        backwardErrors.push(`Old entity is not a schema: ${oldId}`);
+        return this.buildResult(oldId, newId, false, false, false, backwardErrors, forwardErrors);
       }
 
       if (!newEntity.isSchema) {
-        errors.push(`New entity is not a schema: ${newId}`);
-        return { compatible: false, oldId, newId, mode, errors, warnings };
+        backwardErrors.push(`New entity is not a schema: ${newId}`);
+        return this.buildResult(oldId, newId, false, false, false, backwardErrors, forwardErrors);
       }
 
       const oldSchema = oldEntity.content;
       const newSchema = newEntity.content;
 
-      if (mode === 'backward' || mode === 'full') {
-        this.checkBackwardCompatibility(oldSchema, newSchema, errors, warnings);
-      }
+      const isBackward = this.checkBackwardCompatibility(oldSchema, newSchema, backwardErrors);
+      const isForward = this.checkForwardCompatibility(oldSchema, newSchema, forwardErrors);
+      const isFullyCompatible = isBackward && isForward;
 
-      if (mode === 'forward' || mode === 'full') {
-        this.checkForwardCompatibility(oldSchema, newSchema, errors, warnings);
-      }
-
-      return {
-        compatible: errors.length === 0,
-        oldId,
-        newId,
-        mode,
-        errors,
-        warnings,
-      };
+      return this.buildResult(oldId, newId, isFullyCompatible, isBackward, isForward, backwardErrors, forwardErrors);
     } catch (error) {
-      errors.push(error instanceof Error ? error.message : String(error));
-      return {
-        compatible: false,
-        oldId,
-        newId,
-        mode,
-        errors,
-        warnings,
-      };
+      backwardErrors.push(error instanceof Error ? error.message : String(error));
+      return this.buildResult(oldId, newId, false, false, false, backwardErrors, forwardErrors);
     }
   }
 
-  private static checkBackwardCompatibility(
-    oldSchema: any,
-    newSchema: any,
-    errors: string[],
-    warnings: string[]
-  ): void {
+  private static buildResult(
+    oldId: string,
+    newId: string,
+    isFullyCompatible: boolean,
+    isBackward: boolean,
+    isForward: boolean,
+    backwardErrors: string[],
+    forwardErrors: string[]
+  ): CompatibilityResult {
+    return {
+      from: oldId,
+      to: newId,
+      old: oldId,
+      new: newId,
+      direction: this.inferDirection(oldId, newId),
+      added_properties: [],
+      removed_properties: [],
+      changed_properties: [],
+      is_fully_compatible: isFullyCompatible,
+      is_backward_compatible: isBackward,
+      is_forward_compatible: isForward,
+      incompatibility_reasons: [...backwardErrors, ...forwardErrors],
+      backward_errors: backwardErrors,
+      forward_errors: forwardErrors,
+    };
+  }
+
+  private static inferDirection(fromId: string, toId: string): string {
+    try {
+      const fromGtsId = Gts.parseGtsID(fromId);
+      const toGtsId = Gts.parseGtsID(toId);
+
+      if (!fromGtsId.segments.length || !toGtsId.segments.length) {
+        return 'unknown';
+      }
+
+      const fromSeg = fromGtsId.segments[fromGtsId.segments.length - 1];
+      const toSeg = toGtsId.segments[toGtsId.segments.length - 1];
+
+      if (fromSeg.verMajor < toSeg.verMajor) return 'upgrade';
+      if (fromSeg.verMajor > toSeg.verMajor) return 'downgrade';
+      if ((fromSeg.verMinor || 0) < (toSeg.verMinor || 0)) return 'upgrade';
+      if ((fromSeg.verMinor || 0) > (toSeg.verMinor || 0)) return 'downgrade';
+
+      return 'same';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  private static checkBackwardCompatibility(oldSchema: any, newSchema: any, errors: string[]): boolean {
     const oldProps = oldSchema.properties || {};
     const newProps = newSchema.properties || {};
     const oldRequired = new Set(oldSchema.required || []);
-    const newRequired = new Set(newSchema.required || []);
 
-    for (const prop of oldRequired) {
-      if (!newRequired.has(prop)) {
-        warnings.push(`Property '${prop}' is no longer required in new schema`);
-      }
-    }
+    let compatible = true;
 
-    for (const [propName, propSchema] of Object.entries(oldProps)) {
+    for (const propName of Object.keys(oldProps)) {
       if (!(propName in newProps)) {
         if (oldRequired.has(propName)) {
           errors.push(`Required property '${propName}' removed in new schema`);
-        } else {
-          warnings.push(`Optional property '${propName}' removed in new schema`);
+          compatible = false;
         }
       } else {
-        this.checkPropertyCompatibility(propName, propSchema, newProps[propName], errors, warnings, 'backward');
+        if (!this.checkPropertyCompatibility(propName, oldProps[propName], newProps[propName], errors, 'backward')) {
+          compatible = false;
+        }
       }
     }
+
+    return compatible;
   }
 
-  private static checkForwardCompatibility(oldSchema: any, newSchema: any, errors: string[], warnings: string[]): void {
+  private static checkForwardCompatibility(oldSchema: any, newSchema: any, errors: string[]): boolean {
     const oldProps = oldSchema.properties || {};
     const newProps = newSchema.properties || {};
-    const oldRequired = new Set(oldSchema.required || []);
     const newRequired = new Set(newSchema.required || []);
 
-    for (const prop of newRequired) {
-      if (!oldRequired.has(prop)) {
-        errors.push(`New required property '${prop}' added in new schema`);
-      }
-    }
+    let compatible = true;
 
-    for (const [propName, propSchema] of Object.entries(newProps)) {
+    for (const propName of Object.keys(newProps)) {
       if (!(propName in oldProps)) {
         if (newRequired.has(propName)) {
           errors.push(`New required property '${propName}' added`);
-        } else {
-          warnings.push(`New optional property '${propName}' added`);
+          compatible = false;
         }
       } else {
-        this.checkPropertyCompatibility(propName, oldProps[propName], propSchema, errors, warnings, 'forward');
+        if (!this.checkPropertyCompatibility(propName, oldProps[propName], newProps[propName], errors, 'forward')) {
+          compatible = false;
+        }
       }
     }
+
+    return compatible;
   }
 
   private static checkPropertyCompatibility(
@@ -131,17 +154,15 @@ export class GtsCompatibility {
     oldProp: any,
     newProp: any,
     errors: string[],
-    warnings: string[],
     direction: 'backward' | 'forward'
-  ): void {
+  ): boolean {
     const oldType = this.normalizeType(oldProp.type);
     const newType = this.normalizeType(newProp.type);
 
     if (oldType !== newType) {
-      if (this.areTypesCompatible(oldType, newType, direction)) {
-        warnings.push(`Property '${propName}' type changed from ${oldType} to ${newType}`);
-      } else {
+      if (!this.areTypesCompatible(oldType, newType, direction)) {
         errors.push(`Property '${propName}' type incompatibly changed from ${oldType} to ${newType}`);
+        return false;
       }
     }
 
@@ -153,16 +174,13 @@ export class GtsCompatibility {
         for (const value of oldEnum) {
           if (!newEnum.has(value)) {
             errors.push(`Enum value '${value}' removed from property '${propName}'`);
-          }
-        }
-      } else {
-        for (const value of newEnum) {
-          if (!oldEnum.has(value)) {
-            warnings.push(`Enum value '${value}' added to property '${propName}'`);
+            return false;
           }
         }
       }
     }
+
+    return true;
   }
 
   private static normalizeType(type: any): string {

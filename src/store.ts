@@ -1,5 +1,5 @@
 import Ajv from 'ajv';
-import { GtsConfig, JsonEntity, ValidationResult, GTS_URI_PREFIX } from './types';
+import { GtsConfig, JsonEntity, ValidationResult, CompatibilityResult, GTS_URI_PREFIX } from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
 import { XGtsRefValidator } from './x-gts-ref';
@@ -344,7 +344,7 @@ export class GtsStore {
     return (s.startsWith('http://') || s.startsWith('https://')) && s.includes('json-schema.org');
   }
 
-  checkCompatibility(oldSchemaId: string, newSchemaId: string, _mode?: string): any {
+  checkCompatibility(oldSchemaId: string, newSchemaId: string, _mode?: string): CompatibilityResult {
     const oldEntity = this.get(oldSchemaId);
     const newEntity = this.get(newSchemaId);
 
