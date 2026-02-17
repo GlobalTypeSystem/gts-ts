@@ -194,6 +194,9 @@ export class GtsStore {
     const normalized: any = {};
 
     for (const [key, value] of Object.entries(obj)) {
+      // Strip x-gts-ref so Ajv never sees the unknown keyword
+      if (key === 'x-gts-ref') continue;
+
       let newKey = key;
       let newValue = value;
 
@@ -219,6 +222,18 @@ export class GtsStore {
       }
 
       normalized[newKey] = newValue;
+    }
+
+    // Clean up combinator arrays: filter out empty {} subschemas left after stripping x-gts-ref
+    for (const combinator of ['oneOf', 'anyOf', 'allOf']) {
+      if (Array.isArray(normalized[combinator])) {
+        normalized[combinator] = normalized[combinator].filter(
+          (sub: any) => !(sub && typeof sub === 'object' && !Array.isArray(sub) && Object.keys(sub).length === 0)
+        );
+        if (normalized[combinator].length === 0) {
+          delete normalized[combinator];
+        }
+      }
     }
 
     // Normalize $id values

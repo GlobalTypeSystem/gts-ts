@@ -81,6 +81,51 @@ export class XGtsRefValidator {
         });
       }
     }
+
+    // Recurse into combinator subschemas
+    if (Array.isArray(schema.allOf)) {
+      for (const subSchema of schema.allOf) {
+        this.visitInstance(instance, subSchema, path, rootSchema, errors);
+      }
+    }
+
+    if (Array.isArray(schema.anyOf)) {
+      // Pass if at least one subschema produces zero errors
+      const branchResults = schema.anyOf.map((subSchema: any) => {
+        const branchErrors: XGtsRefValidationError[] = [];
+        this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
+        return branchErrors;
+      });
+      const anyPassed = branchResults.some((errs: XGtsRefValidationError[]) => errs.length === 0);
+      if (!anyPassed && branchResults.length > 0) {
+        // Report all errors from all branches
+        for (const branchErrors of branchResults) {
+          errors.push(...branchErrors);
+        }
+      }
+    }
+
+    if (Array.isArray(schema.oneOf)) {
+      const branchResults = schema.oneOf.map((subSchema: any) => {
+        const branchErrors: XGtsRefValidationError[] = [];
+        this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
+        return branchErrors;
+      });
+      const passingCount = branchResults.filter((errs: XGtsRefValidationError[]) => errs.length === 0).length;
+      if (passingCount === 0) {
+        // No branch matched — report all branch errors
+        for (const branchErrors of branchResults) {
+          errors.push(...branchErrors);
+        }
+      } else if (passingCount > 1) {
+        errors.push({
+          fieldPath: path || '/',
+          value: instance,
+          refPattern: '',
+          reason: `Value matches ${passingCount} oneOf branches but must match exactly one`,
+        });
+      }
+    }
   }
 
   private visitSchema(schema: any, path: string, rootSchema: any, errors: XGtsRefValidationError[]): void {
