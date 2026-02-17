@@ -806,6 +806,99 @@ describe('GTS Store Operations', () => {
         const res = g.validateInstance(inst.gtsId);
         expect(res.ok).toBe(true);
       });
+
+      test('non-GTS-ID value passes via plain branch', () => {
+        const schema = {
+          $$id: 'gts.test.pkg.ns.mixed_oneof2.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            ref: {
+              type: 'string',
+              oneOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }, { maxLength: 10 }],
+            },
+          },
+          required: ['ref'],
+        };
+
+        const g = new GTS({ validateRefs: false });
+        g.register(refTargetA);
+        g.register(schema);
+
+        // "hello" is not a GTS ID but satisfies maxLength: 10
+        const inst = {
+          gtsId: 'gts.test.pkg.ns.mixed_oneof2.v1~test.pkg.ns.m2.v1.0',
+          $schema: 'gts.test.pkg.ns.mixed_oneof2.v1~',
+          ref: 'hello',
+        };
+        g.register(inst);
+
+        const res = g.validateInstance(inst.gtsId);
+        expect(res.ok).toBe(true);
+      });
+    });
+
+    describe('anyOf with mixed x-gts-ref and plain branches', () => {
+      test('non-GTS-ID value passes via plain branch', () => {
+        const schema = {
+          $$id: 'gts.test.pkg.ns.mixed_anyof.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            ref: {
+              type: 'string',
+              anyOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }, { minLength: 1 }],
+            },
+          },
+          required: ['ref'],
+        };
+
+        const g = new GTS({ validateRefs: false });
+        g.register(refTargetA);
+        g.register(schema);
+
+        // "hello" is not a GTS ID but satisfies minLength: 1
+        const inst = {
+          gtsId: 'gts.test.pkg.ns.mixed_anyof.v1~test.pkg.ns.m1.v1.0',
+          $schema: 'gts.test.pkg.ns.mixed_anyof.v1~',
+          ref: 'hello',
+        };
+        g.register(inst);
+
+        const res = g.validateInstance(inst.gtsId);
+        expect(res.ok).toBe(true);
+      });
+    });
+
+    describe('normalizeSchema preserves intentional empty subschemas', () => {
+      test('intentional {} in oneOf is not stripped', () => {
+        const schema = {
+          $$id: 'gts.test.pkg.ns.empty_branch.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            value: {
+              oneOf: [{}, { type: 'number' }],
+            },
+          },
+          required: ['value'],
+        };
+
+        const g = new GTS({ validateRefs: false });
+        g.register(schema);
+
+        // value: 42 matches both {} (accepts anything) and {type: "number"}
+        // If {} is preserved, oneOf fails (2 matches). If stripped, oneOf passes (1 match).
+        const inst = {
+          gtsId: 'gts.test.pkg.ns.empty_branch.v1~test.pkg.ns.e1.v1.0',
+          $schema: 'gts.test.pkg.ns.empty_branch.v1~',
+          value: 42,
+        };
+        g.register(inst);
+
+        const res = g.validateInstance(inst.gtsId);
+        expect(res.ok).toBe(false);
+      });
     });
   });
 

@@ -90,9 +90,9 @@ export class XGtsRefValidator {
     }
 
     if (Array.isArray(schema.anyOf)) {
-      // Only evaluate branches that contain x-gts-ref constraints
+      // Only enforce when all branches have x-gts-ref; mixed branches may be valid via non-x-gts-ref path (Ajv handles that)
       const refBranches = schema.anyOf.filter((s: any) => this.containsXGtsRef(s));
-      if (refBranches.length > 0) {
+      if (refBranches.length > 0 && refBranches.length === schema.anyOf.length) {
         const branchResults = refBranches.map((subSchema: any) => {
           const branchErrors: XGtsRefValidationError[] = [];
           this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
@@ -108,9 +108,9 @@ export class XGtsRefValidator {
     }
 
     if (Array.isArray(schema.oneOf)) {
-      // Only evaluate branches that contain x-gts-ref constraints
+      // Only enforce when all branches have x-gts-ref; mixed branches can't be coordinated with Ajv's branch selection
       const refBranches = schema.oneOf.filter((s: any) => this.containsXGtsRef(s));
-      if (refBranches.length > 0) {
+      if (refBranches.length > 0 && refBranches.length === schema.oneOf.length) {
         const branchResults = refBranches.map((subSchema: any) => {
           const branchErrors: XGtsRefValidationError[] = [];
           this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
