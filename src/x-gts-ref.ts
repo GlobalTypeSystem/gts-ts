@@ -90,40 +90,45 @@ export class XGtsRefValidator {
     }
 
     if (Array.isArray(schema.anyOf)) {
-      // Pass if at least one subschema produces zero errors
-      const branchResults = schema.anyOf.map((subSchema: any) => {
-        const branchErrors: XGtsRefValidationError[] = [];
-        this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
-        return branchErrors;
-      });
-      const anyPassed = branchResults.some((errs: XGtsRefValidationError[]) => errs.length === 0);
-      if (!anyPassed && branchResults.length > 0) {
-        // Report all errors from all branches
-        for (const branchErrors of branchResults) {
-          errors.push(...branchErrors);
+      // Only evaluate branches that contain x-gts-ref constraints
+      const refBranches = schema.anyOf.filter((s: any) => this.containsXGtsRef(s));
+      if (refBranches.length > 0) {
+        const branchResults = refBranches.map((subSchema: any) => {
+          const branchErrors: XGtsRefValidationError[] = [];
+          this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
+          return branchErrors;
+        });
+        const anyPassed = branchResults.some((errs: XGtsRefValidationError[]) => errs.length === 0);
+        if (!anyPassed) {
+          for (const branchErrors of branchResults) {
+            errors.push(...branchErrors);
+          }
         }
       }
     }
 
     if (Array.isArray(schema.oneOf)) {
-      const branchResults = schema.oneOf.map((subSchema: any) => {
-        const branchErrors: XGtsRefValidationError[] = [];
-        this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
-        return branchErrors;
-      });
-      const passingCount = branchResults.filter((errs: XGtsRefValidationError[]) => errs.length === 0).length;
-      if (passingCount === 0) {
-        // No branch matched — report all branch errors
-        for (const branchErrors of branchResults) {
-          errors.push(...branchErrors);
-        }
-      } else if (passingCount > 1) {
-        errors.push({
-          fieldPath: path || '/',
-          value: instance,
-          refPattern: '',
-          reason: `Value matches ${passingCount} oneOf branches but must match exactly one`,
+      // Only evaluate branches that contain x-gts-ref constraints
+      const refBranches = schema.oneOf.filter((s: any) => this.containsXGtsRef(s));
+      if (refBranches.length > 0) {
+        const branchResults = refBranches.map((subSchema: any) => {
+          const branchErrors: XGtsRefValidationError[] = [];
+          this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
+          return branchErrors;
         });
+        const passingCount = branchResults.filter((errs: XGtsRefValidationError[]) => errs.length === 0).length;
+        if (passingCount === 0) {
+          for (const branchErrors of branchResults) {
+            errors.push(...branchErrors);
+          }
+        } else if (passingCount > 1) {
+          errors.push({
+            fieldPath: path || '/',
+            value: instance,
+            refPattern: '',
+            reason: `Value matches ${passingCount} oneOf branches but must match exactly one`,
+          });
+        }
       }
     }
   }
@@ -343,6 +348,19 @@ export class XGtsRefValidator {
     }
 
     return null;
+  }
+
+  private containsXGtsRef(schema: any): boolean {
+    if (!schema || typeof schema !== 'object') return false;
+    if (schema['x-gts-ref'] !== undefined) return true;
+    for (const value of Object.values(schema)) {
+      if (Array.isArray(value)) {
+        if (value.some((item) => this.containsXGtsRef(item))) return true;
+      } else if (value && typeof value === 'object') {
+        if (this.containsXGtsRef(value)) return true;
+      }
+    }
+    return false;
   }
 
   /**

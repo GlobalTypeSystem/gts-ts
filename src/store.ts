@@ -224,12 +224,19 @@ export class GtsStore {
       normalized[newKey] = newValue;
     }
 
-    // Clean up combinator arrays: filter out empty {} subschemas left after stripping x-gts-ref
+    // Clean up combinator arrays: remove subschemas that were x-gts-ref-only (now empty after stripping)
     for (const combinator of ['oneOf', 'anyOf', 'allOf']) {
       if (Array.isArray(normalized[combinator])) {
-        normalized[combinator] = normalized[combinator].filter(
-          (sub: any) => !(sub && typeof sub === 'object' && !Array.isArray(sub) && Object.keys(sub).length === 0)
-        );
+        normalized[combinator] = normalized[combinator].filter((_sub: any, idx: number) => {
+          const original = (obj as any)[combinator]?.[idx];
+          const isXGtsRefOnly =
+            original &&
+            typeof original === 'object' &&
+            !Array.isArray(original) &&
+            Object.keys(original).length === 1 &&
+            original['x-gts-ref'] !== undefined;
+          return !isXGtsRefOnly;
+        });
         if (normalized[combinator].length === 0) {
           delete normalized[combinator];
         }

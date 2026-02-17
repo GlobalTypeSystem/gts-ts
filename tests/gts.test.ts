@@ -449,10 +449,7 @@ describe('GTS Store Operations', () => {
         properties: {
           ref: {
             type: 'string',
-            oneOf: [
-              { 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' },
-              { 'x-gts-ref': 'gts.test.pkg.ns.target_b.*' },
-            ],
+            oneOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }, { 'x-gts-ref': 'gts.test.pkg.ns.target_b.*' }],
           },
         },
         required: ['ref'],
@@ -530,29 +527,26 @@ describe('GTS Store Operations', () => {
     });
 
     describe('anyOf with x-gts-ref', () => {
-      test('passes when matching any branch', () => {
-        const schema = {
-          $$id: 'gts.test.pkg.ns.anyof_ref.v1~',
-          $$schema: 'http://json-schema.org/draft-07/schema#',
-          type: 'object',
-          properties: {
-            ref: {
-              type: 'string',
-              anyOf: [
-                { 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' },
-                { 'x-gts-ref': 'gts.test.pkg.ns.target_b.*' },
-              ],
-            },
+      const anyOfSchema = {
+        $$id: 'gts.test.pkg.ns.anyof_ref.v1~',
+        $$schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: {
+          ref: {
+            type: 'string',
+            anyOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }, { 'x-gts-ref': 'gts.test.pkg.ns.target_b.*' }],
           },
-          required: ['ref'],
-        };
+        },
+        required: ['ref'],
+      };
 
+      test('passes when matching any branch', () => {
         const g = new GTS({ validateRefs: false });
         g.register(refTargetA);
         g.register(refTargetB);
         g.register(instanceA);
         g.register(instanceB);
-        g.register(schema);
+        g.register(anyOfSchema);
 
         const inst = {
           gtsId: 'gts.test.pkg.ns.anyof_ref.v1~test.pkg.ns.i1.v1.0',
@@ -563,6 +557,38 @@ describe('GTS Store Operations', () => {
 
         const res = g.validateInstance(inst.gtsId);
         expect(res.ok).toBe(true);
+      });
+
+      test('rejects when no branch matches', () => {
+        const g = new GTS({ validateRefs: false });
+        g.register(refTargetA);
+        g.register(refTargetB);
+        g.register(instanceA);
+        g.register(instanceB);
+        g.register(anyOfSchema);
+
+        const otherSchema = {
+          $$id: 'gts.test.pkg.ns.other.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+        };
+        const otherInst = {
+          gtsId: 'gts.test.pkg.ns.other.v1~test.pkg.ns.o1.v1.0',
+          $schema: 'gts.test.pkg.ns.other.v1~',
+        };
+        g.register(otherSchema);
+        g.register(otherInst);
+
+        const inst = {
+          gtsId: 'gts.test.pkg.ns.anyof_ref.v1~test.pkg.ns.i2.v1.0',
+          $schema: 'gts.test.pkg.ns.anyof_ref.v1~',
+          ref: 'gts.test.pkg.ns.other.v1~test.pkg.ns.o1.v1.0',
+        };
+        g.register(inst);
+
+        const res = g.validateInstance(inst.gtsId);
+        expect(res.ok).toBe(false);
+        expect(res.error).toContain('x-gts-ref');
       });
     });
 
@@ -575,9 +601,7 @@ describe('GTS Store Operations', () => {
           properties: {
             ref: {
               type: 'string',
-              allOf: [
-                { 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' },
-              ],
+              allOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }],
             },
           },
           required: ['ref'],
@@ -591,6 +615,190 @@ describe('GTS Store Operations', () => {
         const inst = {
           gtsId: 'gts.test.pkg.ns.allof_ref.v1~test.pkg.ns.i1.v1.0',
           $schema: 'gts.test.pkg.ns.allof_ref.v1~',
+          ref: 'gts.test.pkg.ns.target_a.v1~test.pkg.ns.a1.v1.0',
+        };
+        g.register(inst);
+
+        const res = g.validateInstance(inst.gtsId);
+        expect(res.ok).toBe(true);
+      });
+
+      test('rejects when one branch fails', () => {
+        const schema = {
+          $$id: 'gts.test.pkg.ns.allof_strict.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            ref: {
+              type: 'string',
+              allOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }, { 'x-gts-ref': 'gts.test.pkg.ns.target_b.*' }],
+            },
+          },
+          required: ['ref'],
+        };
+
+        const g = new GTS({ validateRefs: false });
+        g.register(refTargetA);
+        g.register(refTargetB);
+        g.register(instanceA);
+        g.register(schema);
+
+        // Value matches target_a but not target_b — allOf requires both
+        const inst = {
+          gtsId: 'gts.test.pkg.ns.allof_strict.v1~test.pkg.ns.i1.v1.0',
+          $schema: 'gts.test.pkg.ns.allof_strict.v1~',
+          ref: 'gts.test.pkg.ns.target_a.v1~test.pkg.ns.a1.v1.0',
+        };
+        g.register(inst);
+
+        const res = g.validateInstance(inst.gtsId);
+        expect(res.ok).toBe(false);
+        expect(res.error).toContain('x-gts-ref');
+      });
+    });
+
+    describe('oneOf with overlapping patterns', () => {
+      test('rejects when value matches both branches', () => {
+        const schema = {
+          $$id: 'gts.test.pkg.ns.oneof_overlap.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            ref: {
+              type: 'string',
+              oneOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.*' }, { 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }],
+            },
+          },
+          required: ['ref'],
+        };
+
+        const g = new GTS({ validateRefs: false });
+        g.register(refTargetA);
+        g.register(instanceA);
+        g.register(schema);
+
+        // Value matches both patterns — oneOf requires exactly one
+        const inst = {
+          gtsId: 'gts.test.pkg.ns.oneof_overlap.v1~test.pkg.ns.i1.v1.0',
+          $schema: 'gts.test.pkg.ns.oneof_overlap.v1~',
+          ref: 'gts.test.pkg.ns.target_a.v1~test.pkg.ns.a1.v1.0',
+        };
+        g.register(inst);
+
+        const res = g.validateInstance(inst.gtsId);
+        expect(res.ok).toBe(false);
+        expect(res.error).toContain('oneOf');
+      });
+    });
+
+    describe('nested combinators', () => {
+      test('allOf wrapping oneOf traverses correctly', () => {
+        const schema = {
+          $$id: 'gts.test.pkg.ns.nested_comb.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            ref: {
+              type: 'string',
+              allOf: [
+                {
+                  oneOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }, { 'x-gts-ref': 'gts.test.pkg.ns.target_b.*' }],
+                },
+              ],
+            },
+          },
+          required: ['ref'],
+        };
+
+        const g = new GTS({ validateRefs: false });
+        g.register(refTargetA);
+        g.register(refTargetB);
+        g.register(instanceA);
+        g.register(instanceB);
+        g.register(schema);
+
+        const validInst = {
+          gtsId: 'gts.test.pkg.ns.nested_comb.v1~test.pkg.ns.i1.v1.0',
+          $schema: 'gts.test.pkg.ns.nested_comb.v1~',
+          ref: 'gts.test.pkg.ns.target_b.v1~test.pkg.ns.b1.v1.0',
+        };
+        g.register(validInst);
+
+        const res = g.validateInstance(validInst.gtsId);
+        expect(res.ok).toBe(true);
+      });
+
+      test('allOf wrapping oneOf rejects when no inner branch matches', () => {
+        const schema = {
+          $$id: 'gts.test.pkg.ns.nested_comb2.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            ref: {
+              type: 'string',
+              allOf: [
+                {
+                  oneOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }, { 'x-gts-ref': 'gts.test.pkg.ns.target_b.*' }],
+                },
+              ],
+            },
+          },
+          required: ['ref'],
+        };
+
+        const g = new GTS({ validateRefs: false });
+        g.register(refTargetA);
+        g.register(refTargetB);
+        g.register(schema);
+
+        const otherSchema = {
+          $$id: 'gts.test.pkg.ns.other.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+        };
+        const otherInst = {
+          gtsId: 'gts.test.pkg.ns.other.v1~test.pkg.ns.o1.v1.0',
+          $schema: 'gts.test.pkg.ns.other.v1~',
+        };
+        g.register(otherSchema);
+        g.register(otherInst);
+
+        const inst = {
+          gtsId: 'gts.test.pkg.ns.nested_comb2.v1~test.pkg.ns.i1.v1.0',
+          $schema: 'gts.test.pkg.ns.nested_comb2.v1~',
+          ref: 'gts.test.pkg.ns.other.v1~test.pkg.ns.o1.v1.0',
+        };
+        g.register(inst);
+
+        const res = g.validateInstance(inst.gtsId);
+        expect(res.ok).toBe(false);
+        expect(res.error).toContain('x-gts-ref');
+      });
+    });
+
+    describe('oneOf with mixed x-gts-ref and plain branches', () => {
+      test('non-x-gts-ref branches do not interfere with counting', () => {
+        const schema = {
+          $$id: 'gts.test.pkg.ns.mixed_oneof.v1~',
+          $$schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            ref: {
+              type: 'string',
+              oneOf: [{ 'x-gts-ref': 'gts.test.pkg.ns.target_a.*' }, { minLength: 1 }],
+            },
+          },
+          required: ['ref'],
+        };
+
+        const g = new GTS({ validateRefs: false });
+        g.register(refTargetA);
+        g.register(instanceA);
+        g.register(schema);
+
+        const inst = {
+          gtsId: 'gts.test.pkg.ns.mixed_oneof.v1~test.pkg.ns.m1.v1.0',
+          $schema: 'gts.test.pkg.ns.mixed_oneof.v1~',
           ref: 'gts.test.pkg.ns.target_a.v1~test.pkg.ns.a1.v1.0',
         };
         g.register(inst);
