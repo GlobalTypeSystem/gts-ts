@@ -72,3 +72,12 @@ export interface AttributeParams {
   gts_id: string;
   path: string;
 }
+
+export interface ValidateSchemaBody {
+  schema_id: string;
+}
+
+export interface ValidateEntityBody {
+  entity_id?: string;
+  gts_id?: string;
+}

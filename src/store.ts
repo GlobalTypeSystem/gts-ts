@@ -4,6 +4,13 @@ import { Gts } from './gts';
 import { GtsExtractor } from './extract';
 import { XGtsRefValidator } from './x-gts-ref';
 
+interface ResolvedSchema {
+  properties: Record<string, any>;
+  required: string[];
+  additionalProperties?: boolean;
+  type?: string;
+}
+
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   private config: GtsConfig;
@@ -194,6 +201,9 @@ export class GtsStore {
     const normalized: any = {};
 
     for (const [key, value] of Object.entries(obj)) {
+      // Strip x-gts-ref so Ajv never sees the unknown keyword
+      if (key === 'x-gts-ref') continue;
+
       let newKey = key;
       let newValue = value;
 
@@ -219,6 +229,25 @@ export class GtsStore {
       }
 
       normalized[newKey] = newValue;
+    }
+
+    // Clean up combinator arrays: remove subschemas that were x-gts-ref-only (now empty after stripping)
+    for (const combinator of ['oneOf', 'anyOf', 'allOf']) {
+      if (Array.isArray(normalized[combinator])) {
+        normalized[combinator] = normalized[combinator].filter((_sub: any, idx: number) => {
+          const original = (obj as any)[combinator]?.[idx];
+          const isXGtsRefOnly =
+            original &&
+            typeof original === 'object' &&
+            !Array.isArray(original) &&
+            Object.keys(original).length === 1 &&
+            original['x-gts-ref'] !== undefined;
+          return !isXGtsRefOnly;
+        });
+        if (normalized[combinator].length === 0) {
+          delete normalized[combinator];
+        }
+      }
     }
 
     // Normalize $id values
@@ -1051,6 +1080,425 @@ export class GtsStore {
   private deduplicate(arr: string[]): string[] {
     const unique = Array.from(new Set(arr));
     return unique.sort();
+  }
+
+  validateSchemaAgainstParent(schemaId: string): ValidationResult {
+    const entity = this.get(schemaId);
+    if (!entity) {
+      return { id: schemaId, ok: false, error: `Entity not found: ${schemaId}` };
+    }
+    if (!entity.isSchema) {
+      return { id: schemaId, ok: false, error: `Entity is not a schema: ${schemaId}` };
+    }
+
+    const content = entity.content;
+
+    // Find parent reference in allOf
+    const parentRef = this.findParentRef(content);
+    if (!parentRef) {
+      // Base schema with no parent → always valid
+      return { id: schemaId, ok: true, error: '' };
+    }
+
+    // Resolve parent entity
+    const parentId = parentRef.startsWith(GTS_URI_PREFIX) ? parentRef.substring(GTS_URI_PREFIX.length) : parentRef;
+    const parentEntity = this.get(parentId);
+    if (!parentEntity) {
+      return { id: schemaId, ok: false, error: `Parent schema not found: ${parentId}` };
+    }
+    if (!parentEntity.isSchema || !parentEntity.content) {
+      return { id: schemaId, ok: false, error: `Parent entity is not a schema: ${parentId}` };
+    }
+
+    // Resolve parent's effective (fully flattened) schema
+    const resolvedParent = this.resolveSchemaFully(parentEntity.content);
+
+    // Extract overlay from derived schema (non-$ref subschemas in allOf + top-level)
+    const overlay = this.extractOverlay(content);
+
+    // Compare overlay against resolved parent
+    const errors = this.compareOverlayToBase(overlay, resolvedParent, '');
+    if (errors.length > 0) {
+      return { id: schemaId, ok: false, error: errors.join('; ') };
+    }
+
+    return { id: schemaId, ok: true, error: '' };
+  }
+
+  private findParentRef(schema: any): string | null {
+    if (!schema || !schema.allOf || !Array.isArray(schema.allOf)) {
+      return null;
+    }
+    for (const sub of schema.allOf) {
+      if (sub && typeof sub === 'object') {
+        const ref = sub['$$ref'] || sub['$ref'];
+        if (typeof ref === 'string') {
+          return ref;
+        }
+      }
+    }
+    return null;
+  }
+
+  private resolveSchemaFully(schema: any, visited: Set<string> = new Set()): ResolvedSchema {
+    const result: ResolvedSchema = {
+      properties: {},
+      required: [],
+      additionalProperties: undefined,
+      type: schema.type,
+    };
+
+    // If this schema has allOf, resolve each part
+    if (schema.allOf && Array.isArray(schema.allOf)) {
+      for (const sub of schema.allOf) {
+        const ref = sub['$$ref'] || sub['$ref'];
+        if (typeof ref === 'string') {
+          // Resolve referenced schema
+          const refId = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+          if (visited.has(refId)) {
+            continue;
+          }
+          visited.add(refId);
+          const refEntity = this.get(refId);
+          if (refEntity && refEntity.content) {
+            const resolved = this.resolveSchemaFully(refEntity.content, visited);
+            Object.assign(result.properties, resolved.properties);
+            if (resolved.required) {
+              result.required.push(...resolved.required);
+            }
+            if (resolved.additionalProperties !== undefined) {
+              result.additionalProperties = resolved.additionalProperties;
+            }
+            if (resolved.type && !result.type) {
+              result.type = resolved.type;
+            }
+          }
+        } else {
+          // Non-ref subschema - merge it
+          const resolved = this.resolveSchemaFully(sub, visited);
+          // For overlay properties, merge them (they override)
+          for (const [propName, propSchema] of Object.entries(resolved.properties || {})) {
+            if (result.properties[propName]) {
+              // Merge property constraints - overlay tightens base
+              result.properties[propName] = this.mergePropertySchemas(result.properties[propName], propSchema);
+            } else {
+              result.properties[propName] = propSchema;
+            }
+          }
+          if (resolved.required) {
+            result.required.push(...resolved.required);
+          }
+          if (resolved.additionalProperties !== undefined) {
+            result.additionalProperties = resolved.additionalProperties;
+          }
+        }
+      }
+    }
+
+    // Add direct properties
+    if (schema.properties) {
+      for (const [propName, propSchema] of Object.entries(schema.properties)) {
+        if (result.properties[propName]) {
+          result.properties[propName] = this.mergePropertySchemas(result.properties[propName], propSchema);
+        } else {
+          result.properties[propName] = propSchema;
+        }
+      }
+    }
+
+    // Add direct required
+    if (schema.required && Array.isArray(schema.required)) {
+      result.required.push(...schema.required);
+    }
+
+    // Direct additionalProperties
+    if (schema.additionalProperties !== undefined) {
+      result.additionalProperties = schema.additionalProperties;
+    }
+
+    // Deduplicate required
+    result.required = Array.from(new Set(result.required));
+
+    return result;
+  }
+
+  private mergePropertySchemas(base: any, overlay: any): any {
+    if (base === false || overlay === false) {
+      return false;
+    }
+    if (typeof base !== 'object' || typeof overlay !== 'object') {
+      return overlay;
+    }
+    const merged: any = { ...base };
+    for (const [key, val] of Object.entries(overlay)) {
+      if (key === 'properties' && merged.properties) {
+        merged.properties = { ...merged.properties, ...(val as any) };
+      } else if (key === 'required' && merged.required) {
+        const mergedReq = new Set([...(merged.required as string[]), ...(val as string[])]);
+        merged.required = Array.from(mergedReq);
+      } else {
+        merged[key] = val;
+      }
+    }
+    return merged;
+  }
+
+  private extractOverlay(schema: any): ResolvedSchema {
+    const overlay: ResolvedSchema = {
+      properties: {},
+      required: [],
+      additionalProperties: undefined,
+    };
+
+    if (schema.allOf && Array.isArray(schema.allOf)) {
+      for (const sub of schema.allOf) {
+        const ref = sub['$$ref'] || sub['$ref'];
+        if (typeof ref === 'string') {
+          continue; // Skip ref subschemas
+        }
+        // This is a non-ref overlay subschema
+        if (sub.properties) {
+          for (const [propName, propSchema] of Object.entries(sub.properties)) {
+            overlay.properties[propName] = overlay.properties[propName]
+              ? this.mergePropertySchemas(overlay.properties[propName], propSchema)
+              : propSchema;
+          }
+        }
+        if (sub.required && Array.isArray(sub.required)) {
+          overlay.required.push(...sub.required);
+        }
+        if (sub.additionalProperties !== undefined) {
+          overlay.additionalProperties = sub.additionalProperties;
+        }
+      }
+    }
+
+    // Add top-level properties (outside allOf)
+    if (schema.properties) {
+      for (const [propName, propSchema] of Object.entries(schema.properties)) {
+        overlay.properties[propName] = overlay.properties[propName]
+          ? this.mergePropertySchemas(overlay.properties[propName], propSchema)
+          : propSchema;
+      }
+    }
+    if (schema.required && Array.isArray(schema.required)) {
+      overlay.required.push(...schema.required);
+    }
+    if (schema.additionalProperties !== undefined && overlay.additionalProperties === undefined) {
+      overlay.additionalProperties = schema.additionalProperties;
+    }
+
+    return overlay;
+  }
+
+  private compareOverlayToBase(overlay: ResolvedSchema, baseResolved: ResolvedSchema, path: string): string[] {
+    const errors: string[] = [];
+    const overlayProps = overlay.properties || {};
+    const baseProps = baseResolved.properties || {};
+
+    for (const [propName, propSchema] of Object.entries(overlayProps)) {
+      const propPath = path ? `${path}.${propName}` : propName;
+
+      // Property schema set to false
+      if (propSchema === false) {
+        if (baseProps[propName] !== undefined) {
+          errors.push(`Property '${propPath}' is set to false but exists in base`);
+        }
+        continue;
+      }
+
+      const baseProp = baseProps[propName];
+
+      if (baseProp === undefined || baseProp === null) {
+        // New property not in base
+        if (baseResolved.additionalProperties === false) {
+          errors.push(`Property '${propPath}' not in base and base has additionalProperties: false`);
+        }
+        continue;
+      }
+
+      if (baseProp === false) {
+        // Base already set property to false, overlay can't use it
+        errors.push(`Property '${propPath}' is forbidden in base`);
+        continue;
+      }
+
+      // Both base and overlay have this property — compare constraints
+      if (typeof propSchema === 'object' && propSchema !== null) {
+        errors.push(...this.comparePropertyConstraints(propSchema, baseProp, propPath));
+      }
+    }
+
+    // Check additionalProperties
+    if (baseResolved.additionalProperties === false) {
+      if (overlay.additionalProperties === true) {
+        errors.push('Cannot loosen additionalProperties from false to true');
+      } else if (overlay.additionalProperties === undefined) {
+        errors.push('Base has additionalProperties: false but derived does not restate it');
+      }
+    }
+
+    return errors;
+  }
+
+  private comparePropertyConstraints(derived: any, base: any, propPath: string): string[] {
+    const errors: string[] = [];
+
+    if (typeof base !== 'object' || base === null) {
+      return errors;
+    }
+
+    // Type check
+    const baseType = base.type;
+    const derivedType = derived.type;
+    if (baseType !== undefined && derivedType !== undefined) {
+      if (Array.isArray(derivedType)) {
+        // Derived has array type — widening (fail)
+        if (!Array.isArray(baseType)) {
+          errors.push(`Property '${propPath}' widens type from '${baseType}' to array`);
+          return errors;
+        }
+      }
+      if (Array.isArray(baseType)) {
+        if (!Array.isArray(derivedType)) {
+          // Could be narrowing from array type
+          if (!baseType.includes(derivedType)) {
+            errors.push(`Property '${propPath}' type '${derivedType}' not in base types [${baseType}]`);
+            return errors;
+          }
+        }
+      } else if (!Array.isArray(derivedType)) {
+        // Both scalar types
+        if (baseType !== derivedType) {
+          errors.push(`Property '${propPath}' type changed from '${baseType}' to '${derivedType}'`);
+          return errors;
+        }
+      }
+    }
+
+    // Determine if the overlay adds any NEW constraint keywords not in the base.
+    // Under allOf semantics, base constraints are preserved. Drops are only flagged
+    // when the overlay doesn't introduce any new tightening constraints.
+    const CONSTRAINT_KEYWORDS = [
+      'maxLength',
+      'minLength',
+      'maximum',
+      'minimum',
+      'maxItems',
+      'minItems',
+      'enum',
+      'const',
+      'pattern',
+      'items',
+    ];
+    const baseConstraintKeys = new Set(CONSTRAINT_KEYWORDS.filter((kw) => base[kw] !== undefined));
+    const derivedConstraintKeys = new Set(CONSTRAINT_KEYWORDS.filter((kw) => derived[kw] !== undefined));
+    const hasNewConstraints = [...derivedConstraintKeys].some((kw) => !baseConstraintKeys.has(kw));
+
+    // Max constraints (tightening = lower value OK; loosening = higher value FAIL)
+    for (const kw of ['maxLength', 'maximum', 'maxItems']) {
+      if (base[kw] !== undefined) {
+        if (derived[kw] === undefined) {
+          if (!hasNewConstraints) {
+            errors.push(`Property '${propPath}' drops constraint '${kw}'`);
+          }
+        } else if (derived[kw] > base[kw]) {
+          errors.push(`Property '${propPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
+        }
+      }
+    }
+
+    // Min constraints (tightening = higher value OK; loosening = lower value FAIL)
+    for (const kw of ['minLength', 'minimum', 'minItems']) {
+      if (base[kw] !== undefined) {
+        if (derived[kw] === undefined) {
+          if (!hasNewConstraints) {
+            errors.push(`Property '${propPath}' drops constraint '${kw}'`);
+          }
+        } else if (derived[kw] < base[kw]) {
+          errors.push(`Property '${propPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
+        }
+      }
+    }
+
+    // Enum check
+    if (base.enum !== undefined) {
+      if (derived.enum === undefined) {
+        if (!hasNewConstraints) {
+          errors.push(`Property '${propPath}' drops constraint 'enum'`);
+        }
+      } else {
+        const baseSet = new Set(base.enum.map((v: any) => JSON.stringify(v)));
+        for (const val of derived.enum) {
+          if (!baseSet.has(JSON.stringify(val))) {
+            errors.push(`Property '${propPath}' enum value '${val}' not in base enum`);
+          }
+        }
+      }
+    }
+
+    // Const check
+    if (base.const !== undefined) {
+      if (derived.const === undefined) {
+        if (!hasNewConstraints) {
+          errors.push(`Property '${propPath}' drops constraint 'const'`);
+        }
+      } else if (JSON.stringify(base.const) !== JSON.stringify(derived.const)) {
+        errors.push(
+          `Property '${propPath}' const conflict: ${JSON.stringify(derived.const)} vs base ${JSON.stringify(base.const)}`
+        );
+      }
+    }
+    // Check const in derived against base numeric constraints
+    if (derived.const !== undefined && typeof derived.const === 'number') {
+      if (base.minimum !== undefined && derived.const < base.minimum) {
+        errors.push(`Property '${propPath}' const ${derived.const} violates base minimum ${base.minimum}`);
+      }
+      if (base.maximum !== undefined && derived.const > base.maximum) {
+        errors.push(`Property '${propPath}' const ${derived.const} violates base maximum ${base.maximum}`);
+      }
+    }
+
+    // Pattern check
+    if (base.pattern !== undefined) {
+      if (derived.pattern === undefined) {
+        if (!hasNewConstraints) {
+          errors.push(`Property '${propPath}' drops constraint 'pattern'`);
+        }
+      } else if (base.pattern !== derived.pattern) {
+        errors.push(`Property '${propPath}' pattern changed from '${base.pattern}' to '${derived.pattern}'`);
+      }
+    }
+
+    // Items check (array items)
+    if (base.items !== undefined) {
+      if (derived.items === undefined) {
+        if (!hasNewConstraints) {
+          errors.push(`Property '${propPath}' drops constraint 'items'`);
+        }
+      } else if (typeof base.items === 'object' && typeof derived.items === 'object') {
+        errors.push(...this.comparePropertyConstraints(derived.items, base.items, `${propPath}.items`));
+      }
+    }
+
+    // Nested object: recursively compare
+    if (base.type === 'object' && derived.type === 'object') {
+      if (base.properties || derived.properties) {
+        const nestedOverlay = {
+          properties: derived.properties || {},
+          required: derived.required || [],
+          additionalProperties: derived.additionalProperties,
+        };
+        const nestedBase = {
+          properties: base.properties || {},
+          required: base.required || [],
+          additionalProperties: base.additionalProperties,
+        };
+        errors.push(...this.compareOverlayToBase(nestedOverlay, nestedBase, propPath));
+      }
+    }
+
+    return errors;
   }
 
   getAttribute(gtsId: string, path: string): any {

@@ -13,6 +13,8 @@ import {
   CompatibilityParams,
   CastBody,
   QueryParams,
+  ValidateSchemaBody,
+  ValidateEntityBody,
 } from './types';
 import * as gts from '../index';
 
@@ -98,6 +100,12 @@ export class GtsServer {
 
     // OP#11 - Attribute Access
     this.fastify.get('/attr', this.handleAttribute.bind(this));
+
+    // OP#12 - Validate Schema
+    this.fastify.post('/validate-schema', this.handleValidateSchema.bind(this));
+
+    // OP#12 - Validate Entity (unified)
+    this.fastify.post('/validate-entity', this.handleValidateEntity.bind(this));
 
     // OpenAPI spec
     this.fastify.get('/openapi', this.handleOpenAPI.bind(this));
@@ -582,6 +590,42 @@ export class GtsServer {
     }
 
     return this.store['store'].getAttribute(gtsId, path);
+  }
+
+  // OP#12 - Validate Schema
+  private async handleValidateSchema(
+    request: FastifyRequest<{ Body: ValidateSchemaBody }>,
+    _reply: FastifyReply
+  ): Promise<any> {
+    const { schema_id } = request.body;
+    if (!schema_id) {
+      return { ok: false, error: 'Missing required field: schema_id' };
+    }
+    return this.store['store'].validateSchemaAgainstParent(schema_id);
+  }
+
+  // OP#12 - Validate Entity (unified)
+  private async handleValidateEntity(
+    request: FastifyRequest<{ Body: ValidateEntityBody }>,
+    _reply: FastifyReply
+  ): Promise<any> {
+    const id = request.body.entity_id || request.body.gts_id;
+    if (!id) {
+      return { ok: false, error: 'Missing required field: entity_id or gts_id' };
+    }
+
+    const entity = this.store['store'].get(id);
+    if (!entity) {
+      return { ok: false, error: `Entity not found: ${id}` };
+    }
+
+    if (entity.isSchema) {
+      const result = this.store['store'].validateSchemaAgainstParent(id);
+      return { ...result, entity_type: 'schema' };
+    } else {
+      const result = this.store.validateInstance(id);
+      return { ...result, entity_type: 'instance' };
+    }
   }
 
   // OpenAPI Specification

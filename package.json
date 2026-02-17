@@ -1,6 +1,6 @@
 {
   "name": "@globaltypesystem/gts-ts",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "TypeScript library for working with GTS (Global Type System) identifiers and JSON/JSON Schema artifacts",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -47,8 +47,7 @@
     "ajv": "^8.12.0",
     "ajv-formats": "^2.1.1",
     "commander": "^12.0.0",
-    "fastify": "^4.26.0",
-    "fastify-cors": "^6.1.0",
+    "fastify": "^5.7.3",
     "uuid": "^9.0.1"
   }
 }

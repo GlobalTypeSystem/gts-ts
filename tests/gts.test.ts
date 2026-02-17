@@ -414,6 +414,8 @@ describe('GTS Store Operations', () => {
     });
   });
 
+  // x-gts-ref combinator tests (oneOf/anyOf/allOf) are in the canonical gts-spec test suite
+
   describe('OP#12 - Wildcard Validation (v0.7)', () => {
     test('validates wildcard patterns', () => {
       const result = validateGtsID('gts.vendor.pkg.*');

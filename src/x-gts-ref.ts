@@ -81,6 +81,56 @@ export class XGtsRefValidator {
         });
       }
     }
+
+    // Recurse into combinator subschemas
+    if (Array.isArray(schema.allOf)) {
+      for (const subSchema of schema.allOf) {
+        this.visitInstance(instance, subSchema, path, rootSchema, errors);
+      }
+    }
+
+    if (Array.isArray(schema.anyOf)) {
+      // Only enforce when all branches have x-gts-ref; mixed branches may be valid via non-x-gts-ref path (Ajv handles that)
+      const refBranches = schema.anyOf.filter((s: any) => this.containsXGtsRef(s));
+      if (refBranches.length > 0 && refBranches.length === schema.anyOf.length) {
+        const branchResults = refBranches.map((subSchema: any) => {
+          const branchErrors: XGtsRefValidationError[] = [];
+          this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
+          return branchErrors;
+        });
+        const anyPassed = branchResults.some((errs: XGtsRefValidationError[]) => errs.length === 0);
+        if (!anyPassed) {
+          for (const branchErrors of branchResults) {
+            errors.push(...branchErrors);
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(schema.oneOf)) {
+      // Only enforce when all branches have x-gts-ref; mixed branches can't be coordinated with Ajv's branch selection
+      const refBranches = schema.oneOf.filter((s: any) => this.containsXGtsRef(s));
+      if (refBranches.length > 0 && refBranches.length === schema.oneOf.length) {
+        const branchResults = refBranches.map((subSchema: any) => {
+          const branchErrors: XGtsRefValidationError[] = [];
+          this.visitInstance(instance, subSchema, path, rootSchema, branchErrors);
+          return branchErrors;
+        });
+        const passingCount = branchResults.filter((errs: XGtsRefValidationError[]) => errs.length === 0).length;
+        if (passingCount === 0) {
+          for (const branchErrors of branchResults) {
+            errors.push(...branchErrors);
+          }
+        } else if (passingCount > 1) {
+          errors.push({
+            fieldPath: path || '/',
+            value: instance,
+            refPattern: '',
+            reason: `Value matches ${passingCount} oneOf branches but must match exactly one`,
+          });
+        }
+      }
+    }
   }
 
   private visitSchema(schema: any, path: string, rootSchema: any, errors: XGtsRefValidationError[]): void {
@@ -298,6 +348,19 @@ export class XGtsRefValidator {
     }
 
     return null;
+  }
+
+  private containsXGtsRef(schema: any): boolean {
+    if (!schema || typeof schema !== 'object') return false;
+    if (schema['x-gts-ref'] !== undefined) return true;
+    for (const value of Object.values(schema)) {
+      if (Array.isArray(value)) {
+        if (value.some((item) => this.containsXGtsRef(item))) return true;
+      } else if (value && typeof value === 'object') {
+        if (this.containsXGtsRef(value)) return true;
+      }
+    }
+    return false;
   }
 
   /**
