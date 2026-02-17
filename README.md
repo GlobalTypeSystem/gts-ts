@@ -24,7 +24,7 @@ Featureset:
 - [x] **OP#9 - Version Casting**: Transform instances between compatible MINOR versions
 - [x] **OP#10 - Query Execution**: Filter identifier collections using the GTS query language
 - [x] **OP#11 - Attribute Access**: Retrieve property values and metadata using the attribute selector (`@`)
-- [ ] **OP#12 - Schema Validation**: Validate schema against its precedent schema
+- [x] **OP#12 - Schema Validation**: Validate schema against its precedent schema
 
 Other GTS spec [Reference Implementation](https://github.com/globaltypesystem/gts-spec/blob/main/README.md#9-reference-implementation-recommendations) recommended features support:
 
@@ -32,8 +32,8 @@ Other GTS spec [Reference Implementation](https://github.com/globaltypesystem/gt
 - [x] **CLI** - command-line interface for all GTS operations
 - [x] **Web server** - a non-production web-server with REST API for the operations processing and testing
 - [x] **x-gts-ref** - to support special GTS entity reference annotation in schemas
-- [ ] **YAML support** - to support YAML files (*.yml, *.yaml) as input files
-- [ ] **TypeSpec support** - add [typespec.io](https://typespec.io/) files (*.tsp) support
+- [ ] **YAML support** - to support YAML files (`*.yml`, `*.yaml`) as input files
+- [ ] **TypeSpec support** - add [typespec.io](https://typespec.io/) files (`*.tsp`) support
 - [ ] **UUID for instances** - to support UUID as ID in JSON instances
 
 ## Usage
@@ -60,7 +60,7 @@ import { extractID } from '@globaltypesystem/gts-ts';
 
 const content = {
   gtsId: 'gts.vendor.pkg.ns.type.v1.0',
-  name: 'My Entity'
+  name: 'My Entity',
 };
 
 const extracted = extractID(content);
@@ -76,10 +76,7 @@ if (parsed.ok) {
 }
 
 // OP#4 - Pattern Matching
-const matchResult = matchIDPattern(
-  'gts.vendor.pkg.ns.type.v1.0',
-  'gts.vendor.pkg.*'
-);
+const matchResult = matchIDPattern('gts.vendor.pkg.ns.type.v1.0', 'gts.vendor.pkg.*');
 if (matchResult.match) {
   console.log('Pattern matched!');
 }
@@ -100,7 +97,7 @@ const gts = new GTS();
 // Register an entity
 const entity = {
   gtsId: 'gts.vendor.pkg.ns.type.v1.0',
-  name: 'My Entity'
+  name: 'My Entity',
 };
 
 gts.register(entity);
@@ -117,20 +114,13 @@ console.log(`Relationships: ${relationships.relationships}`);
 console.log(`Broken references: ${relationships.brokenReferences}`);
 
 // OP#8 - Check compatibility
-const compatResult = gts.checkCompatibility(
-  'gts.vendor.pkg.ns.type.v1~',
-  'gts.vendor.pkg.ns.type.v2~',
-  'backward'
-);
+const compatResult = gts.checkCompatibility('gts.vendor.pkg.ns.type.v1~', 'gts.vendor.pkg.ns.type.v2~', 'backward');
 if (compatResult.compatible) {
   console.log('Schemas are compatible');
 }
 
 // OP#9 - Cast instance to different version
-const castResult = gts.castInstance(
-  'gts.vendor.pkg.ns.type.v1.0',
-  'gts.vendor.pkg.ns.type.v2~'
-);
+const castResult = gts.castInstance('gts.vendor.pkg.ns.type.v1.0', 'gts.vendor.pkg.ns.type.v2~');
 if (castResult.ok) {
   console.log('Instance casted successfully');
 }
@@ -220,6 +210,7 @@ npx gts-server --host 127.0.0.1 --port 8000 --verbose 2
 ### API Endpoints
 
 #### Entity Management
+
 - `GET /entities` - List all entities
 - `GET /entities/:id` - Get specific entity
 - `POST /entities` - Add new entity
@@ -227,6 +218,7 @@ npx gts-server --host 127.0.0.1 --port 8000 --verbose 2
 - `POST /schemas` - Add new schema
 
 #### GTS Operations
+
 - `GET /validate-id?id=<gts_id>` - Validate GTS ID (OP#1)
 - `POST /extract-id` - Extract GTS ID from JSON (OP#2)
 - `GET /parse-id?id=<gts_id>` - Parse GTS ID (OP#3)
@@ -238,8 +230,11 @@ npx gts-server --host 127.0.0.1 --port 8000 --verbose 2
 - `POST /cast` - Cast instance (OP#9)
 - `GET /query?expr=<expression>&limit=<limit>` - Query entities (OP#10)
 - `GET /attr?path=<path>` - Get attribute value (OP#11)
+- `POST /validate-schema` - Validate schema against parent schema (OP#12)
+- `POST /validate-entity` - Validate entity (schema or instance) (OP#12)
 
 #### Other
+
 - `GET /health` - Health check
 - `GET /openapi` - OpenAPI specification
 
