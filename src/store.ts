@@ -95,9 +95,13 @@ export class GtsStore {
 
   validateInstance(gtsId: string): ValidationResult {
     try {
-      const gid = Gts.parseGtsID(gtsId);
+      let objId: string = gtsId;
+      if (Gts.isValidGtsID(gtsId)) {
+        const gid = Gts.parseGtsID(gtsId);
+        objId = gid.id;
+      }
 
-      const obj = this.get(gid.id);
+      const obj = this.get(objId);
       if (!obj) {
         return {
           id: gtsId,
