@@ -95,9 +95,13 @@ export class GtsStore {
 
   validateInstance(gtsId: string): ValidationResult {
     try {
-      const gid = Gts.parseGtsID(gtsId);
+      let objId: string = gtsId;
+      if (Gts.isValidGtsID(gtsId)) {
+        const gid = Gts.parseGtsID(gtsId);
+        objId = gid.id;
+      }
 
-      const obj = this.get(gid.id);
+      const obj = this.get(objId);
       if (!obj) {
         return {
           id: gtsId,
@@ -1096,8 +1100,8 @@ export class GtsStore {
     // Find parent reference in allOf
     const parentRef = this.findParentRef(content);
     if (!parentRef) {
-      // Base schema with no parent → always valid
-      return { id: schemaId, ok: true, error: '' };
+      // Base schema with no parent → still validate traits
+      return this.validateSchemaTraits(schemaId);
     }
 
     // Resolve parent entity
@@ -1108,6 +1112,12 @@ export class GtsStore {
     }
     if (!parentEntity.isSchema || !parentEntity.content) {
       return { id: schemaId, ok: false, error: `Parent entity is not a schema: ${parentId}` };
+    }
+
+    // Detect cyclic $$ref / $ref references in the schema's own content
+    const cycleError = this.detectRefCycle(schemaId, content, new Set([schemaId]));
+    if (cycleError) {
+      return { id: schemaId, ok: false, error: cycleError };
     }
 
     // Resolve parent's effective (fully flattened) schema
@@ -1122,7 +1132,406 @@ export class GtsStore {
       return { id: schemaId, ok: false, error: errors.join('; ') };
     }
 
+    // OP#13: Validate schema traits across the inheritance chain
+    const traitsResult = this.validateSchemaTraits(schemaId);
+    if (!traitsResult.ok) {
+      return traitsResult;
+    }
+
     return { id: schemaId, ok: true, error: '' };
+  }
+
+  // OP#13: Validate schema traits across the inheritance chain
+  private validateSchemaTraits(schemaId: string): ValidationResult {
+    // Build the chain of schema IDs from base to leaf
+    const chain = this.buildSchemaChain(schemaId);
+
+    // Collect trait schemas and trait values from each level, tracking immutability
+    const traitSchemas: any[] = [];
+    const mergedTraits: Record<string, any> = {};
+    const lockedTraits = new Set<string>();
+    const knownDefaults = new Map<string, any>();
+
+    for (const chainSchemaId of chain) {
+      const entity = this.get(chainSchemaId);
+      if (!entity || !entity.content) continue;
+
+      // Collect trait schemas from this level and track which properties this level introduces
+      const prevSchemaCount = traitSchemas.length;
+      this.collectTraitSchemas(entity.content, traitSchemas);
+      const levelSchemaProps = new Set<string>();
+      for (const ts of traitSchemas.slice(prevSchemaCount)) {
+        if (typeof ts === 'object' && ts !== null && typeof ts.properties === 'object' && ts.properties !== null) {
+          for (const [propName, propSchema] of Object.entries(ts.properties)) {
+            levelSchemaProps.add(propName);
+            // Detect default override: ancestor default cannot be changed by descendant
+            if (
+              typeof propSchema === 'object' &&
+              propSchema !== null &&
+              'default' in (propSchema as Record<string, any>)
+            ) {
+              const newDefault = (propSchema as Record<string, any>).default;
+              if (knownDefaults.has(propName)) {
+                const oldDefault = knownDefaults.get(propName);
+                if (JSON.stringify(oldDefault) !== JSON.stringify(newDefault)) {
+                  return {
+                    id: schemaId,
+                    ok: false,
+                    error: `trait schema default for '${propName}' in '${chainSchemaId}' overrides default set by ancestor`,
+                  };
+                }
+              } else {
+                knownDefaults.set(propName, newDefault);
+              }
+            }
+          }
+        }
+      }
+
+      // Collect trait values from this level
+      const levelTraits: Record<string, any> = {};
+      this.collectTraitValues(entity.content, levelTraits);
+
+      // Check immutability: trait values set by ancestor are locked unless
+      // this level also introduces a trait schema covering that property
+      for (const [k, v] of Object.entries(levelTraits)) {
+        if (k in mergedTraits && JSON.stringify(mergedTraits[k]) !== JSON.stringify(v) && lockedTraits.has(k)) {
+          return {
+            id: schemaId,
+            ok: false,
+            error: `trait '${k}' in '${chainSchemaId}' overrides value set by ancestor`,
+          };
+        }
+      }
+
+      // Mark trait values as locked or unlocked based on whether this level
+      // also introduced a trait schema covering the property
+      for (const k of Object.keys(levelTraits)) {
+        if (levelSchemaProps.has(k)) {
+          lockedTraits.delete(k);
+        } else {
+          lockedTraits.add(k);
+        }
+      }
+
+      Object.assign(mergedTraits, levelTraits);
+    }
+
+    // If no trait schemas in the chain, nothing to validate
+    if (traitSchemas.length === 0) {
+      if (Object.keys(mergedTraits).length > 0) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: 'x-gts-traits values provided but no x-gts-traits-schema is defined in the inheritance chain',
+        };
+      }
+      return { id: schemaId, ok: true, error: '' };
+    }
+
+    // Validate each trait schema
+    for (let i = 0; i < traitSchemas.length; i++) {
+      const ts = traitSchemas[i];
+
+      // Check: trait schema must have type "object" (or no type, which defaults to object)
+      if (typeof ts === 'object' && ts !== null && ts.type && ts.type !== 'object') {
+        return {
+          id: schemaId,
+          ok: false,
+          error: `x-gts-traits-schema must have type "object", got "${ts.type}"`,
+        };
+      }
+
+      // Check: trait schema must not contain x-gts-traits
+      if (typeof ts === 'object' && ts !== null && ts['x-gts-traits']) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: 'x-gts-traits-schema must not contain x-gts-traits',
+        };
+      }
+    }
+
+    // Resolve $ref inside trait schemas and check for cycles
+    const resolvedTraitSchemas: any[] = [];
+    for (const ts of traitSchemas) {
+      try {
+        const resolved = this.resolveTraitSchemaRefs(ts, new Set());
+        resolvedTraitSchemas.push(resolved);
+      } catch (e) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
+    }
+
+    // Build effective trait schema (allOf composition)
+    let effectiveSchema: any;
+    if (resolvedTraitSchemas.length === 1) {
+      effectiveSchema = resolvedTraitSchemas[0];
+    } else {
+      effectiveSchema = {
+        type: 'object',
+        allOf: resolvedTraitSchemas,
+      };
+    }
+
+    // Apply defaults from trait schema to merged traits
+    const effectiveTraits = this.applyTraitDefaults(effectiveSchema, mergedTraits);
+
+    // Validate effective traits against effective schema using AJV
+    try {
+      const normalizedSchema = this.normalizeSchema(effectiveSchema);
+      const validate = this.ajv.compile(normalizedSchema);
+      const isValid = validate(effectiveTraits);
+      if (!isValid) {
+        const errors =
+          validate.errors?.map((e) => `${e.instancePath} ${e.message}`).join('; ') || 'Trait validation failed';
+        return { id: schemaId, ok: false, error: `trait validation: ${errors}` };
+      }
+    } catch (e) {
+      return {
+        id: schemaId,
+        ok: false,
+        error: `failed to compile trait schema: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+
+    // Check for unresolved trait properties (no value and no default)
+    const allProps = this.collectAllTraitProperties(effectiveSchema);
+    for (const [propName, propSchema] of Object.entries(allProps)) {
+      const hasValue = propName in effectiveTraits;
+      const hasDefault = typeof propSchema === 'object' && propSchema !== null && 'default' in propSchema;
+      if (!hasValue && !hasDefault) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: `trait property '${propName}' is not resolved: no value provided and no default defined`,
+        };
+      }
+    }
+
+    return { id: schemaId, ok: true, error: '' };
+  }
+
+  // OP#13: Entity-level traits validation
+  validateEntityTraits(entityId: string): ValidationResult {
+    const entity = this.get(entityId);
+    if (!entity) {
+      return { id: entityId, ok: false, error: `Entity not found: ${entityId}` };
+    }
+
+    if (!entity.isSchema) {
+      return { id: entityId, ok: true, error: '' };
+    }
+
+    // Build the chain for this schema
+    const chain = this.buildSchemaChain(entityId);
+
+    const traitSchemas: any[] = [];
+    let hasTraitValues = false;
+
+    for (const chainSchemaId of chain) {
+      const chainEntity = this.get(chainSchemaId);
+      if (!chainEntity || !chainEntity.content) continue;
+
+      this.collectTraitSchemas(chainEntity.content, traitSchemas);
+
+      const levelTraits: Record<string, any> = {};
+      this.collectTraitValues(chainEntity.content, levelTraits);
+      if (Object.keys(levelTraits).length > 0) {
+        hasTraitValues = true;
+      }
+    }
+
+    if (traitSchemas.length === 0) {
+      return { id: entityId, ok: true, error: '' };
+    }
+
+    // If trait schemas exist but no trait values, entity is incomplete
+    if (!hasTraitValues) {
+      return {
+        id: entityId,
+        ok: false,
+        error: 'Entity defines x-gts-traits-schema but no x-gts-traits values are provided',
+      };
+    }
+
+    // Each trait schema must have additionalProperties: false (closed)
+    for (const ts of traitSchemas) {
+      if (typeof ts === 'object' && ts !== null) {
+        if (ts.additionalProperties !== false) {
+          return {
+            id: entityId,
+            ok: false,
+            error: 'Trait schema must set additionalProperties: false for entity validation',
+          };
+        }
+      }
+    }
+
+    return { id: entityId, ok: true, error: '' };
+  }
+
+  // Build the schema chain from base to leaf for a given schema ID
+  private buildSchemaChain(schemaId: string): string[] {
+    // Parse the schema ID to get segments
+    try {
+      const gtsId = Gts.parseGtsID(schemaId);
+      const segments = gtsId.segments;
+      const chain: string[] = [];
+
+      for (let i = 0; i < segments.length; i++) {
+        const id =
+          'gts.' +
+          segments
+            .slice(0, i + 1)
+            .map((s) => s.segment)
+            .join('');
+        chain.push(id);
+      }
+
+      return chain;
+    } catch {
+      return [schemaId];
+    }
+  }
+
+  // Collect x-gts-traits-schema from a schema content (recursing into allOf)
+  private collectTraitSchemas(content: any, out: any[], depth: number = 0): void {
+    if (depth > 64 || typeof content !== 'object' || content === null) return;
+
+    if (content['x-gts-traits-schema'] !== undefined) {
+      out.push(content['x-gts-traits-schema']);
+    }
+
+    if (Array.isArray(content.allOf)) {
+      for (const item of content.allOf) {
+        this.collectTraitSchemas(item, out, depth + 1);
+      }
+    }
+  }
+
+  // Collect x-gts-traits from a schema content (recursing into allOf)
+  private collectTraitValues(content: any, merged: Record<string, any>, depth: number = 0): void {
+    if (depth > 64 || typeof content !== 'object' || content === null) return;
+
+    if (typeof content['x-gts-traits'] === 'object' && content['x-gts-traits'] !== null) {
+      Object.assign(merged, content['x-gts-traits']);
+    }
+
+    if (Array.isArray(content.allOf)) {
+      for (const item of content.allOf) {
+        this.collectTraitValues(item, merged, depth + 1);
+      }
+    }
+  }
+
+  // Resolve $ref inside a trait schema, detecting cycles
+  private resolveTraitSchemaRefs(schema: any, visited: Set<string>, depth: number = 0): any {
+    if (depth > 64) return schema;
+    if (typeof schema !== 'object' || schema === null) return schema;
+
+    const result: any = {};
+
+    for (const [key, value] of Object.entries(schema)) {
+      if (key === '$$ref' || key === '$ref') {
+        const refUri = value as string;
+        const refId = refUri.startsWith(GTS_URI_PREFIX) ? refUri.substring(GTS_URI_PREFIX.length) : refUri;
+
+        if (visited.has(refId)) {
+          throw new Error(`Cyclic reference detected in trait schema: ${refId}`);
+        }
+        visited.add(refId);
+
+        const refEntity = this.get(refId);
+        if (!refEntity || !refEntity.content) {
+          throw new Error(`Unresolvable trait schema reference: ${refUri}`);
+        }
+        const resolved = this.resolveTraitSchemaRefs(refEntity.content, visited, depth + 1);
+        // Merge resolved content into result
+        for (const [rk, rv] of Object.entries(resolved)) {
+          if (rk !== '$id' && rk !== '$$id' && rk !== '$schema' && rk !== '$$schema') {
+            result[rk] = rv;
+          }
+        }
+        continue;
+      }
+
+      if (key === 'allOf' && Array.isArray(value)) {
+        result.allOf = (value as any[]).map((item) => this.resolveTraitSchemaRefs(item, visited, depth + 1));
+      } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        result[key] = this.resolveTraitSchemaRefs(value, new Set(visited), depth + 1);
+      } else {
+        result[key] = value;
+      }
+    }
+
+    return result;
+  }
+
+  // Apply defaults from trait schema to trait values
+  private applyTraitDefaults(schema: any, traits: Record<string, any>): Record<string, any> {
+    const result = { ...traits };
+    const props = this.collectAllTraitProperties(schema);
+
+    for (const [propName, propSchema] of Object.entries(props)) {
+      if (!(propName in result) && typeof propSchema === 'object' && propSchema !== null && 'default' in propSchema) {
+        result[propName] = propSchema.default;
+      }
+    }
+
+    return result;
+  }
+
+  // Collect all properties from a trait schema (handling allOf composition)
+  private collectAllTraitProperties(schema: any, depth: number = 0): Record<string, any> {
+    const props: Record<string, any> = {};
+    if (depth > 64 || typeof schema !== 'object' || schema === null) return props;
+
+    if (typeof schema.properties === 'object' && schema.properties !== null) {
+      Object.assign(props, schema.properties);
+    }
+
+    if (Array.isArray(schema.allOf)) {
+      for (const item of schema.allOf) {
+        Object.assign(props, this.collectAllTraitProperties(item, depth + 1));
+      }
+    }
+
+    return props;
+  }
+
+  // Detect cyclic $$ref/$ref references reachable from a schema's content
+  private detectRefCycle(originId: string, content: any, visited: Set<string>, depth: number = 0): string | null {
+    if (depth > 64 || !content || typeof content !== 'object') return null;
+
+    // Check direct ref on this object
+    const ref = content['$$ref'] || content['$ref'];
+    if (typeof ref === 'string') {
+      const refId = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+      if (visited.has(refId)) {
+        return `Cyclic reference detected: ${refId}`;
+      }
+      const refEntity = this.get(refId);
+      if (refEntity && refEntity.content) {
+        visited.add(refId);
+        const inner = this.detectRefCycle(originId, refEntity.content, visited, depth + 1);
+        if (inner) return inner;
+      }
+    }
+
+    // Recurse into allOf
+    if (Array.isArray(content.allOf)) {
+      for (const sub of content.allOf) {
+        const inner = this.detectRefCycle(originId, sub, visited, depth + 1);
+        if (inner) return inner;
+      }
+    }
+
+    return null;
   }
 
   private findParentRef(schema: any): string | null {

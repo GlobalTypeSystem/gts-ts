@@ -92,6 +92,28 @@ export class GTS {
   castInstance(fromId: string, toSchemaId: string): CastResult {
     return GtsCast.castInstance(this.store, fromId, toSchemaId);
   }
+
+  validateEntity(id: string): ValidationResult & { entity_type: string } {
+    const entity = this.store.get(id);
+    if (!entity) {
+      return { id, ok: false, error: `Entity not found: ${id}`, entity_type: 'unknown' };
+    }
+
+    if (entity.isSchema) {
+      const result = this.store.validateSchemaAgainstParent(id);
+      if (!result.ok) {
+        return { ...result, entity_type: 'schema' };
+      }
+      const traitsResult = this.store.validateEntityTraits(id);
+      if (!traitsResult.ok) {
+        return { ...traitsResult, entity_type: 'schema' };
+      }
+      return { ...result, entity_type: 'schema' };
+    } else {
+      const result = this.store.validateInstance(id);
+      return { ...result, entity_type: 'instance' };
+    }
+  }
 }
 
 export default GTS;

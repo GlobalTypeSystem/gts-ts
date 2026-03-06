@@ -614,18 +614,7 @@ export class GtsServer {
       return { ok: false, error: 'Missing required field: entity_id or gts_id' };
     }
 
-    const entity = this.store['store'].get(id);
-    if (!entity) {
-      return { ok: false, error: `Entity not found: ${id}` };
-    }
-
-    if (entity.isSchema) {
-      const result = this.store['store'].validateSchemaAgainstParent(id);
-      return { ...result, entity_type: 'schema' };
-    } else {
-      const result = this.store.validateInstance(id);
-      return { ...result, entity_type: 'instance' };
-    }
+    return this.store.validateEntity(id);
   }
 
   // OpenAPI Specification

@@ -14,6 +14,7 @@ export interface GtsIDSegment {
   verMinor?: number;
   isType: boolean;
   isWildcard: boolean;
+  isUuidTail: boolean;
 }
 
 export interface GtsID {

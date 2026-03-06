@@ -15,6 +15,7 @@ import {
 const GTS_NAMESPACE = uuidv5('gts', uuidv5.URL);
 
 const SEGMENT_TOKEN_REGEX = /^[a-z_][a-z0-9_]*$/;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export class Gts {
   static parseGtsID(id: string): GtsID {
@@ -40,6 +41,7 @@ export class Gts {
     }
 
     // Add any remaining content (instance without trailing ~)
+    // This could be a regular instance segment or a UUID tail
     if (current) {
       parts.push(current);
     }
@@ -60,6 +62,7 @@ export class Gts {
       verMinor: undefined,
       isType: false,
       isWildcard: false,
+      isUuidTail: false,
     };
 
     let workingSegment = seg.segment;
@@ -385,10 +388,6 @@ export class Gts {
       throw new InvalidGtsIDError(id, 'Must be lower case');
     }
 
-    if (raw.includes('-')) {
-      throw new InvalidGtsIDError(id, "Must not contain '-'");
-    }
-
     if (!raw.startsWith(GTS_PREFIX)) {
       throw new InvalidGtsIDError(id, `Does not start with '${GTS_PREFIX}'`);
     }
@@ -426,6 +425,33 @@ export class Gts {
         continue;
       }
 
+      // Check if this is a UUID tail (last part, no tilde, matches UUID format)
+      if (i > 0 && i === parts.length - 1 && !part.endsWith('~') && UUID_REGEX.test(part)) {
+        // UUID tail segment for combined anonymous instances
+        const seg: GtsIDSegment = {
+          num: i + 1,
+          offset,
+          segment: part,
+          vendor: '',
+          package: '',
+          namespace: '',
+          type: '',
+          verMajor: 0,
+          verMinor: undefined,
+          isType: false,
+          isWildcard: false,
+          isUuidTail: true,
+        };
+        gtsId.segments.push(seg);
+        offset += part.length;
+        continue;
+      }
+
+      // Regular segments must not contain hyphens
+      if (part.includes('-')) {
+        throw new InvalidGtsIDError(id, "Must not contain '-'");
+      }
+
       const segment = this.parseSegment(i + 1, offset, part);
       gtsId.segments.push(segment);
       offset += part.length;
@@ -437,9 +463,10 @@ export class Gts {
     }
 
     // v0.7: Single-segment instance IDs are prohibited (skip for wildcard patterns)
+    // Exception: combined anonymous instances (UUID tail) are always valid
     if (!allowWildcard && !raw.includes('*')) {
       const lastSegment = gtsId.segments[gtsId.segments.length - 1];
-      if (!lastSegment.isType && gtsId.segments.length === 1) {
+      if (!lastSegment.isType && !lastSegment.isUuidTail && gtsId.segments.length === 1) {
         throw new InvalidGtsIDError(
           id,
           'Single-segment instance IDs are prohibited. Instance IDs must be chained with a type segment (e.g., gts.vendor.pkg.ns.type.v1~instance.segment.v1)'
@@ -507,6 +534,14 @@ export class Gts {
         }
         // Wildcard matches - accept anything after this point
         return true;
+      }
+
+      // Non-wildcard UUID tail - compare raw segment string
+      if (pSeg.isUuidTail) {
+        if (pSeg.segment !== cSeg.segment) {
+          return false;
+        }
+        continue;
       }
 
       // Non-wildcard segment - all fields must match
