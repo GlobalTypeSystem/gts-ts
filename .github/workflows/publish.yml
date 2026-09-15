@@ -1,0 +1,61 @@
+name: Publish
+
+on:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      # The release name/tag must start with "v" (e.g. v0.5.0). Strip the
+      # leading "v" and ensure it matches the "version" field in package.json.
+      - name: Verify release version matches package.json
+        run: |
+          RELEASE_NAME="${{ github.event.release.tag_name }}"
+          echo "Release tag: $RELEASE_NAME"
+
+          case "$RELEASE_NAME" in
+            v*) ;;
+            *)
+              echo "ERROR: Release tag '$RELEASE_NAME' does not start with 'v'."
+              exit 1
+              ;;
+          esac
+
+          RELEASE_VERSION="${RELEASE_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "Release version: $RELEASE_VERSION"
+          echo "package.json version: $PKG_VERSION"
+
+          if [ "$RELEASE_VERSION" != "$PKG_VERSION" ]; then
+            echo "ERROR: Release version '$RELEASE_VERSION' does not match package.json version '$PKG_VERSION'."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
