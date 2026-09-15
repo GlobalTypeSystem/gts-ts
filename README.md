@@ -6,7 +6,7 @@ A complete TypeScript implementation of the Global Type System (GTS)
 
 GTS [Global Type System](https://github.com/globaltypesystem/gts-spec) is a simple, human-readable, globally unique identifier and referencing system for data type definitions (e.g., JSON Schemas) and data instances (e.g., JSON objects). This TypeScript implementation provides type-safe operations for working with GTS identifiers.
 
-**Targets gts-spec [v0.13.1](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.1)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for the breaking changes in the 0.8 → 0.13 upgrade.
+**Targets gts-spec [v0.13.3](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.3)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for the breaking changes in the v0.13.1 → v0.13.3 upgrade.
 
 ## Roadmap
 
@@ -230,6 +230,8 @@ npx gts-server --host 127.0.0.1 --port 8000 --verbose 2
 - `GET /match-id-pattern?pattern=<pattern>&candidate=<id>` - Match pattern (OP#4)
 - `GET /uuid?id=<gts_id>` - Generate UUID (OP#5)
 - `POST /validate-instance` - Validate instance (OP#6)
+- `POST /validate-json` - Validate transient instance or Type Schema JSON without registering it (OP#6)
+- `POST /validate-json/:gts_type` - Validate transient instance JSON against an explicit GTS type, without registering it (OP#6)
 - `GET /resolve-relationships?id=<gts_id>` - Resolve relationships (OP#7)
 - `GET /compatibility?old_type_id=<id>&new_type_id=<id>` - Check Type Schema evolution compatibility (OP#8)
 - `POST /cast` - Cast instance (OP#9)
@@ -258,7 +260,7 @@ curl -X POST http://127.0.0.1:8000/type-schemas \
   -d '{
     "type_id": "gts.test.example.ns.person.v1~",
     "type_schema": {
-      "$$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "name": { "type": "string" },
