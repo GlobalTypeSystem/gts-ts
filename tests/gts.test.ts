@@ -9,6 +9,8 @@ import {
   idToUUID,
   extractID,
 } from '../src';
+import { MAX_SCHEMA_DEPTH } from '../src/types';
+import { XGtsRefValidator } from '../src/x-gts-ref';
 
 describe('GTS Core Operations', () => {
   describe('OP#1 - ID Validation', () => {
@@ -61,8 +63,8 @@ describe('GTS Core Operations', () => {
 
     test('extracts GTS ID from schema', () => {
       const schema = {
-        $$id: 'gts.vendor.pkg.ns.type.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.vendor.pkg.ns.type.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {},
       };
@@ -192,8 +194,8 @@ describe('GTS Store Operations', () => {
   describe('OP#6 - Schema Validation', () => {
     test('validates instance against schema', () => {
       const schema = {
-        $$id: 'gts.test.pkg.ns.person.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.person.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -231,8 +233,8 @@ describe('GTS Store Operations', () => {
   describe('OP#7 - Relationship Resolution', () => {
     test('resolves relationships between entities', () => {
       const schema = {
-        $$id: 'gts.test.pkg.ns.person.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.person.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -259,8 +261,8 @@ describe('GTS Store Operations', () => {
   describe('OP#8 - Compatibility Checking', () => {
     test('reports adding an optional property to an open model as forward-only', () => {
       const schemaV1 = {
-        $$id: 'gts.test.pkg.ns.person.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.person.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -270,8 +272,8 @@ describe('GTS Store Operations', () => {
       };
 
       const schemaV2 = {
-        $$id: 'gts.test.pkg.ns.person.v2~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.person.v2~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -295,8 +297,8 @@ describe('GTS Store Operations', () => {
 
     test('reports annotation-only changes as fully compatible', () => {
       const schemaV1 = {
-        $$id: 'gts.test.pkg.ns.doc.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.doc.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: { name: { type: 'string', description: 'The name' } },
         required: ['name'],
@@ -304,8 +306,8 @@ describe('GTS Store Operations', () => {
       };
 
       const schemaV2 = {
-        $$id: 'gts.test.pkg.ns.doc.v2~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.doc.v2~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: { name: { type: 'string', description: 'A better description' } },
         required: ['name'],
@@ -322,8 +324,8 @@ describe('GTS Store Operations', () => {
 
     test('detects incompatible changes', () => {
       const schemaV1 = {
-        $$id: 'gts.test.pkg.ns.person.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.person.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -332,8 +334,8 @@ describe('GTS Store Operations', () => {
       };
 
       const schemaV2 = {
-        $$id: 'gts.test.pkg.ns.person.v2~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.person.v2~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           fullName: { type: 'string' },
@@ -356,26 +358,26 @@ describe('GTS Store Operations', () => {
       // one, the derived schema has to restate them (ADR-0001 variant 2c), so
       // dropping a required field and opening a closed base must fail.
       gts.register({
-        $$id: 'gts.test.pkg.ns.strict.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.strict.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['a', 'b'],
         properties: { a: { type: 'string' }, b: { type: 'string' } },
         additionalProperties: false,
       });
       gts.register({
-        $$id: 'gts.test.pkg.ns.unrelated.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.unrelated.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
       });
       gts.register({
-        $$id: 'gts.test.pkg.ns.strict.v1~test.pkg._.lax.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.strict.v1~test.pkg._.lax.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['a'],
         properties: { a: { type: 'string' } },
         additionalProperties: true,
-        allOf: [{ $$ref: 'gts://gts.test.pkg.ns.unrelated.v1~' }],
+        allOf: [{ $ref: 'gts://gts.test.pkg.ns.unrelated.v1~' }],
       });
 
       expect(gts.validateEntity('gts.test.pkg.ns.strict.v1~test.pkg._.lax.v1~').ok).toBe(false);
@@ -387,17 +389,17 @@ describe('GTS Store Operations', () => {
       // ADR-0001 leaves the derivation body free; `{$ref: parent}` means
       // "identical to the parent", which trivially satisfies derivation.
       gts.register({
-        $$id: 'gts.test.pkg.ns.tlbase.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.tlbase.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['a', 'b'],
         properties: { a: { type: 'string' }, b: { type: 'string' } },
         additionalProperties: false,
       });
       gts.register({
-        $$id: 'gts.test.pkg.ns.tlbase.v1~test.pkg._.kid.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
-        $$ref: 'gts://gts.test.pkg.ns.tlbase.v1~',
+        $id: 'gts.test.pkg.ns.tlbase.v1~test.pkg._.kid.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        $ref: 'gts://gts.test.pkg.ns.tlbase.v1~',
       });
 
       expect(gts.validateEntity('gts.test.pkg.ns.tlbase.v1~test.pkg._.kid.v1~').ok).toBe(true);
@@ -407,15 +409,15 @@ describe('GTS Store Operations', () => {
   describe('OP#9 - a cast succeeds only if its result fits the target', () => {
     beforeEach(() => {
       gts.register({
-        $$id: 'gts.test.pkg.ns.shape.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.shape.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['a'],
         properties: { a: { type: 'string' } },
       });
       gts.register({
-        $$id: 'gts.test.pkg.ns.shape.v2~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.shape.v2~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['a'],
         properties: { a: { type: 'number' } },
@@ -428,7 +430,11 @@ describe('GTS Store Operations', () => {
       const result = gts.castInstance('gts.test.pkg.ns.shape.v1~test.pkg._.bad.v1', 'gts.test.pkg.ns.shape.v2~');
 
       expect(result.ok).toBe(false);
-      expect(result.error).toMatch(/must be number/);
+      // P6-4: `validateCastResult` now routes through the shared
+      // `formatValidationError` (python-jsonschema-style wording), the same
+      // one `/validate-json` and `/validate-instance` use, instead of raw
+      // Ajv phrasing ("must be number").
+      expect(result.error).toMatch(/is not of type 'number'/);
     });
 
     test('succeeds when the casted value does satisfy the target type', () => {
@@ -445,8 +451,8 @@ describe('GTS Store Operations', () => {
       const store = new GtsStore({ validateRefs: false });
       store.register(
         createJsonEntity({
-          $$id: 'gts.test.pkg.ns.castsrc.v1~',
-          $$schema: 'http://json-schema.org/draft-07/schema#',
+          $id: 'gts.test.pkg.ns.castsrc.v1~',
+          $schema: 'http://json-schema.org/draft-07/schema#',
           type: 'object',
         })
       );
@@ -469,15 +475,15 @@ describe('GTS Store Operations', () => {
       const store = new GtsStore({ validateRefs: false });
       store.register(
         createJsonEntity({
-          $$id: 'gts.test.pkg.ns.castabs.v1~',
-          $$schema: 'http://json-schema.org/draft-07/schema#',
+          $id: 'gts.test.pkg.ns.castabs.v1~',
+          $schema: 'http://json-schema.org/draft-07/schema#',
           type: 'object',
         })
       );
       store.register(
         createJsonEntity({
-          $$id: 'gts.test.pkg.ns.castabs.v2~',
-          $$schema: 'http://json-schema.org/draft-07/schema#',
+          $id: 'gts.test.pkg.ns.castabs.v2~',
+          $schema: 'http://json-schema.org/draft-07/schema#',
           type: 'object',
           'x-gts-abstract': true,
         })
@@ -497,8 +503,8 @@ describe('GTS Store Operations', () => {
   describe('OP#9 - Version Casting', () => {
     test('casts instance between compatible versions', () => {
       const schemaV1 = {
-        $$id: 'gts.test.pkg.ns.person.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.person.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -508,8 +514,8 @@ describe('GTS Store Operations', () => {
       };
 
       const schemaV2 = {
-        $$id: 'gts.test.pkg.ns.person.v2~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.person.v2~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {
           name: { type: 'string' },
@@ -542,8 +548,8 @@ describe('GTS Store Operations', () => {
 
     test('casts to a derived target that pulls its parent in through allOf', () => {
       gts.register({
-        $$id: 'gts.test.pkg.ns.staff.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.staff.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         required: ['name'],
         properties: { name: { type: 'string' }, age: { type: 'number' } },
@@ -552,11 +558,11 @@ describe('GTS Store Operations', () => {
       // cast that reads `properties` without resolving the ref sees nothing
       // and drops every value.
       gts.register({
-        $$id: 'gts.test.pkg.ns.staff.v1~test.pkg._.employee.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.staff.v1~test.pkg._.employee.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         allOf: [
-          { $$ref: 'gts://gts.test.pkg.ns.staff.v1~' },
+          { $ref: 'gts://gts.test.pkg.ns.staff.v1~' },
           { type: 'object', properties: { dept: { type: 'string', default: 'unassigned' } } },
         ],
       });
@@ -578,35 +584,35 @@ describe('GTS Store Operations', () => {
       // exactly once - not duplicated, not dropped - regardless of how many
       // paths reach it.
       gts.register({
-        $$id: 'gts.test.pkg.ns.ancestor.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.ancestor.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: { shared: { type: 'string', default: 'from-ancestor' } },
       });
       gts.register({
-        $$id: 'gts.test.pkg.ns.mid.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.mid.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
-        allOf: [{ $$ref: 'gts://gts.test.pkg.ns.ancestor.v1~' }],
+        allOf: [{ $ref: 'gts://gts.test.pkg.ns.ancestor.v1~' }],
         properties: { fromMid: { type: 'string', default: 'mid' } },
       });
       gts.register({
-        $$id: 'gts.test.pkg.ns.sibling.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.sibling.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
-        allOf: [{ $$ref: 'gts://gts.test.pkg.ns.ancestor.v1~' }],
+        allOf: [{ $ref: 'gts://gts.test.pkg.ns.ancestor.v1~' }],
         properties: { fromSibling: { type: 'string', default: 'sibling' } },
       });
       gts.register({
-        $$id: 'gts.test.pkg.ns.diamondtarget.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.diamondtarget.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
-        allOf: [{ $$ref: 'gts://gts.test.pkg.ns.mid.v1~' }, { $$ref: 'gts://gts.test.pkg.ns.sibling.v1~' }],
+        allOf: [{ $ref: 'gts://gts.test.pkg.ns.mid.v1~' }, { $ref: 'gts://gts.test.pkg.ns.sibling.v1~' }],
         properties: { direct: { type: 'string', default: 'direct' } },
       });
       gts.register({
-        $$id: 'gts.test.pkg.ns.diamondsource.v1~',
-        $$schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'gts.test.pkg.ns.diamondsource.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
         type: 'object',
         properties: {},
       });
@@ -624,6 +630,139 @@ describe('GTS Store Operations', () => {
         fromSibling: 'sibling',
         direct: 'direct',
       });
+    });
+  });
+
+  describe('OP#9 - nested-property casting resolves the same way the root target does (PR #16 review finding #5)', () => {
+    // `performCast` already resolves the ROOT cast target via
+    // `resolveSchemaFully`. Nested property schemas used to be handled by a
+    // separate, older helper (`effectiveObjectSchema`) that picked only the
+    // FIRST `allOf` branch carrying `properties`/`required`, never followed
+    // `$ref`, and gated recursion on a literal `propType === 'object'`
+    // comparison - so a nested property shaped like
+    // `{type:'object', allOf:[{$ref: inner}], additionalProperties:false}`
+    // resolved to an EMPTY effective schema, silently deleting the instance's
+    // own nested data and reporting the deletion under `removed_properties`
+    // as if it were an intentional schema-evolution decision. These use
+    // `GtsStore.castInstance` directly (as the "cast responses name the
+    // target consistently" suite above does) for the full response shape,
+    // since the public `CastResult` deliberately narrows `removed_properties`
+    // away.
+    test('a nested property that is itself allOf + $ref keeps data the inner schema declares, drops what it does not, and materializes its defaults', () => {
+      const store = new GtsStore({ validateRefs: false });
+      store.register(
+        createJsonEntity({
+          $id: 'gts.test.pkg.ns.nestedinner.v1~',
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          required: ['q'],
+          properties: { q: { type: 'string' }, defaulted: { type: 'string', default: 'inner-default' } },
+          additionalProperties: false,
+        })
+      );
+      store.register(
+        createJsonEntity({
+          $id: 'gts.test.pkg.ns.nestedtarget.v1~',
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            child: {
+              type: 'object',
+              allOf: [{ $ref: 'gts://gts.test.pkg.ns.nestedinner.v1~' }],
+              additionalProperties: false,
+            },
+          },
+        })
+      );
+      store.register(
+        createJsonEntity({
+          id: 'gts.test.pkg.ns.nestedtarget.v1~test.pkg.ns.item.v1.0',
+          child: { q: 'kept', extra: 'not-declared' },
+        })
+      );
+
+      const result: Record<string, any> = store.castInstance(
+        'gts.test.pkg.ns.nestedtarget.v1~test.pkg.ns.item.v1.0',
+        'gts.test.pkg.ns.nestedtarget.v1~'
+      );
+
+      // Note: not asserting `result.ok` here - `additionalProperties: false`
+      // declared at the same schema level as an `allOf`/`$ref` is a
+      // well-known, orthogonal AJV/JSON-Schema quirk (`additionalProperties`
+      // only sees properties declared directly in `properties` at its OWN
+      // level, not ones pulled in via a sibling `$ref`) that affects the
+      // final `validateCastResult` re-validation regardless of this fix. What
+      // this fix is responsible for - the CAST transform itself not silently
+      // deleting/dropping nested data - is what these assertions pin down.
+      expect(result.casted_entity.child).toMatchObject({ q: 'kept', defaulted: 'inner-default' });
+      expect(result.casted_entity.child.extra).toBeUndefined();
+      expect(result.removed_properties).toContain('child.extra');
+      expect(result.removed_properties).not.toContain('child.q');
+    });
+
+    test('a nested property typed as ["object","null"] is still recursed into', () => {
+      const store = new GtsStore({ validateRefs: false });
+      store.register(
+        createJsonEntity({
+          $id: 'gts.test.pkg.ns.nestedarrtype.v1~',
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            child: {
+              type: ['object', 'null'],
+              properties: { q: { type: 'string' } },
+              additionalProperties: false,
+            },
+          },
+        })
+      );
+      store.register(
+        createJsonEntity({
+          id: 'gts.test.pkg.ns.nestedarrtype.v1~test.pkg.ns.item.v1.0',
+          child: { q: 'kept', junk: 1 },
+        })
+      );
+
+      const result: Record<string, any> = store.castInstance(
+        'gts.test.pkg.ns.nestedarrtype.v1~test.pkg.ns.item.v1.0',
+        'gts.test.pkg.ns.nestedarrtype.v1~'
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.casted_entity.child).toEqual({ q: 'kept' });
+      expect(result.removed_properties).toContain('child.junk');
+    });
+
+    test('a nested property with no explicit type but properties/additionalProperties is still recursed into', () => {
+      const store = new GtsStore({ validateRefs: false });
+      store.register(
+        createJsonEntity({
+          $id: 'gts.test.pkg.ns.nestednotype.v1~',
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'object',
+          properties: {
+            child: {
+              properties: { q: { type: 'string' } },
+              additionalProperties: false,
+            },
+          },
+        })
+      );
+      store.register(
+        createJsonEntity({
+          id: 'gts.test.pkg.ns.nestednotype.v1~test.pkg.ns.item.v1.0',
+          child: { q: 'kept', junk: 1 },
+        })
+      );
+
+      const result: Record<string, any> = store.castInstance(
+        'gts.test.pkg.ns.nestednotype.v1~test.pkg.ns.item.v1.0',
+        'gts.test.pkg.ns.nestednotype.v1~'
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.casted_entity.child).toEqual({ q: 'kept' });
+      expect(result.removed_properties).toContain('child.junk');
     });
   });
 
@@ -704,8 +843,8 @@ describe('GTS Store Operations', () => {
       const malformedId = 'gts.x.unit.tr.nestedorphanbug.base.v1~';
       expect(() =>
         gts.register({
-          $$id: malformedId,
-          $$schema: 'http://json-schema.org/draft-07/schema#',
+          $id: malformedId,
+          $schema: 'http://json-schema.org/draft-07/schema#',
           type: 'object',
         })
       ).toThrow(`Invalid GTS entity id: '${malformedId}'`);
@@ -715,8 +854,8 @@ describe('GTS Store Operations', () => {
       const malformedId = 'gts.vendor.pkg.ns.type.1~';
       expect(() =>
         gts.register({
-          $$id: malformedId,
-          $$schema: 'http://json-schema.org/draft-07/schema#',
+          $id: malformedId,
+          $schema: 'http://json-schema.org/draft-07/schema#',
           type: 'object',
         })
       ).toThrow(`Invalid GTS entity id: '${malformedId}'`);
@@ -726,15 +865,21 @@ describe('GTS Store Operations', () => {
       const malformedId = 'gts.vendor.pkg.ns.type.v1';
       expect(() =>
         gts.register({
-          $$id: malformedId,
-          $$schema: 'http://json-schema.org/draft-07/schema#',
+          $id: malformedId,
+          $schema: 'http://json-schema.org/draft-07/schema#',
           type: 'object',
         })
       ).toThrow(`Invalid GTS entity id: '${malformedId}'`);
     });
 
     test('rejects an empty string id', () => {
-      expect(() => gts.register({ gtsId: '' })).toThrow("Invalid GTS entity id: ''");
+      // An empty-valued `gtsId` field means no id field was actually
+      // detected (`findFirstValidField` requires a non-empty value), so this
+      // is the "no id at all" case, not a malformed-but-present id - the
+      // instance-side "Unable to detect GTS ID" message applies here rather
+      // than the generic "Invalid GTS entity id" message used for a
+      // non-empty, ill-formed id.
+      expect(() => gts.register({ gtsId: '' })).toThrow(/Unable to detect GTS ID in instance entity/);
     });
   });
 
@@ -762,8 +907,8 @@ describe('GTS Store Operations', () => {
       const uuidId = '7a1d2f34-5678-49ab-9012-abcdef123456';
       expect(() =>
         gts.register({
-          $$id: uuidId,
-          $$schema: 'http://json-schema.org/draft-07/schema#',
+          $id: uuidId,
+          $schema: 'http://json-schema.org/draft-07/schema#',
           type: 'object',
         })
       ).toThrow(`Invalid GTS entity id: '${uuidId}'`);
@@ -889,5 +1034,593 @@ describe('GTS Store Operations', () => {
       expect(result.segments[0].isType).toBe(true);
       expect(result.segments[1].isType).toBe(false);
     });
+  });
+});
+
+// Phase 4 - `$id`/`$schema`/`$ref` detection vs. the bogus `$$` aliases
+// (spec canonical suite: tests/test_op6_schema_validation.py).
+//
+// `$$id`/`$$schema`/`$$ref` are an HttpRunner escaping artifact in the
+// canonical Python source (HttpRunner unescapes `$$` -> `$` on the wire),
+// NOT GTS or JSON Schema keywords. The library currently treats them as
+// first-class aliases (see `entityIdFields`/`schemaIdFields` in
+// `src/extract.ts`, the `KEYWORDS` table in `src/compatibility.ts`, and the
+// `$$id`/`$$schema`/`$$ref` switch cases and lookups in `src/store.ts`).
+// The tests below pin the behavior a later phase must produce once those
+// aliases are removed; several are expected to fail against today's
+// implementation - that is the intended outcome of this authoring step.
+describe('Phase 4 - $$ escaping artifacts are not GTS/JSON-Schema keywords', () => {
+  describe('canonical: LiteralDoubleDollarIdRejected', () => {
+    const content = {
+      $$id: 'gts://gts.x.test6.literal_double_dollar.reject.v1~',
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+    };
+
+    test('extractID does not treat a literal $$id as the entity id field', () => {
+      const result = extractID(content);
+      // A real $schema is present, so the document is still a type schema...
+      expect(result.is_type_schema).toBe(true);
+      // ...but $$id is not a recognized id field, so no entity id is found.
+      expect(result.id).toBe('');
+      expect(result.selected_entity_field).toBeUndefined();
+    });
+
+    test('registering the schema fails with "Unable to detect GTS ID in schema"', () => {
+      const gts = new GTS();
+      expect(() => gts.register(content)).toThrow(/Unable to detect GTS ID in schema/);
+    });
+  });
+
+  describe('canonical: DoubleDollarSchemaAndId_TreatedAsInstance', () => {
+    const content = {
+      $$schema: 'http://json-schema.org/draft-07/schema#',
+      $$id: 'gts://gts.x.test6.double_dollar.instance_like.v1~',
+      type: 'object',
+    };
+
+    test('extractID does not treat a literal $$schema as a schema marker', () => {
+      const result = extractID(content);
+      // Only a real $schema marks a document as a JSON Schema; $$schema does not.
+      expect(result.is_type_schema).toBe(false);
+    });
+
+    test('registering fails as an instance with no detectable id', () => {
+      const gts = new GTS();
+      // Neither $$id nor $$schema are recognized fields, so this is an
+      // instance document with no usable id field at all.
+      expect(() => gts.register(content)).toThrow(/Unable to detect GTS ID in instance entity/);
+    });
+  });
+
+  describe('canonical: DoubleDollarSchemaWithRealId_TreatedAsInstance', () => {
+    const id = 'gts.x.test6.double_dollar.instance_ok.v1~';
+    const content = {
+      $$schema: 'http://json-schema.org/draft-07/schema#',
+      $id: `gts://${id}`,
+      type: 'object',
+    };
+
+    test('extractID classifies the document as an instance, not a schema', () => {
+      const result = extractID(content);
+      expect(result.is_type_schema).toBe(false);
+      expect(result.id).toBe(id);
+    });
+
+    test('registers successfully and validates as an instance entity', () => {
+      const gts = new GTS();
+      gts.register(content);
+      const validated = gts.validateEntity(id);
+      expect(validated.entity_type).toBe('instance');
+    });
+  });
+
+  describe('canonical: DoubleDollarRefNotMapped', () => {
+    const BASE = 'gts.x.test6.dref.base.v1~';
+    const DER_REF = 'gts.x.test6.dref.base.v1~x.test6._.der_ref.v1~';
+    const DER_DD = 'gts.x.test6.dref.base.v1~x.test6._.der_dd.v1~';
+    const INST_REF = 'gts.x.test6.dref.base.v1~x.test6._.der_ref.v1~x.y._.i1.v1.0';
+    const INST_DD = 'gts.x.test6.dref.base.v1~x.test6._.der_dd.v1~x.y._.i2.v1.0';
+
+    function setup(): GTS {
+      const gts = new GTS();
+      gts.register({
+        $id: `gts://${BASE}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'type', 'base_field'],
+        properties: {
+          id: { type: 'string' },
+          type: { type: 'string' },
+          base_field: { type: 'string' },
+        },
+      });
+      gts.register({
+        $id: `gts://${DER_REF}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        allOf: [{ $ref: `gts://${BASE}` }],
+      });
+      gts.register({
+        $id: `gts://${DER_DD}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        // literal double-dollar ref: an HttpRunner-escaping artifact, not $ref
+        allOf: [{ $$ref: `gts://${BASE}` }],
+      });
+      gts.register({ id: INST_REF, type: DER_REF });
+      gts.register({ id: INST_DD, type: DER_DD });
+      return gts;
+    }
+
+    test('control: a real $ref inherits the base_field requirement', () => {
+      const gts = setup();
+      const result = gts.validateInstance(INST_REF);
+      expect(result.ok).toBe(false);
+    });
+
+    test('subject: a literal $$ref does NOT inherit the base_field requirement', () => {
+      const gts = setup();
+      const result = gts.validateInstance(INST_DD);
+      // $$ref is an unknown, no-op property here - not JSON Schema $ref - so
+      // the derived schema does not inherit the base's `required: [base_field]`.
+      expect(result.ok).toBe(true);
+    });
+  });
+
+  describe('canonical: DoubleDollarRefDerivedSchemaMismatch', () => {
+    const BASE = 'gts.x.test6.dref_mismatch.base.v1~';
+    const DERIVED = 'gts.x.test6.dref_mismatch.base.v1~x.test6._.literal_dd.v1~';
+
+    test('a derived schema whose only "ref" is a literal $$ref is rejected as incompatible with its GTS base', () => {
+      const gts = new GTS();
+      gts.register({
+        $id: `gts://${BASE}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        required: ['base_field'],
+        properties: { base_field: { type: 'string' } },
+      });
+      gts.register({
+        $id: `gts://${DERIVED}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        // literal double-dollar ref does not establish inheritance, so the
+        // derived schema must restate the base's constraints itself - it
+        // does not, so it is incompatible with its GTS-chain base.
+        allOf: [{ $$ref: `gts://${BASE}` }],
+      });
+
+      const result = gts.validateSchemaAgainstParent(DERIVED);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('base_field');
+    });
+  });
+
+  describe('direct: $$ id/schema/ref are not registered keyword aliases', () => {
+    test('extractID never selects $$id as the entity id field, even when it is the only id-shaped key', () => {
+      const result = extractID({ $$id: 'gts://gts.x.test6.direct.no_alias.v1~', foo: 'bar' });
+      expect(result.selected_entity_field).toBeUndefined();
+      expect(result.id).toBe('');
+    });
+
+    test('extractID never treats $$schema alone as a schema marker', () => {
+      const result = extractID({ $$schema: 'http://json-schema.org/draft-07/schema#', foo: 'bar' });
+      expect(result.is_type_schema).toBe(false);
+    });
+  });
+});
+
+// Phase 5 - `x-gts-ref` traversal gaps
+// (spec canonical suite: .gts-spec/tests/test_refimpl_x_gts_ref.py,
+// TestCaseXGtsRef_ImplicitObjectAndLocalRef / TestCaseXGtsRef_RootLocalReference).
+//
+// `XGtsRefValidator.visitInstance` (src/x-gts-ref.ts) only recurses into
+// `schema.properties` when `schema.type === 'object'` is explicitly declared,
+// and it has no `$ref` handling at all - so it neither follows a local
+// JSON-pointer `$ref` into `definitions` nor a root `$ref: "#"`. Each `it`
+// below is expected to fail against today's implementation; the paired
+// "control" case pins the same traversal shape with a *correct* reference,
+// which passes today - but vacuously, since the validator does not visit
+// that path at all yet, not because it checked and approved the value. A
+// later phase must make the control case pass for the right reason.
+describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root $ref)', () => {
+  describe('canonical: TestCaseXGtsRef_ImplicitObjectAndLocalRef (a) - implicit object', () => {
+    // The holder schema never declares `type: "object"` - only `required`,
+    // `properties` and `additionalProperties: false` - yet x-gts-ref on
+    // `properties.ref` must still be enforced (gts-spec: "the point is that
+    // x-gts-ref enforcement must not depend on an explicit type: object
+    // declaration").
+    function registerHolder(gts: GTS, holderId: string, targetId: string) {
+      gts.register({
+        $id: `gts://${holderId}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        required: ['id', 'ref'],
+        properties: {
+          id: { type: 'string' },
+          ref: { type: 'string', 'x-gts-ref': targetId },
+        },
+        additionalProperties: false,
+      });
+    }
+
+    // The x-gts-ref registry-existence check (src/x-gts-ref.ts) only engages
+    // once the referenced *type* itself is registered in the store - an
+    // unregistered type prefix is treated as a foreign/documentation
+    // namespace and the check is skipped entirely (see the comment above
+    // the `this.store.get(pattern)` gate). Registering only an *instance*
+    // under the target prefix (as this test previously did, without ever
+    // registering `targetId` itself) never engages that gate, so the
+    // assertion below would pass identically whether or not enforcement
+    // works. Register the target type schema too, so the control actually
+    // pins the enforcement it claims to.
+    function registerTargetType(gts: GTS, targetId: string) {
+      gts.register({
+        $id: `gts://${targetId}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { id: { type: 'string' } },
+      });
+    }
+
+    test('control: a correctly-prefixed ref through an implicit-object schema validates', () => {
+      const gts = new GTS();
+      const holderId = 'gts.x.test5_implicit_ctl._.holder.v1~';
+      const targetId = 'gts.x.test5_implicit_ctl._.target.v1~';
+      registerHolder(gts, holderId, targetId);
+      // The x-gts-ref registry-existence check requires the referenced
+      // entity to actually be registered (see OP#13 tests and
+      // `TestCaseXGtsRef_PrefixAndSelfRef` in the canonical suite, which
+      // register the referenced capability before validating a good
+      // reference to it), so register the target's type schema and the
+      // referenced instance here too.
+      registerTargetType(gts, targetId);
+      gts.register({ id: `${targetId}x.vendor._.good.v1` });
+      gts.register({
+        id: `${holderId}x.vendor._.good.v1`,
+        ref: `${targetId}x.vendor._.good.v1`,
+      });
+      const result = gts.validateInstance(`${holderId}x.vendor._.good.v1`);
+      expect(result.ok).toBe(true);
+    });
+
+    test('a correctly-prefixed ref through an implicit-object schema is rejected when the target instance is not registered (registry-existence check actually engages)', () => {
+      const gts = new GTS();
+      const holderId = 'gts.x.test5_implicit_ctl_neg._.holder.v1~';
+      const targetId = 'gts.x.test5_implicit_ctl_neg._.target.v1~';
+      registerHolder(gts, holderId, targetId);
+      // The type is registered, but the referenced instance is not - this
+      // must fail the registry-existence check, proving that check is
+      // actually reachable through the implicit-object traversal shape.
+      registerTargetType(gts, targetId);
+      gts.register({
+        id: `${holderId}x.vendor._.good.v1`,
+        ref: `${targetId}x.vendor._.nonexistent.v1`,
+      });
+      const result = gts.validateInstance(`${holderId}x.vendor._.good.v1`);
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/not found in registry/);
+    });
+
+    test('a mis-prefixed ref through an implicit-object schema is rejected', () => {
+      const gts = new GTS();
+      const holderId = 'gts.x.test5_implicit._.holder.v1~';
+      const targetId = 'gts.x.test5_implicit._.target.v1~';
+      registerHolder(gts, holderId, targetId);
+      gts.register({
+        id: `${holderId}x.vendor._.bad.v1`,
+        ref: 'gts.x.test5_implicit._.other_target.v1~x.vendor._.bad.v1',
+      });
+      const result = gts.validateInstance(`${holderId}x.vendor._.bad.v1`);
+      // TODO(phase-5): fails today - visitInstance only recurses into
+      // schema.properties when schema.type === 'object' is explicit, so the
+      // implicit-object holder's `ref` property is never visited and no
+      // x-gts-ref error is ever produced (result.ok is true today).
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/does not match pattern/);
+    });
+  });
+
+  describe('canonical: TestCaseXGtsRef_ImplicitObjectAndLocalRef (b) - local $ref into definitions', () => {
+    function registerHolder(gts: GTS, holderId: string, targetId: string) {
+      gts.register({
+        $id: `gts://${holderId}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        required: ['id', 'ref'],
+        properties: {
+          id: { type: 'string' },
+          ref: { $ref: '#/definitions/TargetRef' },
+        },
+        definitions: {
+          TargetRef: { type: 'string', 'x-gts-ref': targetId },
+        },
+        additionalProperties: false,
+      });
+    }
+
+    // See the implicit-object control test above: registering only an
+    // *instance* under the target prefix never engages the registry-
+    // existence gate (`store.get(pattern)`), because the gate keys off the
+    // target *type* being registered - so the type schema must be
+    // registered too for this control to pin real enforcement.
+    function registerTargetType(gts: GTS, targetId: string) {
+      gts.register({
+        $id: `gts://${targetId}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { id: { type: 'string' } },
+      });
+    }
+
+    test('control: a correctly-prefixed ref through a local $ref into definitions validates', () => {
+      const gts = new GTS();
+      const holderId = 'gts.x.test5_localref_ctl._.holder.v1~';
+      const targetId = 'gts.x.test5_localref_ctl._.target.v1~';
+      registerHolder(gts, holderId, targetId);
+      // See the implicit-object control test above: the referenced entity
+      // must actually be registered for the registry-existence check.
+      registerTargetType(gts, targetId);
+      gts.register({ id: `${targetId}x.vendor._.good.v1` });
+      gts.register({
+        id: `${holderId}x.vendor._.good.v1`,
+        ref: `${targetId}x.vendor._.good.v1`,
+      });
+      const result = gts.validateInstance(`${holderId}x.vendor._.good.v1`);
+      expect(result.ok).toBe(true);
+    });
+
+    test('a correctly-prefixed ref reached only through a local $ref into definitions is rejected when the target instance is not registered (registry-existence check actually engages)', () => {
+      const gts = new GTS();
+      const holderId = 'gts.x.test5_localref_ctl_neg._.holder.v1~';
+      const targetId = 'gts.x.test5_localref_ctl_neg._.target.v1~';
+      registerHolder(gts, holderId, targetId);
+      // The type is registered, but the referenced instance is not.
+      registerTargetType(gts, targetId);
+      gts.register({
+        id: `${holderId}x.vendor._.good.v1`,
+        ref: `${targetId}x.vendor._.nonexistent.v1`,
+      });
+      const result = gts.validateInstance(`${holderId}x.vendor._.good.v1`);
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/not found in registry/);
+    });
+
+    test('a mis-prefixed ref reached only through a local $ref into definitions is rejected', () => {
+      const gts = new GTS();
+      const holderId = 'gts.x.test5_localref._.holder.v1~';
+      const targetId = 'gts.x.test5_localref._.target.v1~';
+      registerHolder(gts, holderId, targetId);
+      gts.register({
+        id: `${holderId}x.vendor._.bad.v1`,
+        ref: 'gts.x.test5_localref._.other_target.v1~x.vendor._.bad.v1',
+      });
+      const result = gts.validateInstance(`${holderId}x.vendor._.bad.v1`);
+      // TODO(phase-5): fails today - visitInstance has no `$ref` handling at
+      // all, so `properties.ref` = `{ $ref: '#/definitions/TargetRef' }`
+      // is never resolved into the `TargetRef` definition that actually
+      // carries `x-gts-ref` (result.ok is true today).
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/does not match pattern/);
+    });
+  });
+
+  describe('canonical: TestCaseXGtsRef_RootLocalReference - recursive $ref: "#" at the root', () => {
+    // "A bare $ref: '#' must traverse the complete root schema ... a
+    // recursive child points to the root document itself, and the nested
+    // x-gts-ref must still be validated."
+    function registerRoot(gts: GTS, rootId: string, targetId: string) {
+      gts.register({
+        $id: `gts://${rootId}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          link: { type: 'string', 'x-gts-ref': targetId },
+          child: { $ref: '#' },
+        },
+        additionalProperties: false,
+      });
+    }
+
+    // See the implicit-object control test above: registering only an
+    // *instance* under the target prefix never engages the registry-
+    // existence gate (`store.get(pattern)`), because the gate keys off the
+    // target *type* being registered - so the type schema must be
+    // registered too for this control to pin real enforcement.
+    function registerTargetType(gts: GTS, targetId: string) {
+      gts.register({
+        $id: `gts://${targetId}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { id: { type: 'string' } },
+      });
+    }
+
+    test('control: a correctly-prefixed nested link through a root $ref: "#" validates', () => {
+      const gts = new GTS();
+      const rootId = 'gts.x.test5_rootref_ctl._.holder.v1~';
+      const targetId = 'gts.x.test5_rootref_ctl._.target.v1~';
+      registerRoot(gts, rootId, targetId);
+      // See the implicit-object control test above: the referenced entity
+      // must actually be registered for the registry-existence check.
+      registerTargetType(gts, targetId);
+      gts.register({ id: `${targetId}x.vendor._.good.v1` });
+      gts.register({
+        id: `${rootId}x.vendor._.good.v1`,
+        child: { link: `${targetId}x.vendor._.good.v1` },
+      });
+      const result = gts.validateInstance(`${rootId}x.vendor._.good.v1`);
+      expect(result.ok).toBe(true);
+    });
+
+    test('a correctly-prefixed nested link through a root $ref: "#" is rejected when the target instance is not registered (registry-existence check actually engages)', () => {
+      const gts = new GTS();
+      const rootId = 'gts.x.test5_rootref_ctl_neg._.holder.v1~';
+      const targetId = 'gts.x.test5_rootref_ctl_neg._.target.v1~';
+      registerRoot(gts, rootId, targetId);
+      // The type is registered, but the referenced instance is not.
+      registerTargetType(gts, targetId);
+      gts.register({
+        id: `${rootId}x.vendor._.good.v1`,
+        child: { link: `${targetId}x.vendor._.nonexistent.v1` },
+      });
+      const result = gts.validateInstance(`${rootId}x.vendor._.good.v1`);
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/not found in registry/);
+    });
+
+    test('a mis-prefixed nested link reached only through a root $ref: "#" is rejected', () => {
+      const gts = new GTS();
+      const rootId = 'gts.x.test5_rootref._.holder.v1~';
+      const targetId = 'gts.x.test5_rootref._.target.v1~';
+      registerRoot(gts, rootId, targetId);
+      gts.register({
+        id: `${rootId}x.vendor._.bad.v1`,
+        child: { link: 'gts.x.test5_rootref._.other_target.v1~x.vendor._.bad.v1' },
+      });
+      const result = gts.validateInstance(`${rootId}x.vendor._.bad.v1`);
+      // TODO(phase-5): fails today for the same reason as the local-$ref
+      // case above - visitInstance never follows `$ref`, so `child`'s
+      // nested `link` (reachable only by re-entering the root schema via
+      // `$ref: "#"`) is never visited (result.ok is true today).
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/does not match pattern/);
+    });
+
+    // Cycle-safety: a recursive `$ref: "#"` gives an unbounded-depth instance
+    // shape. This test was ORIGINALLY written before `$ref` following
+    // existed, and only asserted "does not hang" - a VACUOUS pass, since
+    // the pre-Phase-5 validator satisfied it by never attempting the
+    // recursive traversal in the first place. Now that `visitInstance`
+    // actually follows `$ref: "#"` (bounded by `MAX_SCHEMA_DEPTH` /
+    // `MAX_SCHEMA_PATHS`, src/types.ts), this is strengthened to assert the
+    // real behavior: a *finite*, well-under-budget recursive shape must
+    // still traverse correctly and reach the nested x-gts-ref check (proven
+    // by registering the deep target and expecting `ok: true`, not merely
+    // "some result came back").
+    test('a self-referential root schema traverses correctly (finite depth, well under budget)', () => {
+      const gts = new GTS();
+      const rootId = 'gts.x.test5_rootref_cycle._.holder.v1~';
+      const targetId = 'gts.x.test5_rootref_cycle._.target.v1~';
+      registerRoot(gts, rootId, targetId);
+      // See the control test above: the target type must be registered too
+      // for the registry-existence check to actually engage.
+      registerTargetType(gts, targetId);
+      gts.register({ id: `${targetId}x.vendor._.deep.v1` });
+      gts.register({
+        id: `${rootId}x.vendor._.deep.v1`,
+        // Nest several levels through the recursive `child: { $ref: '#' }`
+        // shape to exercise repeated re-entry into the root schema.
+        child: { child: { child: { child: { link: `${targetId}x.vendor._.deep.v1` } } } },
+      });
+      const start = Date.now();
+      const result = gts.validateInstance(`${rootId}x.vendor._.deep.v1`);
+      const elapsedMs = Date.now() - start;
+      expect(elapsedMs).toBeLessThan(2000);
+      expect(result.ok).toBe(true);
+    });
+
+    // The genuine cycle-safety case the test above could not yet exercise:
+    // an instance nested deeper than `MAX_SCHEMA_DEPTH` through the
+    // recursive `child: { $ref: '#' }` shape. This must fail closed with a
+    // bounded error - not hang, and not silently stop traversing and report
+    // no violation - the same contract `resolveTraitSchemaRefs` /
+    // `resolveSchemaFully` (src/store.ts) already guarantee for their own
+    // $ref/allOf recursion.
+    test('an instance nested deeper than MAX_SCHEMA_DEPTH through recursive $ref: "#" fails closed with a bounded error, not a hang', () => {
+      const gts = new GTS();
+      const rootId = 'gts.x.test5_rootref_toodeep._.holder.v1~';
+      const targetId = 'gts.x.test5_rootref_toodeep._.target.v1~';
+      registerRoot(gts, rootId, targetId);
+      gts.register({ id: `${targetId}x.vendor._.deep.v1` });
+
+      // Build an instance nested one level deeper than MAX_SCHEMA_DEPTH
+      // through the recursive `child` shape.
+      let deep: any = { link: `${targetId}x.vendor._.deep.v1` };
+      for (let i = 0; i < MAX_SCHEMA_DEPTH + 1; i++) {
+        deep = { child: deep };
+      }
+      gts.register({ id: `${rootId}x.vendor._.deep.v1`, ...deep });
+
+      const start = Date.now();
+      const result = gts.validateInstance(`${rootId}x.vendor._.deep.v1`);
+      const elapsedMs = Date.now() - start;
+      expect(elapsedMs).toBeLessThan(2000);
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(new RegExp(`nests deeper than ${MAX_SCHEMA_DEPTH} levels`));
+    });
+  });
+});
+
+// P5-R2 - `visitInstance` (src/x-gts-ref.ts) must fail closed when a
+// `$ref` it is asked to follow does not resolve to a usable schema, rather
+// than silently `return`ing and reporting no violation. Two distinct
+// failure modes are covered: the pointer resolves nowhere at all
+// (`resolveSchemaRef` returns `null`), and the pointer resolves to
+// something that exists but is not usable as a schema (a non-object, such
+// as a `default` value or an array entry).
+//
+// These exercise `XGtsRefValidator` directly (not through `GTS.register` /
+// `store.validateInstance`) because Ajv itself eagerly resolves every
+// `$ref` at schema-compile time and would reject a genuinely dangling
+// pointer before `XGtsRefValidator` ever ran - the bug this finding is
+// about lives in `XGtsRefValidator`'s own, independent local-pointer
+// resolution (`resolveSchemaRef`), which is what `validateInstance` calls
+// directly, unit-style, in these tests.
+describe('P5-R2 - $ref resolution fails closed instead of silently skipping the subtree', () => {
+  test('a $ref pointing at a nonexistent location in the schema fails closed, not silently open', () => {
+    const errors = new XGtsRefValidator().validateInstance(
+      { ref: 'totally-not-a-gts-id' },
+      {
+        type: 'object',
+        properties: { ref: { $ref: '#/definitions/Nope' } },
+        definitions: {
+          TargetRef: { type: 'string', 'x-gts-ref': 'gts.x.probe._.target.v1~' },
+        },
+      }
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0].reason).toMatch(/Cannot resolve \$ref '#\/definitions\/Nope' for x-gts-ref traversal/);
+    expect(errors[0].refPattern).toBe('');
+  });
+
+  test('a $ref pointing at a non-schema value (e.g. into a "default") fails closed, not silently open', () => {
+    const errors = new XGtsRefValidator().validateInstance(
+      { ref: 'totally-not-a-gts-id' },
+      {
+        type: 'object',
+        properties: { ref: { $ref: '#/definitions/TargetRef/default' } },
+        definitions: {
+          TargetRef: {
+            type: 'string',
+            default: 'example-default',
+            'x-gts-ref': 'gts.x.probe._.target.v1~',
+          },
+        },
+      }
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0].reason).toMatch(
+      /Cannot resolve \$ref '#\/definitions\/TargetRef\/default' for x-gts-ref traversal/
+    );
+    expect(errors[0].refPattern).toBe('');
+  });
+
+  test('a $ref pointing at an array (e.g. a "oneOf" list itself, not an element) fails closed, not silently open', () => {
+    const errors = new XGtsRefValidator().validateInstance(
+      { ref: 'totally-not-a-gts-id' },
+      {
+        type: 'object',
+        properties: { ref: { $ref: '#/oneOf' } },
+        oneOf: [{ type: 'string' }, { type: 'number' }],
+      }
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0].reason).toMatch(/Cannot resolve \$ref '#\/oneOf' for x-gts-ref traversal/);
+    expect(errors[0].refPattern).toBe('');
   });
 });

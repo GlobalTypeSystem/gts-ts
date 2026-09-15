@@ -5,6 +5,79 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.3](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.3)**, reaching full canonical conformance (`make e2e`: 485/485).
+
+### Breaking
+
+- `GET /entities/{id}` now returns `200` with `ok: false` for an unknown id instead of `404`.
+  The spec's own `.gts-spec/tests/openapi.json` declares only `200`/`422` for this path, and
+  the canonical `_assert_not_stored` conformance helper asserts `200` with `ok: false` for a
+  missing entity.
+- `POST /entities` now returns `422` when `validate=true` and the instance fails validation,
+  instead of `200` with `ok: false`.
+- An `x-gts-traits` value is now checked for registry existence, but **only when the type its
+  `x-gts-ref` names is itself already registered** — a purely documentary reference to a
+  never-registered namespace is still accepted. Previously a syntactically valid,
+  correctly-prefixed `x-gts-traits` value naming an unregistered entity was accepted
+  unconditionally; gts-spec v0.13.3 issue #107 reverses that rationale, and the canonical test
+  that had pinned the old behavior was inverted.
+- `$$id` / `$$schema` / `$$ref` / `$$defs` are no longer accepted as aliases for `$id` /
+  `$schema` / `$ref` / `$defs`. They were an artifact of the HttpRunner conformance harness
+  escaping `$` to `$$` on the wire, never real GTS or JSON Schema syntax; a schema using them
+  is now processed literally (i.e. treated as an unknown, non-functional keyword) rather than
+  rewritten.
+- JSON Schema **format assertions** are now enforced per spec ADR-0005 for `uuid`, `email`,
+  `date-time`, `date`, `time`, `uri`, `hostname`, `ipv4`, `ipv6` and `regex` — previously these
+  formats were annotation-only and did not reject non-conforming values. `date-time` and `time`
+  are stricter than the `ajv-formats` defaults (a timezone offset is mandatory and its bounds
+  are enforced), and `regex` is asserted as a syntactically valid ECMA-262 pattern, not merely a
+  string.
+- Unknown `x-gts-*` schema keywords are now rejected wherever `x-gts-final` / `x-gts-abstract`
+  / `x-gts-traits-schema` / `x-gts-traits` placement is enforced. Only five keywords are
+  recognized: `x-gts-abstract`, `x-gts-final`, `x-gts-traits`, `x-gts-traits-schema` and
+  `x-gts-ref`; any other `x-gts-` prefixed keyword now fails registration/validation instead of
+  being silently ignored.
+- Ajv now runs with `allErrors: true`, so a single failed validation may report several
+  problems at once, joined with `"; "` in the error string, and error phrasing now matches
+  python-jsonschema (`"<path> is not of type '<type>'"`) uniformly across endpoints rather than
+  Ajv's own message format.
+
+### Added
+
+- `POST /validate-json` and `POST /validate-json/{gts_type}` (OP#6) — transient validation of
+  instance or Type Schema JSON that registers nothing in the store. Both return a
+  `ValidateJsonResult` with `ok`, `id`, `type_id`, `is_type_schema` and `error` always present.
+- `backward_compatibility` / `forward_compatibility` / `full_compatibility` tri-state verdicts
+  are now also reported on `POST /cast` responses, alongside the pre-existing
+  `is_backward_compatible` / `is_forward_compatible` / `is_fully_compatible` booleans. These are
+  deliberately different questions: `is_fully_compatible` reports whether the cast's transformed
+  result validated against the target type, while `full_compatibility` reports schema-level
+  compatibility between the two type schemas — a cast can succeed (`is_fully_compatible: true`)
+  even when the schemas are not fully compatible, and vice versa.
+- `is_type_schema` and `type_id` are now included on `POST /entities` success responses.
+- `GtsStore.unregister()` and `GTS.isRegisteredSchema()`.
+
+### Fixed
+
+- OP#8 now reports `unknown` for all three compatibility verdicts when the two type schemas
+  declare different JSON Schema dialects via `$schema`; equivalent spellings of the same dialect
+  URI (e.g. with/without a trailing fragment) are normalized and no longer treated as a change.
+- `format`, `pattern` and `multipleOf` are now treated as narrowing keywords for compatibility
+  purposes: adding one narrows the accepted set (forward-compatible only), removing one widens
+  it (backward-compatible only), and changing an already-present value is `unknown`. Matches the
+  reference implementation's `check_narrowing_constraints`.
+- An explicit major version `v0` in a query pattern is no longer treated the same as an omitted
+  version (a wildcard); `v0` now matches only major version 0.
+- `x-gts-ref` is now enforced in schemas that omit an explicit `type: "object"`, and through
+  local `$ref` resolution, including a recursive `$ref: "#"` back to the schema root, bounded by
+  `MAX_SCHEMA_DEPTH` / `MAX_SCHEMA_PATHS`.
+- A dangling local `$ref` encountered during `x-gts-ref` traversal now fails validation instead
+  of silently skipping the subtree behind it.
+- GTS type ids longer than 100 characters used in a `POST /validate-json/{gts_type}` path
+  parameter no longer 404 at the router before reaching the handler.
+
 ## [0.4.0] - 2026-08-10
 
 Upgrades the implementation from GTS spec **v0.8** to **[v0.13.1](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.1)**.

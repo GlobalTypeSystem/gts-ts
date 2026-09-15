@@ -33,6 +33,18 @@ import { Gts } from './gts';
  * - `modeled`     - compared directly by one of the `compare*` methods.
  * - `unmodeled`   - a real assertion the engine cannot reason about; a
  *                   difference makes the comparison inconclusive (`unknown`).
+ * - `narrowing`   - a real assertion whose *presence* the engine can reason
+ *                   about even though it cannot compare two present-but-
+ *                   different values: adding it strictly shrinks Valid(S)
+ *                   relative to not having it at all, removing it strictly
+ *                   grows Valid(S), and it does not compose with anything
+ *                   else that would change that. Compared by
+ *                   `compareNarrowing`, which implements the same
+ *                   `added`/`removed`/`changed`/`equal` relation as
+ *                   gts-rust's `NARROWING` set (`schema_evolution.rs:831-878`
+ *                   - `pattern`, `format`, `multipleOf`): added is
+ *                   forward-only, removed is backward-only, a value change on
+ *                   both sides is `unknown`, equal values are a no-op.
  *
  * This is the single source of truth. Everything below - what gets stripped,
  * which keywords mean "this level constrains objects", which axis a bound sits
@@ -40,7 +52,7 @@ import { Gts } from './gts';
  * place and another way somewhere else. Anything absent from the table is
  * treated as `unmodeled`, which fails closed rather than being ignored.
  */
-type KeywordKind = 'annotation' | 'composition' | 'modeled' | 'unmodeled';
+type KeywordKind = 'annotation' | 'composition' | 'modeled' | 'unmodeled' | 'narrowing';
 
 interface KeywordSpec {
   kind: KeywordKind;
@@ -83,18 +95,18 @@ const KEYWORDS: Record<string, KeywordSpec> = {
   writeOnly: { kind: 'annotation' },
   $comment: { kind: 'annotation' },
   $id: { kind: 'annotation' },
-  $$id: { kind: 'annotation' },
   $schema: { kind: 'annotation' },
-  $$schema: { kind: 'annotation' },
   $defs: { kind: 'annotation', values: 'schemaMap' },
   definitions: { kind: 'annotation', values: 'schemaMap' },
-  // Draft-07 treats `format` as an annotation unless assertion is enabled.
-  format: { kind: 'annotation' },
+  // Draft-07 treats `format` as an annotation unless assertion is enabled;
+  // `GtsStore` enables it (`validateFormats: true` plus `applyGtsFormats`),
+  // so a `format` difference genuinely changes Valid(S) and cannot be an
+  // `annotation` here. See the `narrowing` kind above.
+  format: { kind: 'narrowing' },
 
   // Folded in by the resolver before anything is compared
   allOf: { kind: 'composition', values: 'schemaList', shape: Array.isArray },
   $ref: { kind: 'composition', shape: (v) => typeof v === 'string' },
-  $$ref: { kind: 'composition', shape: (v) => typeof v === 'string' },
 
   // Compared directly
   type: { kind: 'modeled', shape: isStringOrStringArray },
@@ -121,13 +133,13 @@ const KEYWORDS: Record<string, KeywordSpec> = {
   if: { kind: 'unmodeled', values: 'schema' },
   then: { kind: 'unmodeled', values: 'schema' },
   else: { kind: 'unmodeled', values: 'schema' },
-  pattern: { kind: 'unmodeled' },
+  pattern: { kind: 'narrowing' },
   patternProperties: { kind: 'unmodeled', object: true, values: 'schemaMap' },
   propertyNames: { kind: 'unmodeled', object: true, values: 'schema' },
   dependencies: { kind: 'unmodeled', object: true },
   dependentSchemas: { kind: 'unmodeled', object: true, values: 'schemaMap' },
   dependentRequired: { kind: 'unmodeled', object: true },
-  multipleOf: { kind: 'unmodeled' },
+  multipleOf: { kind: 'narrowing' },
   contains: { kind: 'unmodeled', values: 'schema' },
   additionalItems: { kind: 'unmodeled', values: 'schema' },
   uniqueItems: { kind: 'unmodeled' },
@@ -203,7 +215,7 @@ function malformedSubschema(value: unknown, depth: number): boolean {
 }
 
 /**
- * True when this schema contains a local JSON-pointer `$ref`/`$$ref`
+ * True when this schema contains a local JSON-pointer `$ref`
  * (a string starting with `#`) anywhere reachable through a genuinely
  * compared position - `properties`, `items`, `allOf`, etc, per `KEYWORDS`'
  * `values` metadata. `SchemaResolver.lookupRef()` deliberately never follows
@@ -220,7 +232,7 @@ function hasUnresolvableLocalRef(schema: Schema, depth = 0): boolean {
   if (depth > MAX_SCHEMA_DEPTH) return false;
 
   return Object.entries(schema).some(([key, value]) => {
-    if ((key === '$ref' || key === '$$ref') && typeof value === 'string' && value.startsWith('#')) return true;
+    if (key === '$ref' && typeof value === 'string' && value.startsWith('#')) return true;
 
     const spec = KEYWORDS[key];
     if (spec?.kind === 'annotation') return false;
@@ -260,6 +272,50 @@ const BOUND_AXES: Array<{ axis: string; isLower: boolean; keywords: Array<{ key:
 for (const [key, spec] of Object.entries(KEYWORDS)) {
   if (spec.bound?.axis === 'minimum') BOUND_AXES[0].keywords.push({ key, exclusive: spec.bound.exclusive });
   if (spec.bound?.axis === 'maximum') BOUND_AXES[1].keywords.push({ key, exclusive: spec.bound.exclusive });
+}
+
+/**
+ * The JSON-Schema type each bound axis actually constrains - `minimum`/
+ * `maximum` only ever apply to numbers, the length axis only to strings, the
+ * items axis only to arrays. A value of any other type sails through the
+ * bound keyword entirely regardless of its measured "size" (§4.3's own
+ * accepted-instance-set definition follows JSON Schema's per-keyword
+ * applicability rules), so a schema that doesn't even admit this axis's
+ * target type can never be constrained by it.
+ */
+const AXIS_TARGET_TYPE: Record<string, string> = {
+  minimum: 'number',
+  maximum: 'number',
+  minLength: 'string',
+  maxLength: 'string',
+  minItems: 'array',
+  maxItems: 'array',
+};
+
+/** Whether a (possibly unknown) type set could contain the axis's target type. */
+function typeSetAdmitsAxis(types: Set<string> | null, target: string): boolean {
+  if (types === null) return true; // genuinely unconstrained - the axis might still apply
+  if (target === 'number') return types.has('number') || types.has('integer');
+  return types.has(target);
+}
+
+/**
+ * True when a schema declares at least one `patternProperties` pattern.
+ * `contentModel()`/`undeclaredSchema()` only look at `properties` and
+ * `additionalProperties`/`unevaluatedProperties` - in Draft-07,
+ * `additionalProperties` applies only to properties matched by neither
+ * `properties` NOR `patternProperties`, so a level closed with
+ * `additionalProperties: false` beside a live `patternProperties` map is NOT
+ * actually fully closed the way `contentModel()` models it. Precisely
+ * modeling which extra property names a regex pattern does or doesn't admit
+ * is out of scope for this engine, so `compareObjects` fails closed to
+ * `unknown` instead whenever `patternProperties` is in play, per this
+ * engine's existing fail-closed convention for keywords it does not fully
+ * reason about.
+ */
+function hasPatternProperties(schema: Schema): boolean {
+  const pp = typeof schema === 'object' && schema !== null ? schema.patternProperties : undefined;
+  return isObject(pp) && Object.keys(pp).length > 0;
 }
 
 /** A schema whose accepted set is everything, used for undeclared properties of an open model. */
@@ -522,6 +578,7 @@ function mergeSchemas(a: Schema, b: Schema): Schema {
  */
 class SchemaResolver {
   private unresolved = false;
+  private exhausted = false;
 
   // Bounds the total number of `$ref` follows and `allOf` branch recursions
   // this resolver may take across its whole lifetime (one top-level
@@ -553,6 +610,18 @@ class SchemaResolver {
     return this.unresolved;
   }
 
+  /**
+   * True when this resolver's whole-lifetime path budget (`MAX_SCHEMA_PATHS`)
+   * has been exhausted. Unlike `hadUnresolvedRef`, this signals that the two
+   * sides of an in-flight `subsumes()` call may have been resolved to
+   * different depths purely because of when the budget ran out - not because
+   * they actually differ - so a caller must not compare the resulting
+   * effective schemas at all once this is set; see `subsumes()`.
+   */
+  get isBudgetExhausted(): boolean {
+    return this.exhausted;
+  }
+
   resolve(schema: Schema, depth = 0): Schema {
     if (schema === false) return false;
     if (schema === true || schema === undefined || schema === null) return {};
@@ -566,15 +635,17 @@ class SchemaResolver {
     }
     if (this.pathCount > MAX_SCHEMA_PATHS) {
       this.unresolved = true;
+      this.exhausted = true;
       return {};
     }
 
-    const { allOf, $ref, $$ref, ...rest } = schema as Record<string, any>;
+    const { allOf, $ref, ...rest } = schema as Record<string, any>;
     let effective: Schema = rest;
 
-    const ref = $ref || $$ref;
+    const ref = $ref;
     if (typeof ref === 'string') {
       this.pathCount++;
+      if (this.pathCount > MAX_SCHEMA_PATHS) this.exhausted = true;
       const target = this.pathCount > MAX_SCHEMA_PATHS ? null : this.lookupRef(ref);
       if (target === null) {
         this.unresolved = true;
@@ -588,6 +659,7 @@ class SchemaResolver {
         this.pathCount++;
         if (this.pathCount > MAX_SCHEMA_PATHS) {
           this.unresolved = true;
+          this.exhausted = true;
           break;
         }
         effective = mergeSchemas(effective, this.resolve(branch, depth + 1));
@@ -729,7 +801,7 @@ class SubsumptionChecker {
     // malformed composition keyword would be invisible afterwards.
     if (hasMalformedKeyword(outerRaw) || hasMalformedKeyword(innerRaw)) return 'unknown';
 
-    // A local `$ref`/`$$ref` in a compared position is never followed by the
+    // A local `$ref` in a compared position is never followed by the
     // resolver (see `lookupRef`), so it must downgrade the verdict here,
     // before the `deepEqual` fast-path below can return `compatible` on the
     // strength of two schemas that normalize identically once `$defs` -
@@ -738,6 +810,15 @@ class SubsumptionChecker {
 
     const outer = this.resolver.resolve(outerRaw, depth);
     const inner = this.resolver.resolve(innerRaw, depth);
+
+    // Once the resolver's whole-lifetime path budget has run out, `outer` and
+    // `inner` may have been cut off at different points purely because of
+    // resolution order (`subsumes()` always resolves `outerRaw` first), not
+    // because they actually differ. Comparing them further would report a
+    // false, definitive verdict; `finalize()` only rescues `compatible`, so a
+    // budget-exhausted `incompatible` would otherwise slip through as real.
+    // Bail out to `unknown` immediately, before any comparison runs.
+    if (this.resolver.isBudgetExhausted) return 'unknown';
 
     if (inner === false) return this.finalize('compatible'); // accepts nothing, trivially included
     if (outer === false) return 'incompatible';
@@ -753,6 +834,7 @@ class SubsumptionChecker {
     verdict = worst(verdict, this.compareBounds(outerNorm, innerNorm));
     verdict = worst(verdict, this.compareObjects(outerNorm, innerNorm, depth));
     verdict = worst(verdict, this.compareArrays(outerNorm, innerNorm, depth));
+    verdict = worst(verdict, this.compareNarrowing(outerNorm, innerNorm));
     verdict = worst(verdict, this.compareUnmodeled(outerNorm, innerNorm));
 
     return this.finalize(verdict);
@@ -783,6 +865,14 @@ class SubsumptionChecker {
     // `minimum: 0` and `exclusiveMinimum: 0` look like unrelated keywords even
     // though `x > 0` is a strict subset of `x >= 0`.
     for (const axis of BOUND_AXES) {
+      // A bound only ever constrains the type it targets (numbers for
+      // minimum/maximum, strings for length, arrays for items). If `inner`
+      // cannot even admit that type, no instance it accepts is ever measured
+      // on this axis, so the axis simply does not apply here - `{type:
+      // 'number'}` vs `{minLength:3}` is not a nonsensical conflict, it is
+      // two constraints on disjoint value spaces.
+      if (!typeSetAdmitsAxis(typeSet(inner), AXIS_TARGET_TYPE[axis.axis])) continue;
+
       const outerBound = readBound(outer, axis);
       if (outerBound === null) continue; // outer constrains nothing on this axis
       const innerBound = readBound(inner, axis);
@@ -813,6 +903,13 @@ class SubsumptionChecker {
     // `contentModel()` while being invisible to this guard.
     const constrainsObjects = OBJECT_KEYWORDS.some((key) => key in outer || key in inner);
     if (!constrainsObjects) return 'compatible';
+
+    // `patternProperties` changes which property names `additionalProperties`
+    // actually governs, in a way this engine does not model precisely - see
+    // `hasPatternProperties`. Failing closed here, before either side's
+    // content model is read, avoids a false `incompatible` on an undeclared
+    // property this engine cannot tell is actually covered by a pattern.
+    if (hasPatternProperties(outer) || hasPatternProperties(inner)) return 'unknown';
 
     // Outer may not demand a property the inner schema allows to be absent.
     const outerRequired: string[] = outer.required || [];
@@ -872,44 +969,118 @@ class SubsumptionChecker {
     for (const key of keys) {
       if (keywordKind(key) !== 'unmodeled') continue;
       if (deepEqual(outer[key], inner[key])) continue;
+      return 'unknown';
+    }
 
-      // `pattern` is otherwise compared by exact equality like any other
-      // unmodeled keyword, but a pinned-down value set (`const`/`enum`) that
+    return 'compatible';
+  }
+
+  /**
+   * Compares the `narrowing` keywords (`format`, `pattern`, `multipleOf`):
+   * the engine can reason about *presence* even though it cannot compare two
+   * present-but-different values against each other. Mirrors gts-rust's
+   * `check_narrowing_constraints` (`schema_evolution.rs:831-878`).
+   *
+   * - absent on `outer`                    - outer imposes nothing here,
+   *                                           regardless of `inner`: compatible.
+   * - present on `outer`, absent on `inner` - outer narrows relative to inner,
+   *                                           so `inner` (unconstrained here)
+   *                                           can hold instances `outer`
+   *                                           rejects: incompatible, unless a
+   *                                           pinned-down value set on `inner`
+   *                                           (`const`/`enum`) demonstrably
+   *                                           already satisfies outer's
+   *                                           `pattern` (mirrors the
+   *                                           `compareBounds` fixed-value
+   *                                           carve-out).
+   * - present on both, equal values         - no change: compatible.
+   * - present on both, different values     - inclusion is undecidable
+   *                                           without evaluating the two
+   *                                           values against each other:
+   *                                           unknown.
+   */
+  private compareNarrowing(outer: Schema, inner: Schema): CompatVerdict {
+    let verdict: CompatVerdict = 'compatible';
+
+    for (const [key, spec] of Object.entries(KEYWORDS)) {
+      if (spec.kind !== 'narrowing') continue;
+      if (!(key in outer)) continue; // outer imposes nothing on this axis
+
+      const innerHas = key in inner;
+      if (innerHas && deepEqual(outer[key], inner[key])) continue; // identical - no change
+
+      // `pattern` is otherwise judged by presence alone like the other
+      // narrowing keywords, but a pinned-down value set (`const`/`enum`) that
       // already matches outer's pattern satisfies it just as much as
-      // restating the pattern would - mirrors the `compareBounds` fixed-value
-      // carve-out above, scoped narrowly to this one keyword.
+      // restating (or keeping) the pattern would.
       if (key === 'pattern' && typeof outer.pattern === 'string') {
         const innerValues = fixedValues(inner);
-        if (innerValues !== null && innerValues.length > 0) {
+        if (innerValues !== null && innerValues.length > 0 && innerValues.every((v) => typeof v === 'string')) {
           let regex: RegExp | null = null;
           try {
             regex = new RegExp(outer.pattern);
           } catch {
             regex = null;
           }
-          if (regex !== null && innerValues.every((v) => typeof v === 'string' && regex!.test(v))) {
+          if (regex !== null) {
+            if (innerValues.every((v) => regex!.test(v))) continue;
+            // Every inner value is a concrete string and at least one of them
+            // demonstrably fails outer's pattern - a real, proven conflict,
+            // not merely inconclusive narrowing.
+            verdict = worst(verdict, 'incompatible');
             continue;
           }
         }
       }
 
-      return 'unknown';
+      verdict = worst(verdict, innerHas ? 'unknown' : 'incompatible');
     }
 
-    return 'compatible';
+    return verdict;
   }
 }
 
 export class GtsCompatibility {
   /**
+   * The dialect a `$schema` value names, with the spellings that carry no
+   * semantic content stripped: a trailing `#` and the URI scheme. All four
+   * spellings of the Draft-07 URI are in common use, and a respelling is not
+   * a dialect change. Mirrors gts-rust `canonical_dialect`
+   * (`schema_evolution.rs:1763`).
+   */
+  static canonicalDialect(declared: string): string {
+    const body = declared.endsWith('#') ? declared.slice(0, -1) : declared;
+    return body.replace(/^https?:\/\//, '');
+  }
+
+  /**
    * Compares two schema documents directly (rather than by identifier) and
    * reports both evolution relations.
+   *
+   * A genuine change of *declared* dialect (an omitted `$schema` is read as
+   * "whatever the other side declares", per spec §11 - GTS is
+   * dialect-agnostic) makes this checker unable to compare the two documents
+   * under one stable set of keyword semantics, so both relations are
+   * reported `unknown` rather than compared at all. Mirrors gts-rust making
+   * `CompatibilityFinding::DialectChanged` one of only two `is_inconclusive`
+   * findings (`schema_evolution.rs:~218`), so `from_diagnostics` (`~:87`)
+   * yields `Unknown`.
    */
   static compareSchemas(
     store: EntityLookup,
     oldSchema: Schema,
     newSchema: Schema
   ): { backward: CompatVerdict; forward: CompatVerdict } {
+    const oldDialect = isObject(oldSchema) && typeof oldSchema.$schema === 'string' ? oldSchema.$schema : undefined;
+    const newDialect = isObject(newSchema) && typeof newSchema.$schema === 'string' ? newSchema.$schema : undefined;
+    if (
+      oldDialect !== undefined &&
+      newDialect !== undefined &&
+      this.canonicalDialect(oldDialect) !== this.canonicalDialect(newDialect)
+    ) {
+      return { backward: 'unknown', forward: 'unknown' };
+    }
+
     return {
       backward: new SubsumptionChecker(store).subsumes(newSchema, oldSchema),
       forward: new SubsumptionChecker(store).subsumes(oldSchema, newSchema),
@@ -967,8 +1138,10 @@ export class GtsCompatibility {
     return id.startsWith(GTS_URI_PREFIX) ? id.substring(GTS_URI_PREFIX.length) : id;
   }
 
-  /** Full compatibility holds only when both directions hold (§4.3). */
-  private static fullVerdict(backward: CompatVerdict, forward: CompatVerdict): CompatVerdict {
+  /** Full compatibility holds only when both directions hold (§4.3). Shared
+   * with `GtsStore.castInstance()` so `/cast`'s three-valued verdicts are
+   * derived from the same rule as `/compatibility`'s. */
+  static fullVerdict(backward: CompatVerdict, forward: CompatVerdict): CompatVerdict {
     if (backward === 'incompatible' || forward === 'incompatible') return 'incompatible';
     if (backward === 'unknown' || forward === 'unknown') return 'unknown';
     return 'compatible';
@@ -1025,8 +1198,8 @@ export class GtsCompatibility {
       const fromSeg = fromGtsId.segments[fromGtsId.segments.length - 1];
       const toSeg = toGtsId.segments[toGtsId.segments.length - 1];
 
-      if (fromSeg.verMajor < toSeg.verMajor) return 'upgrade';
-      if (fromSeg.verMajor > toSeg.verMajor) return 'downgrade';
+      if ((fromSeg.verMajor ?? 0) < (toSeg.verMajor ?? 0)) return 'upgrade';
+      if ((fromSeg.verMajor ?? 0) > (toSeg.verMajor ?? 0)) return 'downgrade';
       if ((fromSeg.verMinor || 0) < (toSeg.verMinor || 0)) return 'upgrade';
       if ((fromSeg.verMinor || 0) > (toSeg.verMinor || 0)) return 'downgrade';
 

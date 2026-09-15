@@ -10,8 +10,8 @@ const DRAFT7 = 'http://json-schema.org/draft-07/schema#';
  */
 function baseType(id: string, topLevel: Record<string, any> = {}) {
   return {
-    $$id: id,
-    $$schema: DRAFT7,
+    $id: id,
+    $schema: DRAFT7,
     type: 'object',
     required: ['id'],
     properties: { id: { type: 'string' } },
@@ -21,10 +21,10 @@ function baseType(id: string, topLevel: Record<string, any> = {}) {
 
 function derivedType(id: string, baseId: string, topLevel: Record<string, any> = {}) {
   return {
-    $$id: id,
-    $$schema: DRAFT7,
+    $id: id,
+    $schema: DRAFT7,
     type: 'object',
-    allOf: [{ $$ref: `gts://${baseId}` }, { type: 'object' }],
+    allOf: [{ $ref: `gts://${baseId}` }, { type: 'object' }],
     ...topLevel,
   };
 }
@@ -413,7 +413,7 @@ describe('OP#13 - the effective trait schema must stay satisfiable', () => {
     gts.register(
       baseType(baseId, {
         'x-gts-abstract': true,
-        'x-gts-traits-schema': { allOf: [{ $$ref: `gts://${commonId}` }, { $$ref: `gts://${commonId}` }] },
+        'x-gts-traits-schema': { allOf: [{ $ref: `gts://${commonId}` }, { $ref: `gts://${commonId}` }] },
       })
     );
 
@@ -424,7 +424,7 @@ describe('OP#13 - the effective trait schema must stay satisfiable', () => {
     const gts = new GTS({ validateRefs: false });
     const selfId = 'gts.x.unit.tr.selfref.v1~';
 
-    gts.register(baseType(selfId, { 'x-gts-traits-schema': { $$ref: `gts://${selfId}` } }));
+    gts.register(baseType(selfId, { 'x-gts-traits-schema': { $ref: `gts://${selfId}` } }));
 
     expect(gts.validateEntity(selfId).ok).toBe(false);
   });
@@ -772,26 +772,25 @@ describe('OP#13 - the effective trait schema must stay satisfiable', () => {
     expect(gts.validateEntity(kidId).ok).toBe(false);
   });
 
-  test('a conflict between two allOf branches within one trait-schema level is not caught before concretization', () => {
-    // Reflects a genuine, faithfully-ported gts-rust limitation rather than a
-    // bug: `validate_trait_schema_compatibility` (ported here as
+  test('a conflict between two allOf branches within one trait-schema level is caught before concretization', () => {
+    // This used to be a genuine, faithfully-ported gts-rust limitation:
+    // `validate_trait_schema_compatibility` (ported here as
     // `validateTraitChainSatisfiability`'s declared-schema-fold +
-    // accepted-set-inclusion loop) only compares *consecutive chain levels*
-    // (`chain[0..i]` vs `chain[0..i+1]`) - it never inspects a single level's
-    // OWN internal `allOf` composition. `declared_schema`'s own fold of that
-    // single level's branches is last-branch-wins (see `absorbProperty`), so
-    // `branchA`'s `const: 'a'` is silently overwritten by `branchB`'s
-    // `const: 'b'` before any comparison happens, and no chain-level
-    // comparison ever re-examines it. Since this base type is abstract, it
-    // is also exempt from the completeness check (§9.7.5's "descendants
-    // close the gaps"), so the conflict stays latent until some concrete
-    // descendant actually materializes `k` and AJV validates the real,
-    // unfolded `allOf` against it. (An earlier round of this refactor used a
-    // bespoke recursive walker - not part of gts-rust's actual algorithm -
-    // that caught this eagerly and asserted `ok: false` here; per this
-    // session's zero-divergence mandate, that extra check was removed rather
-    // than re-derived, so this scenario is now `ok: true` at the abstract
-    // level, matching gts-rust exactly.)
+    // accepted-set-inclusion loop) only compared *consecutive chain levels*
+    // (`chain[0..i]` vs `chain[0..i+1]`), never a single level's OWN internal
+    // `allOf` composition - so `branchA`'s `const: 'a'` was silently
+    // overwritten by `branchB`'s `const: 'b'` (declared_schema's fold is
+    // last-branch-wins, see `absorbProperty`) before any comparison ever
+    // re-examined it, leaving the conflict latent at this abstract level.
+    // `validateTraitChainSatisfiability` now additionally decomposes each
+    // chain level's own `allOf` into its constituent branches (`allOf`
+    // nesting is associative) and runs the identical prefix-narrowing check
+    // across THEM too (`flattenAllOfBranches` + `checkNarrowingStep`), so
+    // this exact shape - two allOf branches disagreeing on the same
+    // property, ONE level of the chain, no descendant needed - is now caught
+    // even though this base type is abstract (satisfiability is checked
+    // regardless of the completeness exemption; see the class-level doc
+    // comment on `validateTraitChainSatisfiability`).
     const gts = new GTS({ validateRefs: false });
     // A GTS id has exactly 4 dot-segments (vendor.package.namespace.type)
     // before the version - `nestedconflict.a`/`.b` as a 5th segment is
@@ -806,13 +805,14 @@ describe('OP#13 - the effective trait schema must stay satisfiable', () => {
       baseType(baseId, {
         'x-gts-abstract': true,
         'x-gts-traits-schema': {
-          allOf: [{ allOf: [{ $$ref: `gts://${commonAId}` }] }, { allOf: [{ $$ref: `gts://${commonBId}` }] }],
+          allOf: [{ allOf: [{ $ref: `gts://${commonAId}` }] }, { allOf: [{ $ref: `gts://${commonBId}` }] }],
         },
       })
     );
 
     const result = gts.validateEntity(baseId);
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/cannot be satisfied/);
   });
 
   test('a conflict nested inside an optional property still makes the schema unsatisfiable', () => {
@@ -1131,6 +1131,169 @@ describe('OP#13 - the effective trait schema must stay satisfiable', () => {
     );
 
     expect(gts.validateEntity(kidId).ok).toBe(true);
+  });
+});
+
+/**
+ * Regression coverage for PR #16 review finding #3 (blocking) / @gs-layer
+ * thread 32: a chain with exactly one `x-gts-traits-schema` level never
+ * entered `validateTraitChainSatisfiability`'s between-level loop at all
+ * (`for (let i = 1; i < traitSchemas.length; i++)`), so a self-contradictory
+ * single-level schema was never checked. All three exact repro cases from
+ * the review must now be rejected.
+ */
+describe('OP#13 - a single-level x-gts-traits-schema is checked for internal satisfiability', () => {
+  function singleLevel(id: string, traitsSchema: any) {
+    return () => {
+      const gts = new GTS({ validateRefs: false });
+      gts.register(baseType(id, { 'x-gts-abstract': true, 'x-gts-traits-schema': traitsSchema }));
+      return gts.validateEntity(id);
+    };
+  }
+
+  test('disjoint const across allOf branches at a single level is unsatisfiable', () => {
+    const validate = singleLevel('gts.x.unit.tr.single1const.v1~', {
+      allOf: [{ properties: { k: { const: 'a' } } }, { properties: { k: { const: 'b' } } }],
+    });
+    const result = validate();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/cannot be satisfied/);
+  });
+
+  test('disjoint type across allOf branches at a single level is unsatisfiable', () => {
+    const validate = singleLevel('gts.x.unit.tr.single1type.v1~', {
+      allOf: [{ properties: { n: { type: 'string' } } }, { properties: { n: { type: 'number' } } }],
+    });
+    const result = validate();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/cannot be satisfied/);
+  });
+
+  test('crossed exclusive/inclusive bounds across allOf branches at a single level are unsatisfiable', () => {
+    const validate = singleLevel('gts.x.unit.tr.single1bound.v1~', {
+      allOf: [{ properties: { n: { exclusiveMinimum: 10 } } }, { properties: { n: { maximum: 10 } } }],
+    });
+    const result = validate();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/cannot be satisfied/);
+  });
+
+  test('a genuinely satisfiable single-level trait schema with multiple allOf branches is still accepted', () => {
+    // Control for the three cases above: `type` is restated in full by the
+    // second branch (matching this codebase's existing "a restated property
+    // replaces its declaration wholesale" convention - see `absorbProperty`),
+    // so this is a real, conflict-free narrowing and must not be rejected.
+    const validate = singleLevel('gts.x.unit.tr.single1ok.v1~', {
+      allOf: [{ properties: { n: { type: 'number' } } }, { properties: { n: { type: 'number', minimum: 5 } } }],
+    });
+    const result = validate();
+    expect(result.ok).toBe(true);
+  });
+});
+
+/**
+ * Regression coverage for PR #16 review finding #2 (blocking): a compatibility
+ * verdict of `unknown` (the engine does not model this keyword) was treated
+ * identically to a proven `incompatible`, hard-rejecting any descendant
+ * trait-schema narrowing that merely used a keyword outside the `KEYWORDS`
+ * table - even GTS's own `x-gts-ref`.
+ */
+describe('OP#13 - trait narrowing via an unmodeled keyword is not a satisfiability failure', () => {
+  function narrow(id: string, kidId: string, baseProperty: any, kidProperty: any) {
+    return () => {
+      const gts = new GTS({ validateRefs: false });
+      gts.register(
+        baseType(id, {
+          'x-gts-abstract': true,
+          'x-gts-traits-schema': { type: 'object', properties: { v: baseProperty } },
+        })
+      );
+      gts.register(
+        derivedType(kidId, id, {
+          'x-gts-abstract': true,
+          'x-gts-traits-schema': { type: 'object', properties: { v: kidProperty } },
+        })
+      );
+      return gts.validateEntity(kidId);
+    };
+  }
+
+  test('adding pattern in a descendant is accepted, not rejected as unsatisfiable', () => {
+    const validate = narrow(
+      'gts.x.unit.tr.unmodpattern.v1~',
+      'gts.x.unit.tr.unmodpattern.v1~x.unit._.kid.v1~',
+      { type: 'string' },
+      { type: 'string', pattern: '^a' }
+    );
+    expect(validate().ok).toBe(true);
+  });
+
+  test('adding multipleOf in a descendant is accepted, not rejected as unsatisfiable', () => {
+    const validate = narrow(
+      'gts.x.unit.tr.unmodmultipleof.v1~',
+      'gts.x.unit.tr.unmodmultipleof.v1~x.unit._.kid.v1~',
+      { type: 'integer' },
+      { type: 'integer', multipleOf: 2 }
+    );
+    expect(validate().ok).toBe(true);
+  });
+
+  test('adding a vendor x-* keyword in a descendant is accepted, not rejected as unsatisfiable', () => {
+    const validate = narrow(
+      'gts.x.unit.tr.unmodvendor.v1~',
+      'gts.x.unit.tr.unmodvendor.v1~x.unit._.kid.v1~',
+      { type: 'string' },
+      { type: 'string', 'x-vendor-thing': 1 }
+    );
+    expect(validate().ok).toBe(true);
+  });
+
+  test('adding x-gts-ref in a descendant is accepted, not rejected as unsatisfiable', () => {
+    const patternSchemaId = 'gts.x.unit.trunmodxref.pattern.v1~';
+    const gts = new GTS({ validateRefs: false });
+    gts.register(baseType(patternSchemaId));
+
+    const baseId = 'gts.x.unit.tr.unmodxref.v1~';
+    const kidId = `${baseId}x.unit._.kid.v1~`;
+    gts.register(
+      baseType(baseId, {
+        'x-gts-abstract': true,
+        'x-gts-traits-schema': { type: 'object', properties: { v: { type: 'string' } } },
+      })
+    );
+    gts.register(
+      derivedType(kidId, baseId, {
+        'x-gts-abstract': true,
+        'x-gts-traits-schema': {
+          type: 'object',
+          properties: { v: { type: 'string', 'x-gts-ref': patternSchemaId } },
+        },
+      })
+    );
+
+    expect(gts.validateEntity(kidId).ok).toBe(true);
+  });
+
+  test('a genuine incompatible narrowing (widening maximum) is still correctly rejected', () => {
+    const validate = narrow(
+      'gts.x.unit.tr.unmodwidenmax.v1~',
+      'gts.x.unit.tr.unmodwidenmax.v1~x.unit._.kid.v1~',
+      { type: 'number', maximum: 10 },
+      { type: 'number', maximum: 20 }
+    );
+    const result = validate();
+    expect(result.ok).toBe(false);
+  });
+
+  test('a genuine incompatible narrowing (conflicting const) is still correctly rejected', () => {
+    const validate = narrow(
+      'gts.x.unit.tr.unmodconstconflict.v1~',
+      'gts.x.unit.tr.unmodconstconflict.v1~x.unit._.kid.v1~',
+      { type: 'string', const: 'a' },
+      { type: 'string', const: 'b' }
+    );
+    const result = validate();
+    expect(result.ok).toBe(false);
   });
 });
 
@@ -1508,7 +1671,7 @@ describe('OP#13 - a diamond-shaped x-gts-traits-schema chain is bounded by a pat
   // this file for `MAX_SCHEMA_DEPTH`.
 
   test('a chain where every level doubles its composition paths exceeds the budget and fails fast, not with a hang', () => {
-    // Each level's `x-gts-traits-schema` is `{allOf: [{$$ref: prev}, {$$ref:
+    // Each level's `x-gts-traits-schema` is `{allOf: [{$ref: prev}, {$ref:
     // prev}]}` - the same ancestor referenced twice - so the number of
     // composition paths doubles exactly once per level. 12 levels already
     // clears the 10,000-path budget (2^12 = 4096 branch points, each also
@@ -1526,7 +1689,7 @@ describe('OP#13 - a diamond-shaped x-gts-traits-schema chain is bounded by a pat
       const next = `gts.x.unit.pathbudget.a${i}.v1~`;
       gts.register(
         baseType(next, {
-          'x-gts-traits-schema': { allOf: [{ $$ref: `gts://${cur}` }, { $$ref: `gts://${cur}` }] },
+          'x-gts-traits-schema': { allOf: [{ $ref: `gts://${cur}` }, { $ref: `gts://${cur}` }] },
         })
       );
       cur = next;
@@ -1565,8 +1728,8 @@ describe('OP#13 - a diamond-shaped x-gts-traits-schema chain is bounded by a pat
       const next = `gts.x.unit.pathbudgetok.a${i}.v1~`;
       gts.register(
         baseType(next, {
-          allOf: [{ $$ref: `gts://${a}` }, { $$ref: `gts://${b}` }],
-          'x-gts-traits-schema': { allOf: [{ $$ref: `gts://${a}` }, { $$ref: `gts://${b}` }] },
+          allOf: [{ $ref: `gts://${a}` }, { $ref: `gts://${b}` }],
+          'x-gts-traits-schema': { allOf: [{ $ref: `gts://${a}` }, { $ref: `gts://${b}` }] },
         })
       );
       b = a;
@@ -1609,7 +1772,7 @@ describe('OP#13 - a diamond-shaped x-gts-traits-schema chain is bounded by a pat
       const next = `gts.x.unit.linearchain.a${i}.v1~`;
       gts.register(
         baseType(next, {
-          'x-gts-traits-schema': { allOf: [{ $$ref: `gts://${cur}` }] },
+          'x-gts-traits-schema': { allOf: [{ $ref: `gts://${cur}` }] },
         })
       );
       cur = next;
@@ -1670,12 +1833,30 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
     expect(gts.validateEntity(baseId).ok).toBe(true);
   });
 
-  test('a materialized trait value matching x-gts-ref passes completeness even when the referenced entity is not registered', () => {
+  test('a materialized trait value matching x-gts-ref FAILS completeness when the referenced entity is not registered (reconciled: issue #107)', () => {
+    // Previously this pinned the opposite behavior: `x-gts-traits` values
+    // were treated as schema-level example/default data documenting a
+    // type's shape, not live references, so only GTS-ID pattern/format
+    // validity was enforced and registry existence was deliberately skipped
+    // (the referenced entity below was "deliberately never registered").
+    // gts-spec v0.13.3 issue #107 reverses that rationale: a syntactically
+    // valid, correctly-prefixed `x-gts-traits` value that names an
+    // unregistered entity must now fail validation, matching the canonical
+    // conformance case `TestCaseOp13_TraitRef_TopicRefNonexistent`. This is
+    // not gated on `validateRefs` (still `false` here, the same
+    // configuration the server uses) - that option only governs the
+    // separate live-reference checks elsewhere.
+    //
+    // The registry-existence check only fires once the referenced type
+    // itself is registered (an x-gts-ref naming a wholly unregistered/
+    // foreign namespace is documentation, not a live reference - see
+    // `TestCaseOp13_TraitsValid_AllResolved` et al in the canonical suite,
+    // which reference `gts.x.core.events.topic.v1~` without ever
+    // registering it and still expect success), so `topicSchemaId` must be
+    // registered here for this test to actually exercise the check.
     const gts = new GTS({ validateRefs: false });
-    // Deliberately never registered: `x-gts-traits` values are schema-level
-    // example/default data documenting a type's shape, not live references
-    // that must already exist in the registry at schema-authoring time.
     const topicSchemaId = 'gts.x.unit.trxrefunreg.topic.v1~';
+    gts.register(baseType(topicSchemaId));
 
     const baseId = 'gts.x.unit.trxrefunreg.base.v1~';
     gts.register(
@@ -1690,8 +1871,8 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
     );
 
     const result = gts.validateEntity(baseId);
-    expect(result.ok).toBe(true);
-    expect(result.error).toBe('');
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not found in registry/);
   });
 
   test('an abstract type with an unresolved x-gts-ref-constrained trait is still exempt', () => {
@@ -1712,5 +1893,85 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
     );
 
     expect(gts.validateEntity(baseId).ok).toBe(true);
+  });
+});
+
+// Phase 5 - trait-ref registry existence
+// (spec canonical suite: .gts-spec/tests/test_op13_schema_traits_validation.py,
+// TestCaseOp13_TraitRef_TopicRefNonexistent - "the regression scenario
+// described in issue #107").
+//
+// This is new behavior with no gts-rust reference to port: gts-rust's
+// `validate_trait_values` / `XGtsRefValidator` (schema_traits.rs,
+// x_gts_ref.rs) check only GTS-ID shape/pattern for trait values, never
+// registry presence. `validateSchemaTraits` in src/store.ts explicitly
+// mirrors that today - see the comment directly above its
+// `new XGtsRefValidator().validateInstance(materialized, effectiveSchema)`
+// call (no `store` argument passed) - and the pre-existing test in the
+// describe block directly above this one, 'a materialized trait value
+// matching x-gts-ref passes completeness even when the referenced entity is
+// not registered' (tests/traits.test.ts:1836), asserts exactly the opposite
+// of the canonical case below. That existing test is NOT modified here per
+// the phase-5 test-authoring rules (existing tests are never weakened,
+// skipped or rewritten in this step); it is flagged here as contradicting
+// the canonical behavior and will need to be reconciled once
+// registry-existence checking is implemented - most likely by
+// updating/removing it in the same change that makes the
+// `TODO(phase-5)` test below pass.
+describe('OP#13 - x-gts-ref trait values require a registered referent (canonical: TraitRef_TopicRefNonexistent, issue #107)', () => {
+  test('control: a trait ref value with valid syntax, correct prefix, and a REGISTERED referent passes', () => {
+    const gts = new GTS({ validateRefs: false });
+    const topicTypeId = 'gts.x.test5.trefexist_ctl.topic.v1~';
+    gts.register(baseType(topicTypeId));
+    const topicInstanceId = `${topicTypeId}x.test5._.orders.v1.0`;
+    gts.register({ id: topicInstanceId, type: topicTypeId });
+
+    const eventBaseId = 'gts.x.test5.trefexist_ctl.event.v1~';
+    gts.register(
+      baseType(eventBaseId, {
+        'x-gts-traits-schema': {
+          type: 'object',
+          properties: { topicRef: { type: 'string', 'x-gts-ref': topicTypeId } },
+        },
+      })
+    );
+
+    const derivedGoodId = `${eventBaseId}x.test5._.order_placed_good.v1~`;
+    gts.register(derivedType(derivedGoodId, eventBaseId, { 'x-gts-traits': { topicRef: topicInstanceId } }));
+
+    const result = gts.validateEntity(derivedGoodId);
+    expect(result.ok).toBe(true);
+  });
+
+  test('a trait ref value that is syntactically valid and correctly prefixed, but NOT registered, fails validation', () => {
+    const gts = new GTS({ validateRefs: false });
+    const topicTypeId = 'gts.x.test5.trefnonexist.topic.v1~';
+    gts.register(baseType(topicTypeId));
+
+    const eventBaseId = 'gts.x.test5.trefnonexist.event.v1~';
+    gts.register(
+      baseType(eventBaseId, {
+        'x-gts-traits-schema': {
+          type: 'object',
+          properties: { topicRef: { type: 'string', 'x-gts-ref': topicTypeId } },
+        },
+      })
+    );
+
+    // Never registered - well-formed and correctly prefixed, but absent from
+    // the store.
+    const nonexistentTopicId = `${topicTypeId}x.test5._.nonexistent_topic.v12.0`;
+    const derivedBadId = `${eventBaseId}x.test5._.order_placed_bad.v1~`;
+    gts.register(derivedType(derivedBadId, eventBaseId, { 'x-gts-traits': { topicRef: nonexistentTopicId } }));
+
+    const result = gts.validateEntity(derivedBadId);
+    // TODO(phase-5): fails today - `validateSchemaTraits` in src/store.ts
+    // calls `new XGtsRefValidator().validateInstance(...)` with no `store`
+    // argument, so only GTS-ID pattern validity is checked, never registry
+    // presence (result.ok is true today). The store itself has full access
+    // at that call site (`this.get(...)` is used throughout the same
+    // method), so passing `this` the way the instance-side check at
+    // src/store.ts:264 already does should be sufficient to add the check.
+    expect(result.ok).toBe(false);
   });
 });

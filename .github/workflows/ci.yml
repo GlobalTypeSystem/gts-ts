@@ -53,7 +53,7 @@ jobs:
 
       # Formatting check (fast fail for style issues)
       - name: prettier (check)
-        run: npx prettier --check "src/**/*.ts" "tests/**/*.ts"
+        run: npm run format:check
 
       # Linting
       - name: eslint

@@ -16,6 +16,7 @@ import {
   ValidateTypeSchemaBody,
   TypeSchemaRegisterBody,
   ValidateEntityBody,
+  ValidateJsonResult,
 } from './types';
 import * as gts from '../index';
 import { PACKAGE_VERSION } from '../version';
@@ -36,6 +37,18 @@ export class GtsServer {
               level: config.verbose >= 2 ? 'debug' : 'info',
             }
           : false,
+      // find-my-way (Fastify's router) defaults `maxParamLength` to 100,
+      // which caps every `:param` route segment - including `:gts_type` on
+      // `POST /validate-json/:gts_type`. GTS chained identifiers have no
+      // length cap in the grammar (src/gts.ts), so a realistic multi-segment
+      // chained id (well over 100 chars) would 404 at the router before ever
+      // reaching the handler, outside the documented 200/422 contract
+      // (P6-1). 2048 comfortably covers deep chains while still bounding
+      // pathological input. Set via `routerOptions` (not the deprecated
+      // top-level `maxParamLength`) per Fastify 5's router-options move.
+      routerOptions: {
+        maxParamLength: 2048,
+      },
     });
 
     this.setupMiddleware();
@@ -61,6 +74,61 @@ export class GtsServer {
     // Handle OPTIONS requests
     this.fastify.options('*', async (_request, reply) => {
       reply.status(204).send();
+    });
+
+    // P6-5: `guardJsonBody` is a `preHandler`, so it only ever runs after
+    // Fastify's own JSON body parser has already succeeded - an empty body,
+    // malformed JSON, or an oversized body never reaches it at all, and
+    // instead surfaces Fastify's own `FST_ERR_CTP_*` envelope
+    // (`{statusCode, code, error, message}`) at 400/413, never the
+    // documented `422 HTTPValidationError` shape (`.gts-spec/tests/
+    // openapi.json` declares only 200/422 for `/validate-json` and
+    // `/validate-json/{gts_type}`). Normalize those cases here, scoped to
+    // just the `/validate-json*` routes so no other route's error shape
+    // changes.
+    this.fastify.setErrorHandler((error, request, reply) => {
+      const code = (error as { code?: string }).code;
+      const isBodyParsingError = typeof code === 'string' && code.startsWith('FST_ERR_CTP_');
+      if (isBodyParsingError && request.url.startsWith('/validate-json')) {
+        reply.code(422).send({
+          detail: [
+            {
+              loc: ['body'],
+              msg: 'Request body must be a JSON object',
+              type: 'type_error.object',
+            },
+          ],
+        });
+        return;
+      }
+      reply.send(error);
+    });
+
+    // P6-5 (trailing-slash case): `/validate-json` and
+    // `/validate-json/{gts_type}` are the only routes registered under this
+    // prefix, so any other path under it (a trailing slash, an extra
+    // segment, etc.) is still a request "to" this route family per the
+    // spec's contract (200/422 only, no 404) - not a generic unmatched
+    // route. Scoped to the `/validate-json` prefix; every other unmatched
+    // route keeps Fastify's default 404 shape below.
+    this.fastify.setNotFoundHandler((request, reply) => {
+      if (request.url.startsWith('/validate-json')) {
+        reply.code(422).send({
+          detail: [
+            {
+              loc: ['body'],
+              msg: 'Request body must be a JSON object',
+              type: 'type_error.object',
+            },
+          ],
+        });
+        return;
+      }
+      reply.code(404).send({
+        message: `Route ${request.method}:${request.url} not found`,
+        error: 'Not Found',
+        statusCode: 404,
+      });
     });
   }
 
@@ -117,6 +185,22 @@ export class GtsServer {
     // OP#12 - Validate Entity (unified)
     this.fastify.post('/validate-entity', this.handleValidateEntity.bind(this));
 
+    // OP#6 - Validate JSON (transient, spec commit ab1287e): auto-detected
+    // schema-vs-instance and explicit-type variants. Neither route may
+    // register anything, so both share the same non-object-body guard
+    // (route-level `preHandler`, not handler logic) rather than the
+    // register-then-validate path `POST /entities` uses.
+    this.fastify.post<{ Body: Record<string, unknown> }>(
+      '/validate-json',
+      { preHandler: this.guardJsonBody.bind(this) },
+      this.handleValidateJson.bind(this)
+    );
+    this.fastify.post<{ Params: { gts_type: string }; Body: Record<string, unknown> }>(
+      '/validate-json/:gts_type',
+      { preHandler: this.guardJsonBody.bind(this) },
+      this.handleValidateJsonExplicit.bind(this)
+    );
+
     // OpenAPI spec
     this.fastify.get('/openapi', this.handleOpenAPI.bind(this));
   }
@@ -143,17 +227,29 @@ export class GtsServer {
 
   private async handleGetEntity(
     request: FastifyRequest<{ Params: { id: string } }>,
-    reply: FastifyReply
+    _reply: FastifyReply
   ): Promise<EntityResponse> {
     const entity = this.store.get(request.params.id);
 
+    // .gts-spec/tests/openapi.json declares only 200 and 422 for
+    // `GET /entities/{gts_id}` (no 404), and the canonical `_assert_not_stored`
+    // helper (.gts-spec/tests/test_op6_schema_validation.py:2333, used by 8 of
+    // the 18 OP#6 `/validate-json` conformance cases) asserts `status_code ==
+    // 200` and `body.ok == false` for a missing id. A 404 here would make
+    // every one of those cases unpassable, so a missing entity is reported
+    // as a 200 with `ok: false` rather than an HTTP-level 404.
     if (!entity) {
-      reply.code(404);
-      throw new Error(`Entity not found: ${request.params.id}`);
+      return {
+        id: request.params.id,
+        ok: false,
+        content: null,
+        error: `Entity not found: ${request.params.id}`,
+      };
     }
 
     return {
       id: request.params.id,
+      ok: true,
       content: entity,
     };
   }
@@ -163,12 +259,17 @@ export class GtsServer {
       Body: any;
       Querystring: { validate?: string; validation?: string };
     }>,
-    reply: FastifyReply
+    reply: FastifyReply,
+    options?: { forceIsSchema?: boolean }
   ): Promise<OperationResult> {
     try {
       const content = request.body;
       const validate = request.query.validate === 'true' || request.query.validation === 'true';
-      const entity = createJsonEntity(content);
+      // `forceIsSchema` (P6-2/P6-3): `POST /type-schemas` calls through here
+      // with the caller's declared intent - the registered entity IS a GTS
+      // Type Schema by construction, regardless of whether `content` embeds
+      // a `$schema`/root-type keyword the shape heuristic would key off.
+      const entity = createJsonEntity(content, undefined, options?.forceIsSchema);
 
       // §9.11.1 - a malformed modifier declaration is always rejected: the
       // document cannot be interpreted, so there is nothing to register.
@@ -180,7 +281,7 @@ export class GtsServer {
           : null;
       if (ruleError) {
         reply.code(422);
-        return { ok: false, error: ruleError };
+        return { ok: false, is_type_schema: entity.isSchema, error: ruleError };
       }
 
       if (validate && entity.isSchema) {
@@ -189,6 +290,7 @@ export class GtsServer {
           reply.code(422);
           return {
             ok: false,
+            is_type_schema: true,
             error: validationError,
           };
         }
@@ -202,8 +304,18 @@ export class GtsServer {
           const hasValidType = entity.schemaId && gts.isValidGtsID(entity.schemaId);
           if (!hasValidType) {
             reply.code(422);
+            // No id-shaped field was detected at all - distinct from an id
+            // that was present but malformed/untyped.
+            if (!entity.id) {
+              return {
+                ok: false,
+                is_type_schema: false,
+                error: 'Unable to detect GTS ID in instance entity',
+              };
+            }
             return {
               ok: false,
+              is_type_schema: false,
               error: 'Instance must have a valid GTS ID or type field',
             };
           }
@@ -211,9 +323,14 @@ export class GtsServer {
       }
 
       if (!entity.id) {
+        // No id-shaped field was detected at all (as opposed to one that was
+        // present but malformed, which `store.register()` rejects later with
+        // "Invalid GTS entity id").
+        reply.code(422);
         return {
           ok: false,
-          error: 'Unable to extract GTS ID from entity',
+          is_type_schema: entity.isSchema,
+          error: entity.isSchema ? 'Unable to detect GTS ID in schema' : 'Unable to detect GTS ID in instance entity',
         };
       }
 
@@ -227,21 +344,49 @@ export class GtsServer {
           reply.code(422);
           return {
             ok: false,
+            is_type_schema: true,
             error: `x-gts-ref validation failed: ${errorMsgs}`,
           };
         }
       }
 
       // Register the entity
-      this.store.register(content);
+      this.store.register(content, options?.forceIsSchema);
 
       // Validate instance if requested
       if (validate && !entity.isSchema) {
         const result = this.store.validateInstance(entity.id);
         if (!result.ok) {
+          reply.code(422);
           return {
             ok: false,
+            is_type_schema: false,
             error: result.error,
+          };
+        }
+      }
+
+      // A derived schema (chained `$id`) must be compatible with its GTS
+      // chain parent - e.g. it cannot drop a `required` field the parent
+      // declares. A literal `$$ref`/`$$id`/`$$schema` establishes no
+      // inheritance at all (they are not JSON Schema keywords), so a schema
+      // that relies on one for derivation must restate the parent's
+      // constraints itself or be rejected here.
+      if (validate && entity.isSchema) {
+        // `validateSchemaAgainstParent` looks the entity up by id (via
+        // `store.get`), so it can only run post-registration - unlike
+        // `validateSchemaStrict` and the x-gts-ref checks above. If it
+        // rejects, undo the `store.register()` above (both the `byId` index
+        // and the Ajv schema entry) so a 422 response never leaves a
+        // retrievable, derivable schema behind.
+        const parentResult = this.store.validateSchemaAgainstParent(entity.id);
+        if (!parentResult.ok) {
+          this.store.unregister(entity.id);
+          reply.code(422);
+          return {
+            ok: false,
+            is_type_schema: true,
+            error: `Derived schema is not compatible with base: ${parentResult.error}`,
           };
         }
       }
@@ -249,6 +394,8 @@ export class GtsServer {
       return {
         ok: true,
         id: entity.id,
+        is_type_schema: entity.isSchema,
+        type_id: entity.schemaId,
       };
     } catch (error) {
       return {
@@ -259,10 +406,10 @@ export class GtsServer {
   }
 
   private validateSchemaStrict(content: any): string | null {
-    // Check for $id or $$id
-    const schemaId = content['$id'] || content['$$id'];
+    // Check for $id
+    const schemaId = content['$id'];
     if (!schemaId) {
-      return 'Schema must have a $id or $$id field';
+      return 'Unable to detect GTS ID in schema';
     }
 
     // Normalize the ID
@@ -306,8 +453,8 @@ export class GtsServer {
       return errors;
     }
 
-    // Check $ref or $$ref
-    const ref = obj['$ref'] || obj['$$ref'];
+    // Check $ref
+    const ref = obj['$ref'];
     if (typeof ref === 'string') {
       const refPath = path ? `${path}/$ref` : '$ref';
 
@@ -337,7 +484,7 @@ export class GtsServer {
 
     // Recurse into nested objects
     for (const [key, value] of Object.entries(obj)) {
-      if (key === '$ref' || key === '$$ref') continue;
+      if (key === '$ref') continue;
       if (value && typeof value === 'object') {
         const nestedPath = path ? `${path}/${key}` : key;
         if (Array.isArray(value)) {
@@ -434,11 +581,15 @@ export class GtsServer {
     // The explicit type_id wins over any identifier carried inside the body, so
     // an embedded $id must be dropped rather than left to shadow it.
     const content: Record<string, any> = { ...type_schema };
-    delete content['$id'];
-    delete content['$$id'];
-    content['$$id'] = type_id;
+    content['$id'] = type_id;
 
-    return this.handleAddEntity({ ...request, body: content } as any, reply);
+    // P6-2/P6-3: the caller declared `type_id` explicitly, so this document
+    // IS a GTS Type Schema by construction - stamp `isSchema` authoritatively
+    // rather than leaving it to `GtsExtractor.isJsonSchema`'s document-shape
+    // heuristic, which would misclassify a schema with no embedded
+    // `$schema`/root-type keyword as a plain instance (see
+    // `TestCaseOp6ValidateJson_ExplicitSchemaWithoutEmbeddedIdentity`).
+    return this.handleAddEntity({ ...request, body: content } as any, reply, { forceIsSchema: true });
   }
 
   // OP#1 - Validate ID
@@ -485,7 +636,7 @@ export class GtsServer {
         package: seg.package,
         namespace: seg.namespace,
         type: seg.type,
-        ver_major: seg.verMajor,
+        ver_major: seg.verMajor ?? null,
         ver_minor: seg.verMinor ?? null,
         is_type: seg.isType,
       })) || [];
@@ -667,7 +818,14 @@ export class GtsServer {
     if (!type_id) {
       return { ok: false, error: 'Missing required field: type_id' };
     }
-    return this.store.validateSchemaAgainstParent(type_id);
+    const parentResult = this.store.validateSchemaAgainstParent(type_id);
+    if (!parentResult.ok) {
+      return {
+        ...parentResult,
+        error: `Derived schema is not compatible with base: ${parentResult.error}`,
+      };
+    }
+    return parentResult;
   }
 
   // OP#12 - Validate Entity (unified)
@@ -681,6 +839,199 @@ export class GtsServer {
     }
 
     return this.store.validateEntity(id);
+  }
+
+  // OP#6 - Validate JSON: route-level body-shape guard shared by both
+  // `/validate-json` and `/validate-json/{gts_type}`. `ValidateJsonResult`'s
+  // `ok:false` shape only makes sense for an object body it could classify
+  // (schema vs. instance); a non-object body (e.g. a JSON array) is a
+  // contract violation of the request itself, reported as `422` with an
+  // `HTTPValidationError`-shaped body per `.gts-spec/tests/openapi.json`,
+  // not as a `200` with `ok:false`.
+  private async guardJsonBody(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const body = request.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      reply.code(422).send({
+        detail: [
+          {
+            loc: ['body'],
+            msg: 'Request body must be a JSON object',
+            type: 'type_error.object',
+          },
+        ],
+      });
+    }
+  }
+
+  // OP#6 - POST /validate-json: auto-detect whether the transient body is a
+  // GTS Type Schema or an instance (reusing `GtsExtractor.extractID`'s own
+  // `is_type_schema` classification, per Phase 4) and validate it without
+  // registering anything (spec commit ab1287e).
+  private async handleValidateJson(
+    request: FastifyRequest<{ Body: Record<string, unknown> }>,
+    _reply: FastifyReply
+  ): Promise<ValidateJsonResult> {
+    const content = request.body;
+    const extracted = gts.extractID(content);
+    const id = extracted.id || null;
+
+    if (extracted.is_type_schema) {
+      if (!id) {
+        return {
+          ok: false,
+          id: null,
+          type_id: extracted.type_id,
+          is_type_schema: true,
+          error: 'Unable to detect GTS ID in schema',
+        };
+      }
+      const result = this.store.validateTransientSchema(content, id);
+      return {
+        ok: result.ok,
+        id,
+        type_id: extracted.type_id,
+        is_type_schema: true,
+        error: result.ok ? null : result.error,
+      };
+    }
+
+    const typeId = extracted.type_id;
+    if (!typeId) {
+      return {
+        ok: false,
+        id,
+        type_id: null,
+        is_type_schema: false,
+        error: 'Unable to determine instance type',
+      };
+    }
+
+    const result = this.store.validateTransientInstance(content, typeId, id);
+    return {
+      ok: result.ok,
+      id,
+      type_id: typeId,
+      is_type_schema: false,
+      error: result.ok ? null : result.error,
+    };
+  }
+
+  // OP#6 - POST /validate-json/{gts_type}: validate transient instance JSON
+  // against an explicit, path-supplied GTS Type Identifier. This route has no
+  // gts-rust counterpart at all (`gts-cli/src/json_validation.rs` is a CLI
+  // folder scanner with no type parameter) - every error string and the
+  // mismatch/schema-rejection rule below are designed from the canonical
+  // case text (`.gts-spec/tests/test_op6_schema_validation.py:2547+`) rather
+  // than ported from a reference implementation.
+  private async handleValidateJsonExplicit(
+    request: FastifyRequest<{ Params: { gts_type: string }; Body: Record<string, unknown> }>,
+    _reply: FastifyReply
+  ): Promise<ValidateJsonResult> {
+    const pathType = decodeURIComponent(request.params.gts_type);
+    const content = request.body;
+
+    // A well-formed GTS Type Identifier MUST end with `~` (§2.1/§11.1 Rule
+    // C.1, mirroring `handleAddTypeSchema` above). Unlike that handler,
+    // the two ways a path segment can fail this are reported with distinct
+    // messages here: a string that is not GTS-shaped at all ("not-a-gts-
+    // type") versus one that is a syntactically ordinary GTS identifier but
+    // names an instance, not a type (no trailing `~`) - the canonical suite
+    // asserts different error text for each
+    // (`TestCaseOp6ValidateJson_MalformedExplicitType` vs.
+    // `_ExplicitNonSchemaType`).
+    if (!pathType.endsWith('~')) {
+      if (!pathType.startsWith('gts.')) {
+        return {
+          ok: false,
+          id: null,
+          type_id: null,
+          is_type_schema: false,
+          error: `Invalid GTS Type Schema ID: '${pathType}'`,
+        };
+      }
+      return {
+        ok: false,
+        id: null,
+        type_id: null,
+        is_type_schema: false,
+        error: `'${pathType}' must be GTS Type schema, not an instance identifier (missing trailing '~')`,
+      };
+    }
+    if (!gts.isValidGtsID(pathType)) {
+      return {
+        ok: false,
+        id: null,
+        type_id: null,
+        is_type_schema: false,
+        error: `Invalid GTS Type Schema ID: '${pathType}'`,
+      };
+    }
+
+    // Existence AND `isSchema` check (P6-2/P6-3). Before the registration-
+    // time fix (`POST /type-schemas` now stamps `isSchema` from the caller's
+    // declared `type_id` intent, not from `GtsExtractor.isJsonSchema`'s
+    // document-shape heuristic), this was an existence-only check: a junk
+    // document with zero schema keywords, registered via `POST
+    // /type-schemas`, would compile here as a constraint-free schema
+    // accepting anything. `TestCaseOp6ValidateJson_ExplicitSchemaWithoutEmbeddedIdentity`
+    // still passes because that type IS now correctly stamped `isSchema:
+    // true` at registration.
+    const isRegisteredSchema = this.store.isRegisteredSchema(pathType);
+    if (isRegisteredSchema === undefined) {
+      return {
+        ok: false,
+        id: null,
+        type_id: pathType,
+        is_type_schema: false,
+        error: `GTS Type Schema not found: ${pathType}`,
+      };
+    }
+    if (!isRegisteredSchema) {
+      return {
+        ok: false,
+        id: null,
+        type_id: pathType,
+        is_type_schema: false,
+        error: `Entity '${pathType}' is not a GTS Type Schema`,
+      };
+    }
+
+    const extracted = gts.extractID(content);
+    const id = extracted.id || null;
+
+    // This route only accepts instance JSON - a schema-shaped body (per the
+    // same `is_type_schema` classification `/validate-json` uses) is
+    // rejected outright, transiently (nothing is ever registered here).
+    if (extracted.is_type_schema) {
+      return {
+        ok: false,
+        id,
+        type_id: pathType,
+        is_type_schema: true,
+        error: `POST /validate-json/{gts_type} only accepts instance JSON, not a Type Schema`,
+      };
+    }
+
+    // A body that declares its own `type` (directly, or via a chained id)
+    // must agree with the path type rather than silently overriding it.
+    if (extracted.type_id && extracted.type_id !== pathType) {
+      return {
+        ok: false,
+        id,
+        type_id: pathType,
+        is_type_schema: false,
+        error: `Declared type '${extracted.type_id}' does not match path type '${pathType}'`,
+      };
+    }
+
+    const result = this.store.validateTransientInstance(content, pathType, id);
+    return {
+      ok: result.ok,
+      id,
+      type_id: pathType,
+      is_type_schema: false,
+      error: result.ok ? null : result.error,
+    };
   }
 
   // OpenAPI Specification
@@ -793,22 +1144,24 @@ export class GtsServer {
             },
           ],
           responses: {
+            // .gts-spec/tests/openapi.json declares only 200/422 for this
+            // operation (no 404) - a missing id is reported as 200 with
+            // `ok: false` (see `GtsServer.handleGetEntity`).
             200: {
-              description: 'The entity',
+              description: 'The entity, or ok:false when the id is not registered',
               content: {
                 'application/json': {
                   schema: {
                     type: 'object',
                     properties: {
                       id: { type: 'string' },
-                      content: { type: 'object' },
+                      ok: { type: 'boolean' },
+                      content: { type: 'object', nullable: true },
+                      error: { type: 'string' },
                     },
                   },
                 },
               },
-            },
-            404: {
-              description: 'Entity not found',
             },
           },
         },
@@ -1265,6 +1618,79 @@ export class GtsServer {
           },
         },
       },
+      '/validate-json': {
+        post: {
+          summary: 'Validate transient JSON as a GTS instance or Type Schema (auto-detected, nothing is registered)',
+          operationId: 'validateJson',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'object' },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: 'Validation result',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/ValidateJsonResult' },
+                },
+              },
+            },
+            422: {
+              description: 'Request body is not a JSON object',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/HTTPValidationError' },
+                },
+              },
+            },
+          },
+        },
+      },
+      '/validate-json/{gts_type}': {
+        post: {
+          summary: 'Validate transient JSON against an explicit GTS Type Schema (nothing is registered)',
+          operationId: 'validateJsonAsType',
+          parameters: [
+            {
+              name: 'gts_type',
+              in: 'path',
+              required: true,
+              description: 'GTS Type Identifier to validate the body against',
+              schema: { type: 'string' },
+            },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'object' },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: 'Validation result',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/ValidateJsonResult' },
+                },
+              },
+            },
+            422: {
+              description: 'Request body is not a JSON object',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/HTTPValidationError' },
+                },
+              },
+            },
+          },
+        },
+      },
       '/openapi': {
         get: {
           summary: 'Get the OpenAPI specification for this server',
@@ -1315,6 +1741,34 @@ export class GtsServer {
             error: { type: 'string' },
           },
           required: ['query', 'count', 'items'],
+        },
+        // Per .gts-spec/tests/openapi.json: all five fields are required and
+        // id/type_id/error are nullable rather than merely optional.
+        ValidateJsonResult: {
+          type: 'object',
+          properties: {
+            ok: { type: 'boolean' },
+            id: { type: 'string', nullable: true },
+            type_id: { type: 'string', nullable: true },
+            is_type_schema: { type: 'boolean' },
+            error: { type: 'string', nullable: true },
+          },
+          required: ['ok', 'id', 'type_id', 'is_type_schema', 'error'],
+        },
+        ValidationError: {
+          type: 'object',
+          properties: {
+            loc: { type: 'array', items: { type: 'string' } },
+            msg: { type: 'string' },
+            type: { type: 'string' },
+          },
+          required: ['loc', 'msg', 'type'],
+        },
+        HTTPValidationError: {
+          type: 'object',
+          properties: {
+            detail: { type: 'array', items: { $ref: '#/components/schemas/ValidationError' } },
+          },
         },
       },
     };

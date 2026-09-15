@@ -58,7 +58,7 @@ export class Gts {
       package: '',
       namespace: '',
       type: '',
-      verMajor: 0,
+      verMajor: undefined,
       verMinor: undefined,
       isType: false,
       isWildcard: false,
@@ -469,7 +469,7 @@ export class Gts {
           package: '',
           namespace: '',
           type: '',
-          verMajor: 0,
+          verMajor: undefined,
           verMinor: undefined,
           isType: false,
           isWildcard: false,
@@ -591,7 +591,7 @@ export class Gts {
         // Check the version only when the pattern actually spells one out.
         // A major-only wildcard matches any minor of that major.
         const patternVersion = this.wildcardPatternVersion(pSeg.segment);
-        if (patternVersion.majorSpecified && patternVersion.major !== cSeg.verMajor) {
+        if (patternVersion.majorSpecified && patternVersion.major !== (cSeg.verMajor ?? 0)) {
           return false;
         }
         // Check is_type flag if set
@@ -626,7 +626,7 @@ export class Gts {
 
       // Check version matching
       // Major version must match
-      if (pSeg.verMajor !== cSeg.verMajor) {
+      if ((pSeg.verMajor ?? 0) !== (cSeg.verMajor ?? 0)) {
         return false;
       }
 
