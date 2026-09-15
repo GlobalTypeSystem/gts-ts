@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.3](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.3)**, reaching full canonical conformance (`make e2e`: 485/485).
+Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.4](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.4)**, reaching full canonical conformance (`make e2e`: 485/485).
 
 ### Breaking
 
@@ -58,6 +58,12 @@ Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.3](https://git
   even when the schemas are not fully compatible, and vice versa.
 - `is_type_schema` and `type_id` are now included on `POST /entities` success responses.
 - `GtsStore.unregister()` and `GTS.isRegisteredSchema()`.
+- Configurable entity update mode. Registering an id that is already stored with **different**
+  content is now rejected with `409 Conflict` (`EntityConflictError`), while an identical
+  re-submission stays idempotent — identity is decided by hashing the canonical (sorted-key)
+  JSON serialization. Callers opt into replacement with the `--allow-entity-updates` flag on
+  `gts server` / `gts-server` (library: `new GTS({ allowEntityUpdates: true })`). Mirrors the
+  gts-go reference implementation.
 
 ### Fixed
 

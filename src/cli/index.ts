@@ -183,6 +183,11 @@ program
   .description('Start HTTP server')
   .option('--host <host>', 'Host to bind to', '127.0.0.1')
   .option('--port <port>', 'Port to listen on', '8000')
+  .option(
+    '--allow-entity-updates',
+    'Allow re-registering entities with different content (default: reject with 409)',
+    false
+  )
   .action(async (options, command) => {
     const parentOpts = command.parent.opts();
 
@@ -194,6 +199,7 @@ program
       port: parseInt(options.port, 10),
       verbose: parentOpts.verbose ? 2 : 1,
       path: parentOpts.path,
+      allowEntityUpdates: options.allowEntityUpdates,
     };
 
     const server = new GtsServer(config);

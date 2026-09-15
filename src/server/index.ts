@@ -16,12 +16,18 @@ program
   .option('-p, --port <port>', 'Port to listen on', '8000')
   .option('-v, --verbose <level>', 'Verbosity level (0=silent, 1=info, 2=debug)', '1')
   .option('--path <path>', 'Path to JSON/schema files to preload')
+  .option(
+    '--allow-entity-updates',
+    'Allow re-registering entities with different content (default: reject with 409)',
+    false
+  )
   .action(async (options) => {
     const config: ServerConfig = {
       host: options.host,
       port: parseInt(options.port, 10),
       verbose: parseInt(options.verbose, 10),
       path: options.path,
+      allowEntityUpdates: options.allowEntityUpdates,
     };
 
     console.log(`Starting GTS server on http://${config.host}:${config.port}`);

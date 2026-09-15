@@ -164,6 +164,14 @@ export interface CastResult {
 export interface GtsConfig {
   validateRefs: boolean;
   strictMode: boolean;
+  /**
+   * Permits re-registering an entity with different content. When `false`
+   * (default), changing the content of an already-registered entity is
+   * rejected with an {@link EntityConflictError} while identical
+   * re-submissions stay idempotent. Mirrors gts-go's
+   * `RegistryConfig.AllowEntityUpdates` (`--allow-entity-updates`).
+   */
+  allowEntityUpdates: boolean;
 }
 
 /**
@@ -185,6 +193,19 @@ export interface JsonEntity {
   content: Record<string, any>;
   isSchema: boolean;
   references: Set<string>;
+}
+
+/**
+ * Thrown when an entity is already registered under the same id with
+ * different content and entity updates are not allowed
+ * ({@link GtsConfig.allowEntityUpdates} is `false`). Callers can surface this
+ * as an HTTP `409 Conflict`. Mirrors gts-go's `EntityConflictError`.
+ */
+export class EntityConflictError extends Error {
+  constructor(public entityId: string) {
+    super(`Entity '${entityId}' is already registered with different content`);
+    this.name = 'EntityConflictError';
+  }
 }
 
 export class InvalidGtsIDError extends Error {

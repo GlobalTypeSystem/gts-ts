@@ -1,5 +1,5 @@
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { GTS, createJsonEntity } from '../index';
+import { GTS, createJsonEntity, EntityConflictError } from '../index';
 import { XGtsRefValidator } from '../x-gts-ref';
 import {
   ServerConfig,
@@ -28,7 +28,7 @@ export class GtsServer {
 
   constructor(config: ServerConfig) {
     this.config = config;
-    this.store = new GTS({ validateRefs: false });
+    this.store = new GTS({ validateRefs: false, allowEntityUpdates: config.allowEntityUpdates ?? false });
 
     this.fastify = Fastify({
       logger:
@@ -57,12 +57,10 @@ export class GtsServer {
       // long run and exhaust the process file-descriptor limit (`ulimit -n`,
       // 256 by default on macOS). Once the limit is hit, `accept()` fails and
       // new connections are refused - the client sees a connection error
-      // (HTTP status 0), not a 200/422. A short `keepAliveTimeout` alone is
-      // timing-dependent (a fast client can still out-pace it), so we also
-      // send `Connection: close` on every response (see `setupMiddleware`),
-      // which makes the socket - and its fd - close as soon as the response
-      // is flushed. `forceCloseConnections` reaps anything still lingering on
-      // shutdown.
+      // (HTTP status 0), not a 200/422. A short `keepAliveTimeout` keeps
+      // connection reuse (fast, one socket per client session) while closing
+      // idle between-request sockets quickly so their fds are reclaimed;
+      // `forceCloseConnections` reaps anything still lingering on shutdown.
       keepAliveTimeout: 5000,
       forceCloseConnections: true,
     });
@@ -418,6 +416,12 @@ export class GtsServer {
         type_id: entity.schemaId,
       };
     } catch (error) {
+      // A changed re-registration of an existing entity is a conflict, not a
+      // generic failure: surface it as HTTP 409 (mirrors gts-go). Every other
+      // error keeps the default status.
+      if (error instanceof EntityConflictError) {
+        reply.code(409);
+      }
       return {
         ok: false,
         error: error instanceof Error ? error.message : String(error),

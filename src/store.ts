@@ -1,6 +1,15 @@
+import { createHash } from 'crypto';
 import Ajv from 'ajv';
 import { applyGtsFormats } from './formats';
-import { GtsConfig, JsonEntity, ValidationResult, GTS_URI_PREFIX, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS } from './types';
+import {
+  GtsConfig,
+  JsonEntity,
+  ValidationResult,
+  EntityConflictError,
+  GTS_URI_PREFIX,
+  MAX_SCHEMA_DEPTH,
+  MAX_SCHEMA_PATHS,
+} from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
 import { XGtsRefValidator } from './x-gts-ref';
@@ -37,6 +46,35 @@ function isPlainSchemaObject(value: unknown): value is Record<string, any> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Canonical JSON serialization with object keys emitted in sorted order,
+ * recursively. `JSON.stringify` preserves insertion order, so two entities
+ * with equal content but differently-ordered keys would serialize
+ * differently - sorting keys makes the serialization stable so equal content
+ * always produces an equal string. Mirrors gts-go's reliance on Go's
+ * `encoding/json` sorting map keys.
+ */
+function canonicalJson(value: any): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * A stable SHA-256 hash of an entity's content, used to distinguish an
+ * idempotent re-submission (identical content) from a conflicting update
+ * (changed content) without a deep structural comparison. Mirrors gts-go's
+ * `contentHash`.
+ */
+function contentHash(content: Record<string, any>): string {
+  return createHash('sha256').update(canonicalJson(content)).digest('hex');
+}
+
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   private config: GtsConfig;
@@ -46,6 +84,7 @@ export class GtsStore {
     this.config = {
       validateRefs: config?.validateRefs ?? false,
       strictMode: config?.strictMode ?? false,
+      allowEntityUpdates: config?.allowEntityUpdates ?? false,
     };
 
     this.ajv = new Ajv({
@@ -105,6 +144,16 @@ export class GtsStore {
         );
       }
       throw new Error(`Invalid GTS entity id: '${entity.id}'`);
+    }
+
+    // Protect registry state: unless entity updates are allowed, re-registering
+    // an id with *different* content is rejected (EntityConflictError, surfaced
+    // as HTTP 409), while an identical re-submission stays idempotent. The
+    // check runs before any mutation below so the previously-registered content
+    // is preserved on rejection. Mirrors gts-go's registerLocked conflict gate.
+    const previous = this.byId.get(entity.id);
+    if (previous && !this.config.allowEntityUpdates && contentHash(previous.content) !== contentHash(entity.content)) {
+      throw new EntityConflictError(entity.id);
     }
 
     if (this.config.validateRefs) {
