@@ -44,14 +44,47 @@ export class GTS {
     this.store = new GtsStore(config);
   }
 
-  register(content: any): void {
-    const entity = createJsonEntity(content);
+  /**
+   * @param forceIsSchema - Passed through to `createJsonEntity` (P6-2/P6-3):
+   * lets a caller that already knows an entity is a GTS Type Schema by its
+   * own declared intent (e.g. `POST /type-schemas`'s explicit `type_id`)
+   * stamp `isSchema` authoritatively, rather than leaving it to
+   * `GtsExtractor`'s document-shape heuristic, which cannot detect a schema
+   * that embeds no `$schema`/root-type keyword at all.
+   */
+  register(content: any, forceIsSchema?: boolean): void {
+    const entity = createJsonEntity(content, undefined, forceIsSchema);
     this.store.register(entity);
+  }
+
+  /**
+   * Roll back a `register()` call by id. Used by callers (e.g. the HTTP
+   * server) that must register an entity before a later gate can validate it,
+   * so a rejection after that gate must undo the registration rather than
+   * leave the entity committed to the store.
+   */
+  unregister(id: string): void {
+    this.store.unregister(id);
   }
 
   get(id: string): any {
     const entity = this.store.get(id);
     return entity?.content;
+  }
+
+  /**
+   * Whether `id` is registered and, if so, whether the registered entity is
+   * itself a GTS Type Schema (`JsonEntity.isSchema`) - `undefined` when
+   * nothing is registered under `id`. `get()` above discards `isSchema`
+   * along with the rest of the entity envelope (it returns `.content`
+   * only), so callers that must distinguish "not found" from "found but not
+   * a schema" (P6-2/P6-3 - e.g. `/validate-json/{gts_type}`'s existence
+   * check, which used to be a bypass that ignored `isSchema` entirely) need
+   * this instead of reaching past the facade at `.store`.
+   */
+  isRegisteredSchema(id: string): boolean | undefined {
+    const entity = this.store.get(id);
+    return entity ? entity.isSchema : undefined;
   }
 
   validateInstance(id: string): ValidationResult {
@@ -105,6 +138,9 @@ export class GTS {
       toId: toTypeId,
       result: result.casted_entity ?? undefined,
       error: result.error || undefined,
+      backward_compatibility: result.backward_compatibility ?? 'unknown',
+      forward_compatibility: result.forward_compatibility ?? 'unknown',
+      full_compatibility: result.full_compatibility ?? 'unknown',
     };
   }
 
@@ -158,6 +194,23 @@ export class GTS {
    */
   validateSchemaAgainstParent(schemaId: string): ValidationResult {
     return this.store.validateSchemaAgainstParent(schemaId);
+  }
+
+  /**
+   * OP#6 `POST /validate-json` (transient validation, spec commit ab1287e) -
+   * validates a candidate type schema document without registering it.
+   */
+  validateTransientSchema(content: any, schemaId: string): ValidationResult {
+    return this.store.validateTransientSchema(content, schemaId);
+  }
+
+  /**
+   * OP#6 `POST /validate-json` (transient validation, spec commit ab1287e) -
+   * validates candidate instance JSON against an already-registered type,
+   * without requiring the candidate itself to be registered.
+   */
+  validateTransientInstance(content: any, typeId: string, resultId: string | null): ValidationResult {
+    return this.store.validateTransientInstance(content, typeId, resultId);
   }
 
   validateEntity(id: string): ValidationResult & { entity_type: string } {

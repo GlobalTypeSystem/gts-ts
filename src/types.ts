@@ -35,7 +35,13 @@ export interface GtsIDSegment {
   package: string;
   namespace: string;
   type: string;
-  verMajor: number;
+  /**
+   * The parsed major version, or `undefined` when the segment carries no
+   * explicit version at all (e.g. a bare wildcard token). Mirrors gts-rust's
+   * `ver_major: Option<u32>` so an unspecified major and a genuine `v0` stay
+   * distinguishable - do not default this to `0` for "no version given".
+   */
+  verMajor?: number;
   verMinor?: number;
   isType: boolean;
   isWildcard: boolean;
@@ -143,6 +149,16 @@ export interface CastResult {
   toId: string;
   result?: any;
   error?: string;
+  /**
+   * Three-valued directional/full compatibility verdicts for the two type
+   * schemas involved in the cast, from the same `GtsCompatibility` machinery
+   * `/compatibility` uses. Computed independently of whether `ok` is true -
+   * a successful transform does not by itself establish compatibility, and
+   * an incompatible pair can still cast and validate cleanly.
+   */
+  backward_compatibility: CompatVerdict;
+  forward_compatibility: CompatVerdict;
+  full_compatibility: CompatVerdict;
 }
 
 export interface GtsConfig {

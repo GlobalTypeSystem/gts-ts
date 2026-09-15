@@ -1,4 +1,5 @@
 import Ajv from 'ajv';
+import { applyGtsFormats } from './formats';
 import { GtsConfig, JsonEntity, ValidationResult, GTS_URI_PREFIX, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS } from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
@@ -10,7 +11,7 @@ interface ResolvedSchema {
   properties: Record<string, any>;
   required: string[];
   additionalProperties?: boolean;
-  type?: string;
+  type?: string | string[];
 }
 
 /**
@@ -21,6 +22,20 @@ interface ResolvedSchema {
  * ones compose across `allOf` branches.
  */
 const TRAIT_STRUCTURAL_KEYWORDS = ['properties', 'required', 'additionalProperties'];
+
+/**
+ * True when `value` is safe to read schema keywords off (`.type`, `['$ref']`,
+ * etc). Schemas are registered without meta-validation (`validateSchema:
+ * false` above), so a registered document can contain a literal `null` (or
+ * any other non-object) in a position where a schema object is expected -
+ * e.g. `properties: {a: null}` or `allOf: [{...}, null]`. Every traversal
+ * that walks into such a position must check this first, rather than reading
+ * a property straight off the value: a `null`/non-object entry in a schema
+ * position is malformed/no-op data, not a crash.
+ */
+function isPlainSchemaObject(value: unknown): value is Record<string, any> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
@@ -38,9 +53,20 @@ export class GtsStore {
       validateSchema: false,
       addUsedSchema: false,
       loadSchema: this.loadSchema.bind(this),
-      validateFormats: false, // Disable format validation to match Go implementation
+      validateFormats: true, // ADR-0005: uuid/email/date-time/... are assertions, not annotations.
+      // P6-7: without this, `validate.errors` only ever has one entry, even
+      // when several keywords fail, making every caller's `.join('; ')`
+      // framing (`formatValidationError`'s call sites) dead code that
+      // silently drops every failure but the first. Multiple simultaneous
+      // failures are common (e.g. two properties of the wrong type at
+      // once), so a caller only ever seeing the first is a real gap, not a
+      // documented limitation worth keeping.
+      allErrors: true,
     });
-    // Don't add format validators since Go uses lenient validation
+    // ADR-0005 format assertions (uuid, email, date-time, date, time, uri,
+    // hostname, ipv4, ipv6, regex), shared by OP#6 (validateInstance) and
+    // OP#13 (validateSchemaTraits) since both compile against this.ajv.
+    applyGtsFormats(this.ajv);
   }
 
   private async loadSchema(uri: string): Promise<any> {
@@ -68,6 +94,16 @@ export class GtsStore {
     // shape - so a plain UUID id is accepted for instances only.
     const hasValidId = Gts.isValidGtsID(entity.id) || (!entity.isSchema && Gts.isUuid(entity.id));
     if (!hasValidId) {
+      // An empty id means no `$id`/id-shaped field was found at all (the
+      // extractor never returns an empty value from a present field), which
+      // is a different failure than a non-empty, ill-formed id - callers
+      // (and the canonical conformance suite) distinguish "no id was ever
+      // detected" from "an id was given but is malformed".
+      if (!entity.id) {
+        throw new Error(
+          entity.isSchema ? 'Unable to detect GTS ID in schema' : 'Unable to detect GTS ID in instance entity'
+        );
+      }
       throw new Error(`Invalid GTS entity id: '${entity.id}'`);
     }
 
@@ -111,6 +147,28 @@ export class GtsStore {
 
   get(id: string): JsonEntity | undefined {
     return this.byId.get(id);
+  }
+
+  /**
+   * Roll back a `register()` call. Some post-registration gates (e.g.
+   * `validateSchemaAgainstParent`) can only run once the entity is looked up
+   * by id, so a caller that rejects the entity after registering it must undo
+   * both the `byId` index and the Ajv schema entry to avoid leaving the store
+   * in an inconsistent, "rejected but still retrievable" state.
+   */
+  unregister(id: string): void {
+    const entity = this.byId.get(id);
+    if (!entity) {
+      return;
+    }
+    this.byId.delete(id);
+    if (entity.isSchema) {
+      try {
+        this.ajv.removeSchema(id);
+      } catch (err) {
+        // Ignore errors removing schema - mirrors the best-effort addSchema above.
+      }
+    }
   }
 
   getAll(): JsonEntity[] {
@@ -193,15 +251,11 @@ export class GtsStore {
       const isValid = validate(obj.content);
 
       if (!isValid) {
-        const errors =
-          validate.errors
-            ?.map((e) => {
-              if (e.keyword === 'required') {
-                return `${e.instancePath || '/'} must have required property '${(e.params as any)?.missingProperty}'`;
-              }
-              return `${e.instancePath} ${e.message}`;
-            })
-            .join('; ') || 'Validation failed';
+        // P6-4: routed through the same `formatValidationError` the
+        // transient `/validate-json` paths use, so `/validate-instance` and
+        // `/validate-json` report the identical failure with the identical
+        // wording instead of two different Ajv-error-to-string conventions.
+        const errors = validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
         return {
           id: gtsId,
           ok: false,
@@ -239,6 +293,93 @@ export class GtsStore {
     }
   }
 
+  /**
+   * OP#6 `POST /validate-json` (transient JSON validation, spec commit
+   * ab1287e) - validates `content` against the already-registered type
+   * `typeId` WITHOUT requiring `content` itself to be registered as an
+   * instance (unlike `validateInstance` above, which looks an already-
+   * registered instance up by id). Used by both the auto-detection and the
+   * explicit-type `/validate-json` routes, neither of which may register
+   * anything.
+   *
+   * Checks `schemaEntity.isSchema` (P6-2/P6-3): before registration-time
+   * stamping was fixed, a type registered via `POST /type-schemas` with no
+   * embedded `$schema`/root-type keyword was misclassified as a non-schema
+   * by `GtsExtractor.isJsonSchema` (it keyed off document shape alone), so
+   * this check was deliberately left out to accommodate
+   * `TestCaseOp6ValidateJson_ExplicitSchemaWithoutEmbeddedIdentity`. Now that
+   * `POST /type-schemas` stamps `isSchema` from the caller's declared
+   * `type_id` intent instead, the check is safe to enforce uniformly here
+   * too - closing the same junk-document-compiles-as-schema hole for the
+   * auto-detect route that P6-2/P6-3 closed for the explicit-type route.
+   */
+  validateTransientInstance(content: any, typeId: string, resultId: string | null): ValidationResult {
+    const id = resultId ?? '';
+    try {
+      const schemaEntity = this.get(typeId);
+      if (!schemaEntity) {
+        return { id, ok: false, error: `GTS Type Schema not found: ${typeId}` };
+      }
+      if (!schemaEntity.isSchema) {
+        return { id, ok: false, error: `Entity '${typeId}' is not a GTS Type Schema` };
+      }
+
+      // §9.11.3 item 2 - the rightmost type in the chain must be instantiable.
+      if (GtsModifiers.isAbstract(schemaEntity.content)) {
+        return {
+          id,
+          ok: false,
+          error: `Type '${typeId}' is abstract and cannot be directly instantiated`,
+        };
+      }
+
+      const validate = this.ajv.compile(this.normalizeSchema(schemaEntity.content));
+      const isValid = validate(content);
+
+      if (!isValid) {
+        const errors = validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
+        return { id, ok: false, error: errors };
+      }
+
+      const xGtsRefValidator = new XGtsRefValidator(this);
+      const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content);
+      if (xGtsRefErrors.length > 0) {
+        const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
+        return { id, ok: false, error: `x-gts-ref validation failed: ${errorMsgs}` };
+      }
+
+      return { id, ok: true, error: '' };
+    } catch (error) {
+      return { id, ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * Formats one Ajv validation error. Mirrors the canonical conformance
+   * suite's reference validator (Python `jsonschema`) wording for the
+   * `type` keyword - `"<path> is not of type '<expected>'"` - rather than
+   * Ajv's own `"<path> must be <expected>"`, since
+   * `test_op6_schema_validation.py` asserts against that exact phrase
+   * (`assert_contains("body.error", "is not of type 'string'")`).
+   */
+  private formatValidationError(e: import('ajv').ErrorObject): string {
+    if (e.keyword === 'type') {
+      const types = Array.isArray(e.params?.type) ? e.params.type : [e.params?.type];
+      const typeList = types.map((t: string) => `'${t}'`).join(', ');
+      return `${e.instancePath || 'value'} is not of type ${typeList}`;
+    }
+    if (e.keyword === 'required') {
+      return `${e.instancePath || '/'} must have required property '${(e.params as any)?.missingProperty}'`;
+    }
+    // P6-6: the root-level path (an empty `instancePath`) must fall back to
+    // '/' here too, matching the `required` branch above - otherwise a
+    // root-level failure (e.g. `additionalProperties` on the document
+    // itself) renders as a leading-space, path-less
+    // " must NOT have additional properties" instead of "/ must NOT have
+    // additional properties".
+    return `${e.instancePath || '/'} ${e.message}`;
+  }
+
   private normalizeSchema(schema: any): any {
     return this.normalizeSchemaRecursive(schema);
   }
@@ -258,24 +399,8 @@ export class GtsStore {
       // Strip x-gts-ref so Ajv never sees the unknown keyword
       if (key === 'x-gts-ref') continue;
 
-      let newKey = key;
+      const newKey = key;
       let newValue = value;
-
-      // Convert $$ prefixed keys to $ prefixed keys
-      switch (key) {
-        case '$$id':
-          newKey = '$id';
-          break;
-        case '$$schema':
-          newKey = '$schema';
-          break;
-        case '$$ref':
-          newKey = '$ref';
-          break;
-        case '$$defs':
-          newKey = '$defs';
-          break;
-      }
 
       // Recursively normalize nested objects
       if (value && typeof value === 'object') {
@@ -427,7 +552,28 @@ export class GtsStore {
     return (s.startsWith('http://') || s.startsWith('https://')) && s.includes('json-schema.org');
   }
 
+  /**
+   * OP#9 requires the cast response to report `backward_compatibility`,
+   * `forward_compatibility` and `full_compatibility` on every response,
+   * including failures (gts-spec 0.13 README section 9.2). The early-return
+   * paths below - entity not found, schema not found, abstract target - cannot
+   * derive a verdict, so they are normalised to `unknown` here rather than in
+   * each caller: `GTS.castInstance()`, `GTS.castInstanceRaw()`, the CLI and
+   * `POST /cast` all funnel through this one choke point, so a failure path
+   * added later inherits the defaults automatically. Mirrors gts-rust
+   * `schema_cast.rs::undecided()`.
+   */
   castInstance(instanceId: string, toSchemaId: string): any {
+    const result = this.castInstanceInner(instanceId, toSchemaId);
+    return {
+      ...result,
+      backward_compatibility: result.backward_compatibility ?? 'unknown',
+      forward_compatibility: result.forward_compatibility ?? 'unknown',
+      full_compatibility: result.full_compatibility ?? 'unknown',
+    };
+  }
+
+  private castInstanceInner(instanceId: string, toSchemaId: string): any {
     try {
       // Get instance entity
       const instanceEntity = this.get(instanceId);
@@ -567,8 +713,15 @@ export class GtsStore {
         break;
     }
 
-    // Check evolution compatibility between the two type schemas (spec §4.2)
+    // Check evolution compatibility between the two type schemas (spec §4.2).
+    // This is computed independently of whether the instance transform below
+    // succeeds - a cast that transforms and validates cleanly is not thereby
+    // "compatible", and one whose target rejects the transformed instance is
+    // not thereby "incompatible": they answer different questions. Mirrors
+    // gts-rust `schema_cast.rs::cast()` (`:131-136`), which computes the
+    // three verdicts before attempting the cast.
     const { backward, forward } = GtsCompatibility.compareSchemas(this, oldSchema, newSchema);
+    const full = GtsCompatibility.fullVerdict(backward, forward);
     const isBackward = backward === 'compatible';
     const isForward = forward === 'compatible';
     const backwardErrors = isBackward ? [] : [`Backward compatibility is ${backward}`];
@@ -604,6 +757,14 @@ export class GtsStore {
       is_fully_compatible: isFullyCompatible,
       is_backward_compatible: isBackward,
       is_forward_compatible: isForward,
+      // Three-valued verdicts from the same `GtsCompatibility` machinery
+      // `/compatibility` uses, distinct from the booleans above: those
+      // report cast success (`is_fully_compatible`) and directional
+      // compatibility collapsed to a boolean, neither of which can express
+      // `unknown` (e.g. a declared-dialect mismatch).
+      backward_compatibility: backward,
+      forward_compatibility: forward,
+      full_compatibility: full,
       incompatibility_reasons: incompatibilityReasons,
       backward_errors: backwardErrors,
       forward_errors: forwardErrors,
@@ -701,12 +862,22 @@ export class GtsStore {
         continue;
       }
       const ps = propSchema as any;
-      const propType = ps.type;
 
-      // Handle nested objects
-      if (propType === 'object') {
-        if (val && typeof val === 'object' && !Array.isArray(val)) {
-          const nestedSchema = this.effectiveObjectSchema(ps);
+      // Handle nested objects. `resolveSchemaFully` - the same, already-
+      // correct resolver used for the root cast target above - is used here
+      // too, so a nested property whose schema is `{type:'object', allOf:
+      // [{$ref: inner}], additionalProperties:false}` gets the ref's
+      // properties/defaults, instead of an empty effective schema that
+      // silently deletes the instance's own nested data. Whether to recurse
+      // is decided from the RESOLVED schema's actual shape - `type` naming
+      // `'object'` (directly or in a `type` array), or the mere presence of
+      // `properties`/`required`/`additionalProperties` - rather than a
+      // literal `propType === 'object'` string comparison, which misses
+      // `type: ['object','null']` and schemas that constrain objects without
+      // ever stating `type` at all.
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        const nestedSchema = this.resolveSchemaFully(ps);
+        if (this.describesObjectShape(nestedSchema)) {
           const nestedResult = this.castInstanceToSchema(val, nestedSchema, this.buildPath(basePath, prop));
           result[prop] = nestedResult.casted;
           added.push(...nestedResult.added);
@@ -716,11 +887,11 @@ export class GtsStore {
       }
 
       // Handle arrays of objects
-      if (propType === 'array') {
-        if (Array.isArray(val)) {
-          const itemsSchema = ps.items;
-          if (itemsSchema && itemsSchema.type === 'object') {
-            const nestedSchema = this.effectiveObjectSchema(itemsSchema);
+      if (Array.isArray(val)) {
+        const itemsSchema = ps?.items;
+        if (isPlainSchemaObject(itemsSchema)) {
+          const nestedSchema = this.resolveSchemaFully(itemsSchema);
+          if (this.describesObjectShape(nestedSchema)) {
             const newList: any[] = [];
             for (let idx = 0; idx < val.length; idx++) {
               const item = val[idx];
@@ -747,26 +918,24 @@ export class GtsStore {
     return { casted: result, added, removed, incompatibilityReasons };
   }
 
-  private effectiveObjectSchema(schema: any): any {
-    if (!schema) {
-      return {};
-    }
-
-    // If it has properties or required directly, use it
-    if (schema.properties || schema.required) {
-      return schema;
-    }
-
-    // Check allOf for object schemas
-    if (schema.allOf && Array.isArray(schema.allOf)) {
-      for (const part of schema.allOf) {
-        if (part.properties || part.required) {
-          return part;
-        }
-      }
-    }
-
-    return schema;
+  /**
+   * Whether a *resolved* nested-property schema (from `resolveSchemaFully`)
+   * describes an object worth recursing into during a cast - `type` naming
+   * `'object'` (directly, or inside a `type` array such as
+   * `['object','null']`), or the mere presence of `properties`/`required`/
+   * `additionalProperties` even when `type` is absent entirely. A literal
+   * `propType === 'object'` string comparison misses both of the latter
+   * cases and skips casting a nested object outright, leaving the instance's
+   * stale data and the target's un-materialized defaults untouched.
+   */
+  private describesObjectShape(resolved: ResolvedSchema): boolean {
+    const type = resolved.type;
+    const typeNamesObject = type === 'object' || (Array.isArray(type) && type.includes('object'));
+    const hasObjectKeywords =
+      Object.keys(resolved.properties || {}).length > 0 ||
+      (resolved.required || []).length > 0 ||
+      resolved.additionalProperties !== undefined;
+    return typeNamesObject || hasObjectKeywords;
   }
 
   /**
@@ -779,7 +948,9 @@ export class GtsStore {
       const modifiedSchema = this.removeGtsConstConstraints(toSchema);
       const validate = this.ajv.compile(this.normalizeSchema(modifiedSchema));
       if (!validate(casted)) {
-        return validate.errors?.map((e) => `${e.instancePath} ${e.message}`).join('; ') || 'Validation failed';
+        // P6-4: shared formatter, so a cast-result failure reads the same
+        // way as every other validation path instead of raw Ajv wording.
+        return validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
       }
 
       // `x-gts-ref` is an assertion enforced on instances (§9.6), so a cast
@@ -855,6 +1026,83 @@ export class GtsStore {
     return unique.sort();
   }
 
+  /**
+   * OP#6 `POST /validate-json` (transient JSON validation, spec commit
+   * ab1287e) - validates a candidate type schema document WITHOUT
+   * registering it. `content` is the raw candidate; `schemaId` is its own
+   * `$id` (already extracted and normalized by the caller).
+   *
+   * Unlike `validateSchemaAgainstParent` below, which looks the schema up by
+   * id (so it can only run once the schema is already registered),
+   * everything here works from `content` directly: meta-schema validity
+   * (`ajv.validateSchema`, deliberately never run at registration time -
+   * see the class-level comment on `validateSchema: false` above), the
+   * shared document-level rules (`checkTypeSchemaRules`), and - reusing the
+   * same base-comparison machinery `validateSchemaAgainstParent` uses -
+   * whether the schema is compatible with an ALREADY-registered parent, if
+   * its chained `$id` names one. The candidate's own trait completeness
+   * (`validateSchemaTraits`) is intentionally not checked here: that method
+   * looks every chain level, including `schemaId` itself, up in the
+   * registry, which a transient candidate by definition is not in.
+   */
+  validateTransientSchema(content: any, schemaId: string): ValidationResult {
+    try {
+      const normalized = this.normalizeSchema(content);
+      const metaOk = this.ajv.validateSchema(normalized);
+      if (!metaOk) {
+        const errors = (this.ajv.errors || []).map((e) => this.formatValidationError(e)).join('; ');
+        return { id: schemaId, ok: false, error: `JSON Schema validation failed: ${errors}` };
+      }
+
+      // §9.11.5 - the explicit validation endpoints always enforce the guards.
+      const ruleError = this.checkTypeSchemaRules(content, schemaId, { enforceGuards: true });
+      if (ruleError) {
+        return { id: schemaId, ok: false, error: ruleError };
+      }
+
+      let chain: string[];
+      try {
+        chain = this.buildSchemaChain(schemaId);
+      } catch (err) {
+        return { id: schemaId, ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+      const parentId = chain.length > 1 ? chain[chain.length - 2] : null;
+      if (!parentId) {
+        // Base schema with no parent - nothing further to compare against.
+        return { id: schemaId, ok: true, error: '' };
+      }
+
+      const parentEntity = this.get(parentId);
+      if (!parentEntity) {
+        return { id: schemaId, ok: false, error: `Parent GTS Type Schema not found: ${parentId}` };
+      }
+      if (!parentEntity.isSchema || !parentEntity.content) {
+        return { id: schemaId, ok: false, error: `Parent entity is not a schema: ${parentId}` };
+      }
+
+      const cycleError = this.detectRefCycle(schemaId, content, new Set([schemaId]));
+      if (cycleError) {
+        return { id: schemaId, ok: false, error: cycleError };
+      }
+
+      const resolvedParent = this.resolveSchemaFully(parentEntity.content);
+      const overlay = this.extractOverlay(content);
+      const inheritsViaRef = this.inheritsParentViaRef(content, parentId);
+      const errors = this.compareOverlayToBase(overlay, resolvedParent, '', inheritsViaRef);
+      if (errors.length > 0) {
+        return { id: schemaId, ok: false, error: `Derived schema is not compatible with base: ${errors.join('; ')}` };
+      }
+
+      return { id: schemaId, ok: true, error: '' };
+    } catch (err) {
+      return {
+        id: schemaId,
+        ok: false,
+        error: `Schema validation failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
   validateSchemaAgainstParent(schemaId: string): ValidationResult {
     const entity = this.get(schemaId);
     if (!entity) {
@@ -866,62 +1114,76 @@ export class GtsStore {
 
     const content = entity.content;
 
-    // §9.11.5 - the explicit validation endpoints always enforce the guards.
-    const ruleError = this.checkTypeSchemaRules(content, schemaId, { enforceGuards: true });
-    if (ruleError) {
-      return { id: schemaId, ok: false, error: ruleError };
-    }
-
-    // Per ADR-0001 derivation is established by the chained `$id` alone, so the
-    // parent is taken from the chain. A body that references the parent via
-    // `allOf` + `$ref` and one that restates the parent's fields are both valid
-    // derivation forms and are checked identically.
-    let chain: string[];
+    // Schemas are registered without meta-validation (`validateSchema: false`
+    // above), so a malformed document - e.g. a literal `null` in a schema
+    // position - can reach the resolution/comparison machinery below. That
+    // makes the check inconclusive, matching `checkCompatibility`'s own
+    // try/catch in `compatibility.ts`: it must not take the caller (and, at
+    // the HTTP layer, the whole request) down with it.
     try {
-      chain = this.buildSchemaChain(schemaId);
+      // §9.11.5 - the explicit validation endpoints always enforce the guards.
+      const ruleError = this.checkTypeSchemaRules(content, schemaId, { enforceGuards: true });
+      if (ruleError) {
+        return { id: schemaId, ok: false, error: ruleError };
+      }
+
+      // Per ADR-0001 derivation is established by the chained `$id` alone, so the
+      // parent is taken from the chain. A body that references the parent via
+      // `allOf` + `$ref` and one that restates the parent's fields are both valid
+      // derivation forms and are checked identically.
+      let chain: string[];
+      try {
+        chain = this.buildSchemaChain(schemaId);
+      } catch (err) {
+        return { id: schemaId, ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+      const parentId = chain.length > 1 ? chain[chain.length - 2] : null;
+      if (!parentId) {
+        // Base schema with no parent → still validate traits
+        return this.validateSchemaTraits(schemaId);
+      }
+
+      const parentEntity = this.get(parentId);
+      if (!parentEntity) {
+        return { id: schemaId, ok: false, error: `Parent schema not found: ${parentId}` };
+      }
+      if (!parentEntity.isSchema || !parentEntity.content) {
+        return { id: schemaId, ok: false, error: `Parent entity is not a schema: ${parentId}` };
+      }
+
+      // Detect cyclic $ref references in the schema's own content
+      const cycleError = this.detectRefCycle(schemaId, content, new Set([schemaId]));
+      if (cycleError) {
+        return { id: schemaId, ok: false, error: cycleError };
+      }
+
+      // Resolve parent's effective (fully flattened) schema
+      const resolvedParent = this.resolveSchemaFully(parentEntity.content);
+
+      // Extract overlay from derived schema (non-$ref subschemas in allOf + top-level)
+      const overlay = this.extractOverlay(content);
+
+      // Compare overlay against resolved parent
+      const inheritsViaRef = this.inheritsParentViaRef(content, parentId);
+      const errors = this.compareOverlayToBase(overlay, resolvedParent, '', inheritsViaRef);
+      if (errors.length > 0) {
+        return { id: schemaId, ok: false, error: errors.join('; ') };
+      }
+
+      // OP#13: Validate schema traits across the inheritance chain
+      const traitsResult = this.validateSchemaTraits(schemaId);
+      if (!traitsResult.ok) {
+        return traitsResult;
+      }
+
+      return { id: schemaId, ok: true, error: '' };
     } catch (err) {
-      return { id: schemaId, ok: false, error: err instanceof Error ? err.message : String(err) };
+      return {
+        id: schemaId,
+        ok: false,
+        error: `Schema validation failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
-    const parentId = chain.length > 1 ? chain[chain.length - 2] : null;
-    if (!parentId) {
-      // Base schema with no parent → still validate traits
-      return this.validateSchemaTraits(schemaId);
-    }
-
-    const parentEntity = this.get(parentId);
-    if (!parentEntity) {
-      return { id: schemaId, ok: false, error: `Parent schema not found: ${parentId}` };
-    }
-    if (!parentEntity.isSchema || !parentEntity.content) {
-      return { id: schemaId, ok: false, error: `Parent entity is not a schema: ${parentId}` };
-    }
-
-    // Detect cyclic $$ref / $ref references in the schema's own content
-    const cycleError = this.detectRefCycle(schemaId, content, new Set([schemaId]));
-    if (cycleError) {
-      return { id: schemaId, ok: false, error: cycleError };
-    }
-
-    // Resolve parent's effective (fully flattened) schema
-    const resolvedParent = this.resolveSchemaFully(parentEntity.content);
-
-    // Extract overlay from derived schema (non-$ref subschemas in allOf + top-level)
-    const overlay = this.extractOverlay(content);
-
-    // Compare overlay against resolved parent
-    const inheritsViaRef = this.inheritsParentViaRef(content, parentId);
-    const errors = this.compareOverlayToBase(overlay, resolvedParent, '', inheritsViaRef);
-    if (errors.length > 0) {
-      return { id: schemaId, ok: false, error: errors.join('; ') };
-    }
-
-    // OP#13: Validate schema traits across the inheritance chain
-    const traitsResult = this.validateSchemaTraits(schemaId);
-    if (!traitsResult.ok) {
-      return traitsResult;
-    }
-
-    return { id: schemaId, ok: true, error: '' };
   }
 
   /**
@@ -1044,8 +1306,10 @@ export class GtsStore {
     try {
       const validate = this.ajv.compile(this.normalizeSchema(effectiveSchema));
       if (!validate(materialized)) {
+        // P6-4: shared formatter, for the same reason as `validateCastResult`
+        // above - one Ajv-error-to-string convention, not four.
         const errors =
-          validate.errors?.map((e) => `${e.instancePath} ${e.message}`).join('; ') || 'Trait validation failed';
+          validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
         return { id: schemaId, ok: false, error: `trait validation: ${errors}` };
       }
     } catch (e) {
@@ -1059,11 +1323,24 @@ export class GtsStore {
     // `x-gts-ref` is an assertion keyword (§9.6) that plain Ajv validation
     // ignores, so materialized trait values must also be checked against it
     // explicitly - mirroring the same check applied to cast results above.
-    // Unlike that check, no store is passed here: trait values are
-    // schema-level example/default data documenting a type's shape, not live
-    // references that must already be registered, so only GTS-ID
-    // pattern/format validity is enforced - not registry existence.
-    const xGtsRefErrors = new XGtsRefValidator().validateInstance(materialized, effectiveSchema);
+    // The store is passed here (as `this`, matching the instance-side check
+    // above) so that registry existence is enforced too, not just GTS-ID
+    // pattern/format validity: gts-spec v0.13.3 issue #107 reverses the
+    // earlier "trait values are schema-level example/default data, not live
+    // references" rationale - a syntactically valid, correctly-prefixed
+    // `x-gts-traits` value that names an unregistered entity must now fail
+    // validation, the same as any other `x-gts-ref`. This is not gated on
+    // `validateRefs`: that option only governs the separate live-reference
+    // checks in `register()`/instance validation, and the canonical
+    // conformance case (`TestCaseOp13_TraitRef_TopicRefNonexistent`) expects
+    // the registry-existence check to still run under `validateRefs: false`
+    // (the same configuration the server uses). The check itself
+    // (`XGtsRefValidator.validateGtsPattern`) only fires once the type an
+    // `x-gts-ref` names is itself registered, so purely documentary
+    // references to a never-registered namespace (e.g. the canonical
+    // `TestCaseOp13_TraitsValid_AllResolved` et al, which reference
+    // `gts.x.core.events.topic.v1~` only as a pattern) are unaffected.
+    const xGtsRefErrors = new XGtsRefValidator(this).validateInstance(materialized, effectiveSchema);
     if (xGtsRefErrors.length > 0) {
       return {
         id: schemaId,
@@ -1112,44 +1389,108 @@ export class GtsStore {
    * Returns a description of the first problem found, or null when satisfiable.
    */
   private validateTraitChainSatisfiability(traitSchemas: any[]): string | null {
+    // Each chain level's OWN internal composition must be self-satisfiable
+    // FIRST - e.g. a single trait-schema document declared as
+    // `{allOf:[{properties:{k:{const:'a'}}},{properties:{k:{const:'b'}}}]}`
+    // is unsatisfiable all by itself, with no ancestor involved at all. The
+    // between-level loop below only ever checks narrowing steps BETWEEN
+    // chain levels, so a chain with exactly one trait-schema level (or any
+    // level whose own document combines multiple `allOf` branches) would
+    // otherwise never have this internal conflict checked. `allOf` nesting
+    // is associative, so this runs the identical prefix-narrowing check used
+    // between levels over each level's own flattened branch list instead.
+    for (const levelSchema of traitSchemas) {
+      const branches = this.flattenAllOfBranches(levelSchema);
+      for (let j = 1; j < branches.length; j++) {
+        const error = this.checkNarrowingStep(branches.slice(0, j), branches.slice(0, j + 1), 'j');
+        if (error) return error;
+      }
+    }
+
     // Both checks run per chain level - `ancestor = chain[0..i)`,
     // `descendant = chain[0..i+1)` - matching gts-rust's own loop
     // (`validate_trait_schema_compatibility`), rather than over the whole
     // chain's flattened `allOf` branches at once.
     for (let i = 1; i < traitSchemas.length; i++) {
-      // 1) Closed-branch orphan check - raw/structural, unconditional on
-      // required-ness (see doc comment above). `ancestorFlat` is the
-      // ancestor prefix flattened ONCE (gts-rust's `flatten_schema`, i.e.
-      // this file's `resolveSchemaFully`); the descendant prefix is passed
-      // RAW so the recursion can walk its own `allOf` directly.
-      const ancestorFlat = this.resolveSchemaFully({ allOf: traitSchemas.slice(0, i) });
-      const descendantRaw = { allOf: traitSchemas.slice(0, i + 1) };
-      const orphanErrors = this.collectClosedBranchOrphanErrors(ancestorFlat, descendantRaw, '', 0);
-      if (orphanErrors.length > 0) {
-        return orphanErrors.join('; ');
-      }
-
-      // 2) Declared-schema-fold + accepted-set-inclusion check, per chain
-      // level.
-      const ancestorDeclared = this.declaredTraitSchema({ allOf: traitSchemas.slice(0, i) }, 0);
-      const descendantDeclared = this.declaredTraitSchema({ allOf: traitSchemas.slice(0, i + 1) }, 0);
-
-      const disabledError = this.findDisabledBaseProperty(ancestorDeclared, descendantDeclared);
-      if (disabledError) {
-        return disabledError;
-      }
-
-      // `forward`: Valid(descendantDeclared) ⊆ Valid(ancestorDeclared) - the
-      // inclusion direction §9.7.5 requires. Admission fails closed (mirroring
-      // gts-rust's own comment on `validate_derivation`): `unknown` is
-      // rejected exactly like `incompatible`, only `compatible` passes.
-      const { forward } = GtsCompatibility.compareSchemas(this, ancestorDeclared, descendantDeclared);
-      if (forward !== 'compatible') {
-        return `trait-schema level ${i} is not a valid narrowing of the preceding effective trait schema (${forward})`;
-      }
+      const error = this.checkNarrowingStep(traitSchemas.slice(0, i), traitSchemas.slice(0, i + 1), 'level');
+      if (error) return error;
     }
 
     return null;
+  }
+
+  /**
+   * One narrowing step of the satisfiability check - "is `descendantBranches`
+   * (the ancestor prefix plus one more branch) still a valid narrowing of
+   * `ancestorBranches` (the prefix alone)". Shared between the between-level
+   * chain loop and the within-level internal-`allOf` loop in
+   * `validateTraitChainSatisfiability`, which are the same check run over two
+   * different granularities of "prefix of branches" - one chain level at a
+   * time, or one `allOf` branch at a time.
+   */
+  private checkNarrowingStep(ancestorBranches: any[], descendantBranches: any[], unitLabel: string): string | null {
+    // 1) Closed-branch orphan check - raw/structural, unconditional on
+    // required-ness (see the class-level doc comment on this method's
+    // caller). `ancestorFlat` is the ancestor prefix flattened ONCE
+    // (gts-rust's `flatten_schema`, i.e. this file's `resolveSchemaFully`);
+    // the descendant prefix is passed RAW so the recursion can walk its own
+    // `allOf` directly.
+    const ancestorFlat = this.resolveSchemaFully({ allOf: ancestorBranches });
+    const descendantRaw = { allOf: descendantBranches };
+    const orphanErrors = this.collectClosedBranchOrphanErrors(ancestorFlat, descendantRaw, '', 0);
+    if (orphanErrors.length > 0) {
+      return orphanErrors.join('; ');
+    }
+
+    // 2) Declared-schema-fold + accepted-set-inclusion check.
+    const ancestorDeclared = this.declaredTraitSchema({ allOf: ancestorBranches }, 0);
+    const descendantDeclared = this.declaredTraitSchema({ allOf: descendantBranches }, 0);
+
+    const disabledError = this.findDisabledBaseProperty(ancestorDeclared, descendantDeclared);
+    if (disabledError) {
+      return disabledError;
+    }
+
+    // `forward`: Valid(descendantDeclared) ⊆ Valid(ancestorDeclared) - the
+    // inclusion direction §9.7.5 requires. Only a proven `incompatible`
+    // verdict is a genuine, demonstrated failure to satisfy; §9.7.5 requires
+    // a *demonstrated* failure to reject a trait chain, and the
+    // compatibility engine's `unknown` means "this keyword is not modeled",
+    // not "this narrowing is wrong" - `compareUnmodeled()` returns `unknown`
+    // for any keyword outside the `KEYWORDS` table (e.g. `pattern`,
+    // `multipleOf`, a vendor `x-*` keyword, or GTS's own `x-gts-ref`), so
+    // treating it the same as `incompatible` here would hard-reject entirely
+    // ordinary narrowings the engine simply cannot verify either way.
+    const { forward } = GtsCompatibility.compareSchemas(this, ancestorDeclared, descendantDeclared);
+    if (forward === 'incompatible') {
+      const index = descendantBranches.length - 1;
+      return `trait-schema ${unitLabel} ${index} is not a valid narrowing of the preceding effective trait schema (${forward})`;
+    }
+    return null;
+  }
+
+  /**
+   * Flattens one chain level's own `allOf` composition into its constituent
+   * branches, recursively (`{allOf:[A,{allOf:[B,C]}]}` is equivalent to
+   * `{allOf:[A,B,C]}` under JSON Schema's associative `allOf` semantics), so
+   * the internal-satisfiability loop above can walk them the same way the
+   * between-level loop walks chain levels. Any keywords declared alongside
+   * `allOf` at the same level still constrain the composed value, so they are
+   * kept as their own trailing branch.
+   */
+  private flattenAllOfBranches(schema: any): any[] {
+    if (!isPlainSchemaObject(schema) || !Array.isArray(schema.allOf)) {
+      return [schema];
+    }
+    const { allOf, ...rest } = schema;
+    const branches: any[] = [];
+    for (const branch of allOf) {
+      branches.push(...this.flattenAllOfBranches(branch));
+    }
+    if (Object.keys(rest).length > 0) {
+      branches.push(rest);
+    }
+    return branches;
   }
 
   /**
@@ -1477,6 +1818,11 @@ export class GtsStore {
       return `document-level GTS keywords must appear at the schema top level; found at: ${misplaced.join(', ')}`;
     }
 
+    const unknown = GtsModifiers.findUnknownKeywords(content);
+    if (unknown.length > 0) {
+      return `unsupported x-gts-* schema keyword(s) found at: ${unknown.join(', ')}`;
+    }
+
     // `register()` rejects a malformed id up front, so `findFinalBaseInChain`
     // should never actually throw here; the catch only keeps this
     // string-or-null-returning check from turning into an uncaught exception
@@ -1596,7 +1942,7 @@ export class GtsStore {
     const result: any = {};
 
     for (const [key, value] of Object.entries(schema)) {
-      if (key === '$$ref' || key === '$ref') {
+      if (key === '$ref') {
         const refUri = value as string;
         const refId = refUri.startsWith(GTS_URI_PREFIX) ? refUri.substring(GTS_URI_PREFIX.length) : refUri;
 
@@ -1626,7 +1972,7 @@ export class GtsStore {
         );
         // Merge resolved content into result
         for (const [rk, rv] of Object.entries(resolved)) {
-          if (rk !== '$id' && rk !== '$$id' && rk !== '$schema' && rk !== '$$schema') {
+          if (rk !== '$id' && rk !== '$schema') {
             result[rk] = rv;
           }
         }
@@ -1814,7 +2160,7 @@ export class GtsStore {
     return merged;
   }
 
-  // Detect cyclic $$ref/$ref references reachable from a schema's content
+  // Detect cyclic $ref references reachable from a schema's content
   private detectRefCycle(originId: string, content: any, visited: Set<string>, depth: number = 0): string | null {
     // Fail closed, and separately from the non-object base case: `null` means
     // "no cycle here", so returning it on overflow would let a cycle that sits
@@ -1825,7 +2171,7 @@ export class GtsStore {
     if (!content || typeof content !== 'object') return null;
 
     // Check direct ref on this object
-    const ref = content['$$ref'] || content['$ref'];
+    const ref = content['$ref'];
     if (typeof ref === 'string') {
       const refId = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
       if (visited.has(refId)) {
@@ -1854,7 +2200,7 @@ export class GtsStore {
   }
 
   /**
-   * Every `$ref` / `$$ref` this schema declares directly - at the top level or
+   * Every `$ref` this schema declares directly - at the top level or
    * in an `allOf` branch.
    *
    * The top level counts: `{"$ref": parent}` is a valid JSON Schema way to say
@@ -1867,7 +2213,7 @@ export class GtsStore {
     }
 
     const refs: string[] = [];
-    const own = schema['$$ref'] || schema['$ref'];
+    const own = schema['$ref'];
     if (typeof own === 'string') {
       refs.push(own);
     }
@@ -1875,7 +2221,7 @@ export class GtsStore {
     if (Array.isArray(schema.allOf)) {
       for (const sub of schema.allOf) {
         if (sub && typeof sub === 'object') {
-          const ref = sub['$$ref'] || sub['$ref'];
+          const ref = sub['$ref'];
           if (typeof ref === 'string') {
             refs.push(ref);
           }
@@ -1901,6 +2247,15 @@ export class GtsStore {
   }
 
   private resolveSchemaFully(schema: any, visited: Set<string> = new Set()): ResolvedSchema {
+    // Schemas are registered without meta-validation, so a `null` (or any
+    // other non-object) can legitimately reach here - directly as the schema
+    // passed in, or recursively via a property value / `allOf` entry that
+    // turned out to be `null`. Treat it as a no-op/malformed entry rather
+    // than reading `.type` off it, which would throw.
+    if (!isPlainSchemaObject(schema)) {
+      return { properties: {}, required: [], additionalProperties: undefined, type: undefined };
+    }
+
     const result: ResolvedSchema = {
       properties: {},
       required: [],
@@ -1911,7 +2266,7 @@ export class GtsStore {
     // A top-level `$ref` carries the whole referenced schema, exactly as an
     // `allOf` branch does; without this a parent written that way resolves to
     // nothing and its constraints become unenforceable for descendants.
-    const ownRef = schema['$$ref'] || schema['$ref'];
+    const ownRef = schema['$ref'];
     if (typeof ownRef === 'string') {
       const refId = ownRef.startsWith(GTS_URI_PREFIX) ? ownRef.substring(GTS_URI_PREFIX.length) : ownRef;
       if (!visited.has(refId)) {
@@ -1933,7 +2288,10 @@ export class GtsStore {
     // If this schema has allOf, resolve each part
     if (schema.allOf && Array.isArray(schema.allOf)) {
       for (const sub of schema.allOf) {
-        const ref = sub['$$ref'] || sub['$ref'];
+        // A malformed `allOf` entry (e.g. a literal `null`) is a no-op, not a
+        // crash - see the guard at the top of this method.
+        if (!isPlainSchemaObject(sub)) continue;
+        const ref = sub['$ref'];
         if (typeof ref === 'string') {
           // Resolve referenced schema
           const refId = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
@@ -1978,7 +2336,7 @@ export class GtsStore {
     }
 
     // Add direct properties
-    if (schema.properties) {
+    if (isPlainSchemaObject(schema.properties)) {
       for (const [propName, propSchema] of Object.entries(schema.properties)) {
         if (result.properties[propName]) {
           result.properties[propName] = this.mergePropertySchemas(result.properties[propName], propSchema);
@@ -2032,14 +2390,21 @@ export class GtsStore {
       additionalProperties: undefined,
     };
 
+    if (!isPlainSchemaObject(schema)) {
+      return overlay;
+    }
+
     if (schema.allOf && Array.isArray(schema.allOf)) {
       for (const sub of schema.allOf) {
-        const ref = sub['$$ref'] || sub['$ref'];
+        // A malformed `allOf` entry (e.g. a literal `null`) is a no-op, not a
+        // crash - see `isPlainSchemaObject`.
+        if (!isPlainSchemaObject(sub)) continue;
+        const ref = sub['$ref'];
         if (typeof ref === 'string') {
           continue; // Skip ref subschemas
         }
         // This is a non-ref overlay subschema
-        if (sub.properties) {
+        if (isPlainSchemaObject(sub.properties)) {
           for (const [propName, propSchema] of Object.entries(sub.properties)) {
             overlay.properties[propName] = overlay.properties[propName]
               ? this.mergePropertySchemas(overlay.properties[propName], propSchema)
@@ -2056,7 +2421,7 @@ export class GtsStore {
     }
 
     // Add top-level properties (outside allOf)
-    if (schema.properties) {
+    if (isPlainSchemaObject(schema.properties)) {
       for (const [propName, propSchema] of Object.entries(schema.properties)) {
         overlay.properties[propName] = overlay.properties[propName]
           ? this.mergePropertySchemas(overlay.properties[propName], propSchema)
@@ -2419,8 +2784,17 @@ export class GtsStore {
   }
 }
 
-export function createJsonEntity(content: any, _config?: Partial<GtsConfig>): JsonEntity {
-  const extractResult = GtsExtractor.extractID(content);
+/**
+ * @param forceIsSchema - Caller-declared intent (P6-2/P6-3): when set,
+ * stamps `isSchema` authoritatively instead of deriving it from
+ * `GtsExtractor`'s `$schema`-keyword shape heuristic, which cannot
+ * distinguish a schema-less-looking-but-declared schema (e.g. registered via
+ * `POST /type-schemas` with no embedded `$schema`) from ordinary instance
+ * JSON - a shape heuristic can never close that gap because the document
+ * can contain zero schema keywords.
+ */
+export function createJsonEntity(content: any, _config?: Partial<GtsConfig>, forceIsSchema?: boolean): JsonEntity {
+  const extractResult = GtsExtractor.extractID(content, undefined, forceIsSchema);
 
   const references = new Set<string>();
   findReferences(content, references);

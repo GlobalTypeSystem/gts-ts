@@ -201,7 +201,7 @@ describe('OP#8 - subsumption soundness against a real JSON Schema validator', ()
 
     gts = new GTS({ validateRefs: false });
     candidates.forEach((candidate, index) => {
-      gts.register({ $$id: ids[index], $$schema: DRAFT7, ...candidate.body });
+      gts.register({ $id: ids[index], $schema: DRAFT7, ...candidate.body });
     });
   });
 

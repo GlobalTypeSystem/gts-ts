@@ -7,7 +7,23 @@ export interface ServerConfig {
 
 export interface EntityResponse {
   id: string;
+  ok: boolean;
   content: any;
+  error?: string;
+}
+
+/**
+ * OP#6 `POST /validate-json` / `POST /validate-json/{gts_type}` response
+ * shape. Per `.gts-spec/tests/openapi.json`'s `ValidateJsonResult`, all five
+ * fields are required and `id`/`type_id`/`error` are nullable - never
+ * simply omitted.
+ */
+export interface ValidateJsonResult {
+  ok: boolean;
+  id: string | null;
+  type_id: string | null;
+  is_type_schema: boolean;
+  error: string | null;
 }
 
 export interface OperationResult {

@@ -146,7 +146,7 @@ export class GtsQuery {
         }
 
         const lastSeg = segments[segments.length - 1];
-        if (!lastSeg.isType && !lastSeg.verMajor) {
+        if (!lastSeg.isType && lastSeg.verMajor === undefined) {
           return 'Invalid query: incomplete GTS ID pattern';
         }
       } catch (err) {

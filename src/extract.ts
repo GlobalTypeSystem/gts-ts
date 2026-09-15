@@ -8,19 +8,8 @@ export interface GtsConfig {
 
 export function getDefaultConfig(): GtsConfig {
   return {
-    entityIdFields: ['$id', '$$id', 'gtsId', 'gtsIid', 'gtsOid', 'gtsI', 'gts_id', 'gts_oid', 'gts_iid', 'id'],
-    schemaIdFields: [
-      '$schema',
-      '$$schema',
-      'gtsTid',
-      'gtsType',
-      'gtsT',
-      'gts_t',
-      'gts_tid',
-      'gts_type',
-      'type',
-      'schema',
-    ],
+    entityIdFields: ['$id', 'gtsId', 'gtsIid', 'gtsOid', 'gtsI', 'gts_id', 'gts_oid', 'gts_iid', 'id'],
+    schemaIdFields: ['$schema', 'gtsTid', 'gtsType', 'gtsT', 'gts_t', 'gts_tid', 'gts_type', 'type', 'schema'],
   };
 }
 
@@ -75,7 +64,7 @@ export class GtsExtractor {
 
     // Check for JSON Schema meta-schema
     // Issue #25: A document is a schema ONLY if $schema field is present
-    const schemaField = content['$schema'] || content['$$schema'];
+    const schemaField = content['$schema'];
     if (typeof schemaField === 'string') {
       // Standard JSON Schema meta-schema URLs
       if (schemaField.includes('json-schema.org')) {
@@ -90,13 +79,22 @@ export class GtsExtractor {
     return false;
   }
 
-  static extractID(content: any, schemaContent?: any): ExtractResult {
+  /**
+   * @param forceIsSchema - When provided, overrides the `$schema`-keyword
+   * shape heuristic (`isJsonSchema`) with the caller's own declared intent.
+   * Used by `POST /type-schemas` (and the underlying explicit-`type_id`
+   * register path): a document registered there is authoritatively a GTS
+   * Type Schema regardless of whether it happens to embed a `$schema`/root
+   * -type keyword (P6-2/P6-3) - the heuristic alone cannot tell a
+   * schema-less-looking-but-declared schema from ordinary instance JSON.
+   */
+  static extractID(content: any, schemaContent?: any, forceIsSchema?: boolean): ExtractResult {
     const config = getDefaultConfig();
     let id = '';
     let schemaId: string | null = null;
     let selectedEntityField: string | undefined;
     let selectedSchemaIdField: string | undefined;
-    const isSchema = this.isJsonSchema(content);
+    const isSchema = forceIsSchema ?? this.isJsonSchema(content);
 
     if (typeof content === 'object' && content !== null) {
       // Extract entity ID (look for any non-empty value, preferring valid GTS IDs)
@@ -157,7 +155,7 @@ export class GtsExtractor {
         // So we should NOT derive schema_id from $id alone
 
         // Skip $id for non-schemas - $id without $schema should not be used for schema_id
-        const isIdFromDollarId = selectedEntityField === '$id' || selectedEntityField === '$$id';
+        const isIdFromDollarId = selectedEntityField === '$id';
 
         if (hasChain && !isIdFromDollarId) {
           // Extract schema ID from chain (only if not from $id)
@@ -171,7 +169,7 @@ export class GtsExtractor {
         if (schemaId === null && !isIdFromDollarId) {
           // No chain or chain didn't provide schema_id - try explicit schema fields
           // But don't use schema_id_fields that are $id variants (they were already checked above)
-          const explicitSchemaFields = config.schemaIdFields.filter((f) => f !== '$id' && f !== '$$id');
+          const explicitSchemaFields = config.schemaIdFields.filter((f) => f !== '$id');
           const schemaResult = this.findFirstValidField(content, explicitSchemaFields, true);
           if (schemaResult) {
             schemaId = schemaResult.value;
