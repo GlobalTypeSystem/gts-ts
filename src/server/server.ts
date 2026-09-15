@@ -49,6 +49,22 @@ export class GtsServer {
       routerOptions: {
         maxParamLength: 2048,
       },
+      // File-descriptor exhaustion guard. Fastify defaults `keepAliveTimeout`
+      // to 72s, so an idle HTTP keep-alive socket holds its file descriptor
+      // open for over a minute after its last request. Clients that do not
+      // pool connections (the conformance test suite opens a fresh TCP
+      // connection per case) accumulate hundreds of idle sockets across a
+      // long run and exhaust the process file-descriptor limit (`ulimit -n`,
+      // 256 by default on macOS). Once the limit is hit, `accept()` fails and
+      // new connections are refused - the client sees a connection error
+      // (HTTP status 0), not a 200/422. A short `keepAliveTimeout` alone is
+      // timing-dependent (a fast client can still out-pace it), so we also
+      // send `Connection: close` on every response (see `setupMiddleware`),
+      // which makes the socket - and its fd - close as soon as the response
+      // is flushed. `forceCloseConnections` reaps anything still lingering on
+      // shutdown.
+      keepAliveTimeout: 5000,
+      forceCloseConnections: true,
     });
 
     this.setupMiddleware();
@@ -69,6 +85,10 @@ export class GtsServer {
       reply.header('Access-Control-Allow-Origin', '*');
       reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       reply.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      // Close the TCP connection once the response is sent so its file
+      // descriptor is reclaimed immediately instead of lingering as an idle
+      // keep-alive socket (see the fd-exhaustion note in the constructor).
+      reply.header('Connection', 'close');
     });
 
     // Handle OPTIONS requests
