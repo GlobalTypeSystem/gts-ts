@@ -482,6 +482,60 @@ export class XGtsRefValidator {
     return null;
   }
 
+  /**
+   * Walk a schema and verify that every concrete (non-wildcard, non-relative)
+   * x-gts-ref names a constraint type that is registered. This enforces the
+   * reference-implementation rule that an x-gts-ref must point at an existing
+   * constraint type even when no value is supplied: gts-spec §9.6 leaves
+   * reference-existence checking to the implementation, and the reference
+   * implementation treats a dangling x-gts-ref target like a dangling $ref.
+   * Wildcard patterns (which name a family, not a single type) and relative
+   * pointer references (validated elsewhere) are skipped. Existence is only
+   * checked when a store is available and enforcement is enabled.
+   */
+  validateSchemaRefExistence(schema: any, schemaPath: string = ''): XGtsRefValidationError[] {
+    const errors: XGtsRefValidationError[] = [];
+    if (!this.store || !this.enforceExistence) {
+      return errors;
+    }
+    this.visitSchemaRefExistence(schema, schemaPath, errors);
+    return errors;
+  }
+
+  private visitSchemaRefExistence(schema: any, path: string, errors: XGtsRefValidationError[]): void {
+    if (!schema || typeof schema !== 'object') return;
+
+    const ref = schema['x-gts-ref'];
+    if (typeof ref === 'string' && ref.startsWith('gts.') && !ref.includes('*')) {
+      const refPath = path ? `${path}/x-gts-ref` : 'x-gts-ref';
+      if (this.store && !this.store.get(ref)) {
+        errors.push({
+          fieldPath: refPath,
+          value: ref,
+          refPattern: ref,
+          reason: `x-gts-ref constraint type '${ref}' is not registered`,
+        });
+      }
+    }
+
+    for (const key in schema) {
+      if (key === 'x-gts-ref') continue;
+      const nestedPath = path ? `${path}/${key}` : key;
+      const value = schema[key];
+      if (value && typeof value === 'object') {
+        if (Array.isArray(value)) {
+          value.forEach((item, idx) => {
+            if (item && typeof item === 'object') {
+              this.visitSchemaRefExistence(item, `${nestedPath}[${idx}]`, errors);
+            }
+          });
+        } else {
+          this.visitSchemaRefExistence(value, nestedPath, errors);
+        }
+      }
+    }
+  }
+
   private containsXGtsRef(schema: any): boolean {
     if (!schema || typeof schema !== 'object') return false;
     if (schema['x-gts-ref'] !== undefined) return true;

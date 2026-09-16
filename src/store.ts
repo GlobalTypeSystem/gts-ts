@@ -1342,15 +1342,12 @@ export class GtsStore {
       };
     }
 
-    // Abstract types are exempt from *completeness* - a descendant may still
-    // supply a missing trait value - but any value they DO declare must still
-    // satisfy the trait schema (`const`/`type`/`enum`/...). So rather than
-    // skipping value validation wholesale, abstract types validate against a
-    // `required`-stripped copy of the effective schema: the "required trait
-    // missing" errors are suppressed while bad-value errors still fire. This
-    // mirrors the reference impls' `check_unresolved = not is_abstract` split
-    // (gts-python `_strip_required`); skipping value validation entirely let an
-    // abstract type ship a trait value that contradicted its own `const`/`type`.
+    // Abstract types are exempt from the *completeness* check (§9.7.5 / ADR-0003):
+    // the standard JSON Schema validation of the materialized effective traits -
+    // which enforces `required`/`const`/`type`/... - is skipped for them, because
+    // a descendant is expected to supply/close the values. The separate x-gts-ref
+    // reference-resolution rule (§9.7.5) does NOT exempt abstract types and still
+    // runs below, so an abstract type's declared references must resolve.
     const self = this.get(schemaId);
     const isAbstract = !!(self && GtsModifiers.isAbstract(self.content));
 
@@ -1358,23 +1355,23 @@ export class GtsStore {
       return { id: schemaId, ok: true, error: '' };
     }
 
-    const schemaToValidate = isAbstract ? this.stripRequired(effectiveSchema) : effectiveSchema;
-
-    try {
-      const validate = this.ajv.compile(this.normalizeSchema(schemaToValidate));
-      if (!validate(materialized)) {
-        // P6-4: shared formatter, for the same reason as `validateCastResult`
-        // above - one Ajv-error-to-string convention, not four.
-        const errors =
-          validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
-        return { id: schemaId, ok: false, error: `trait validation: ${errors}` };
+    if (!isAbstract) {
+      try {
+        const validate = this.ajv.compile(this.normalizeSchema(effectiveSchema));
+        if (!validate(materialized)) {
+          // P6-4: shared formatter, for the same reason as `validateCastResult`
+          // above - one Ajv-error-to-string convention, not four.
+          const errors =
+            validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
+          return { id: schemaId, ok: false, error: `trait validation: ${errors}` };
+        }
+      } catch (e) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: `failed to compile trait schema: ${e instanceof Error ? e.message : String(e)}`,
+        };
       }
-    } catch (e) {
-      return {
-        id: schemaId,
-        ok: false,
-        error: `failed to compile trait schema: ${e instanceof Error ? e.message : String(e)}`,
-      };
     }
 
     // `x-gts-ref` is an assertion keyword (§9.6) that plain Ajv validation
@@ -1397,7 +1394,23 @@ export class GtsStore {
     // references to a never-registered namespace (e.g. the canonical
     // `TestCaseOp13_TraitsValid_AllResolved` et al, which reference
     // `gts.x.core.events.topic.v1~` only as a pattern) are unaffected.
-    const xGtsRefErrors = new XGtsRefValidator(this).validateInstance(materialized, effectiveSchema);
+    const xGtsRefValidator = new XGtsRefValidator(this);
+
+    // Beyond checking supplied values, a concrete x-gts-ref declared in the
+    // effective trait schema must itself name a registered constraint type -
+    // even when no value is provided. gts-spec §9.6 leaves existence checking to
+    // the implementation; the reference implementation rejects a dangling
+    // x-gts-ref target (like a dangling $ref). Wildcards/pointers are skipped.
+    const refExistenceErrors = xGtsRefValidator.validateSchemaRefExistence(effectiveSchema);
+    if (refExistenceErrors.length > 0) {
+      return {
+        id: schemaId,
+        ok: false,
+        error: `x-gts-ref validation failed: ${refExistenceErrors.map((err) => err.reason).join('; ')}`,
+      };
+    }
+
+    const xGtsRefErrors = xGtsRefValidator.validateInstance(materialized, effectiveSchema);
     if (xGtsRefErrors.length > 0) {
       return {
         id: schemaId,
@@ -1407,30 +1420,6 @@ export class GtsStore {
     }
 
     return { id: schemaId, ok: true, error: '' };
-  }
-
-  /**
-   * Strip `required` declarations from a trait schema - at the top level and
-   * inside every `allOf` branch - while leaving all value constraints intact.
-   *
-   * Used for abstract types, which are exempt from trait *completeness* (a
-   * descendant may still supply the missing value) but must still have any
-   * values they DO declare validated against the schema. Removing only
-   * `required` turns "missing trait" into a non-error while `const`/`type`/
-   * `enum`/etc. keep rejecting bad values. Faithful port of gts-python's
-   * `_strip_required`; deliberately does not descend into `properties` (a
-   * nested object's own `required` only matters once that object is present).
-   */
-  private stripRequired(schema: any, depth: number = 0): any {
-    if (depth >= MAX_SCHEMA_DEPTH || typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
-      return schema;
-    }
-    const out: any = { ...schema };
-    delete out.required;
-    if (Array.isArray(out.allOf)) {
-      out.allOf = out.allOf.map((branch: any) => this.stripRequired(branch, depth + 1));
-    }
-    return out;
   }
 
   /**
