@@ -1152,6 +1152,42 @@ export class GtsStore {
     }
   }
 
+  private validateSchemaReferenceTargets(node: any, path: string = ''): string | null {
+    if (!node || typeof node !== 'object') {
+      return null;
+    }
+
+    if (typeof node.$ref === 'string' && !node.$ref.startsWith('#')) {
+      const refPath = path ? `${path}/$ref` : '$ref';
+      if (!node.$ref.startsWith(GTS_URI_PREFIX)) {
+        return `Invalid $ref at ${refPath}: expected a local pointer or gts:// URI`;
+      }
+      const targetId = node.$ref.substring(GTS_URI_PREFIX.length);
+      if (!Gts.isValidGtsID(targetId)) {
+        return `Invalid $ref at ${refPath}: ${targetId} is not a valid GTS identifier`;
+      }
+      const target = this.get(targetId);
+      if (!target || !target.isSchema) {
+        return `Unresolvable $ref at ${refPath}: ${node.$ref}`;
+      }
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '$ref') continue;
+      const nestedPath = path ? `${path}/${key}` : key;
+      if (Array.isArray(value)) {
+        for (let index = 0; index < value.length; index++) {
+          const error = this.validateSchemaReferenceTargets(value[index], `${nestedPath}[${index}]`);
+          if (error) return error;
+        }
+      } else {
+        const error = this.validateSchemaReferenceTargets(value, nestedPath);
+        if (error) return error;
+      }
+    }
+    return null;
+  }
+
   validateSchemaAgainstParent(schemaId: string): ValidationResult {
     const entity = this.get(schemaId);
     if (!entity) {
@@ -1174,6 +1210,11 @@ export class GtsStore {
       const ruleError = this.checkTypeSchemaRules(content, schemaId, { enforceGuards: true });
       if (ruleError) {
         return { id: schemaId, ok: false, error: ruleError };
+      }
+
+      const refError = this.validateSchemaReferenceTargets(content);
+      if (refError) {
+        return { id: schemaId, ok: false, error: refError };
       }
 
       // Per ADR-0001 derivation is established by the chained `$id` alone, so the

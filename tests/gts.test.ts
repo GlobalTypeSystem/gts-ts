@@ -1200,6 +1200,44 @@ describe('Phase 4 - $$ escaping artifacts are not GTS/JSON-Schema keywords', () 
     });
   });
 
+  describe('explicit schema validation resolves GTS references', () => {
+    test('rejects a missing GTS reference target', () => {
+      const gts = new GTS({ validateRefs: false });
+      const id = 'gts.x.test12.refmissing.host.v1~';
+      gts.register({
+        $id: `gts://${id}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        allOf: [{ $ref: 'gts://gts.x.test12.refmissing.target.v1~' }],
+      });
+
+      const result = gts.validateSchemaAgainstParent(id);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Unresolvable $ref');
+    });
+
+    test('rejects a missing derived GTS reference target', () => {
+      const gts = new GTS({ validateRefs: false });
+      const target = 'gts.x.test12.refpartial.target.v1~';
+      const host = 'gts.x.test12.refpartial.host.v1~';
+      gts.register({
+        $id: `gts://${target}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+      });
+      gts.register({
+        $id: `gts://${host}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        allOf: [{ $ref: `gts://${target}x.test12._.missing.v1~` }],
+      });
+
+      const result = gts.validateSchemaAgainstParent(host);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Unresolvable $ref');
+    });
+  });
+
   describe('direct: $$ id/schema/ref are not registered keyword aliases', () => {
     test('extractID never selects $$id as the entity id field, even when it is the only id-shaped key', () => {
       const result = extractID({ $$id: 'gts://gts.x.test6.direct.no_alias.v1~', foo: 'bar' });
