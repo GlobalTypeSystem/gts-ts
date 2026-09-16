@@ -192,7 +192,7 @@ program
     const parentOpts = command.parent.opts();
 
     // Import server dynamically
-    const { GtsServer } = await import('../server/server');
+    const { GtsServer } = await import('../server/server.js');
 
     const config = {
       host: options.host,
