@@ -1342,18 +1342,26 @@ export class GtsStore {
       };
     }
 
-    // Abstract types are exempt from completeness: descendants close the gaps.
+    // Abstract types are exempt from *completeness* - a descendant may still
+    // supply a missing trait value - but any value they DO declare must still
+    // satisfy the trait schema (`const`/`type`/`enum`/...). So rather than
+    // skipping value validation wholesale, abstract types validate against a
+    // `required`-stripped copy of the effective schema: the "required trait
+    // missing" errors are suppressed while bad-value errors still fire. This
+    // mirrors the reference impls' `check_unresolved = not is_abstract` split
+    // (gts-python `_strip_required`); skipping value validation entirely let an
+    // abstract type ship a trait value that contradicted its own `const`/`type`.
     const self = this.get(schemaId);
-    if (self && GtsModifiers.isAbstract(self.content)) {
-      return { id: schemaId, ok: true, error: '' };
-    }
+    const isAbstract = !!(self && GtsModifiers.isAbstract(self.content));
 
     if (traitSchemas.length === 0) {
       return { id: schemaId, ok: true, error: '' };
     }
 
+    const schemaToValidate = isAbstract ? this.stripRequired(effectiveSchema) : effectiveSchema;
+
     try {
-      const validate = this.ajv.compile(this.normalizeSchema(effectiveSchema));
+      const validate = this.ajv.compile(this.normalizeSchema(schemaToValidate));
       if (!validate(materialized)) {
         // P6-4: shared formatter, for the same reason as `validateCastResult`
         // above - one Ajv-error-to-string convention, not four.
@@ -1399,6 +1407,30 @@ export class GtsStore {
     }
 
     return { id: schemaId, ok: true, error: '' };
+  }
+
+  /**
+   * Strip `required` declarations from a trait schema - at the top level and
+   * inside every `allOf` branch - while leaving all value constraints intact.
+   *
+   * Used for abstract types, which are exempt from trait *completeness* (a
+   * descendant may still supply the missing value) but must still have any
+   * values they DO declare validated against the schema. Removing only
+   * `required` turns "missing trait" into a non-error while `const`/`type`/
+   * `enum`/etc. keep rejecting bad values. Faithful port of gts-python's
+   * `_strip_required`; deliberately does not descend into `properties` (a
+   * nested object's own `required` only matters once that object is present).
+   */
+  private stripRequired(schema: any, depth: number = 0): any {
+    if (depth >= MAX_SCHEMA_DEPTH || typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
+      return schema;
+    }
+    const out: any = { ...schema };
+    delete out.required;
+    if (Array.isArray(out.allOf)) {
+      out.allOf = out.allOf.map((branch: any) => this.stripRequired(branch, depth + 1));
+    }
+    return out;
   }
 
   /**
