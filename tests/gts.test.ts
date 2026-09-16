@@ -1201,6 +1201,29 @@ describe('Phase 4 - $$ escaping artifacts are not GTS/JSON-Schema keywords', () 
   });
 
   describe('explicit schema validation resolves GTS references', () => {
+    test('rejects a missing concrete x-gts-ref target reached through a local $ref', () => {
+      const gts = new GTS({ validateRefs: false });
+      const id = 'gts.x.test12.xrefmissing.holder.v1~';
+      gts.register({
+        $id: `gts://${id}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { ref: { $ref: '#/definitions/TargetRef' } },
+        definitions: {
+          TargetRef: {
+            type: 'string',
+            'x-gts-ref': 'gts.x.test12.xrefmissing.target.v1~',
+          },
+        },
+      });
+
+      const result = gts.validateSchemaAgainstParent(id);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain(
+        "x-gts-ref constraint type 'gts.x.test12.xrefmissing.target.v1~' is not registered"
+      );
+    });
+
     test('rejects a missing GTS reference target', () => {
       const gts = new GTS({ validateRefs: false });
       const id = 'gts.x.test12.refmissing.host.v1~';

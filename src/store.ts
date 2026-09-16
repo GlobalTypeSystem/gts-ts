@@ -1217,6 +1217,15 @@ export class GtsStore {
         return { id: schemaId, ok: false, error: refError };
       }
 
+      const xGtsRefErrors = new XGtsRefValidator(this).validateSchemaRefExistence(content);
+      if (xGtsRefErrors.length > 0) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: `x-gts-ref validation failed: ${xGtsRefErrors.map((error) => error.reason).join('; ')}`,
+        };
+      }
+
       // Per ADR-0001 derivation is established by the chained `$id` alone, so the
       // parent is taken from the chain. A body that references the parent via
       // `allOf` + `$ref` and one that restates the parent's fields are both valid
