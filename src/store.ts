@@ -1303,6 +1303,7 @@ export class GtsStore {
     // makes the aggregate unsatisfiable; tracked separately so that a subtree
     // with no traits at all still validates (ADR-0002).
     let traitsProhibited = false;
+    let traitsProhibitedBy: string | null = null;
     // A `true` declaration constrains nothing but still establishes that the
     // chain defines a trait surface, so descendants may carry trait values.
     let hasTraitSchemaDeclaration = false;
@@ -1316,8 +1317,16 @@ export class GtsStore {
       const declaredSchema = content['x-gts-traits-schema'];
       if (declaredSchema !== undefined) {
         hasTraitSchemaDeclaration = true;
+        if (traitsProhibited && declaredSchema !== false) {
+          return {
+            id: schemaId,
+            ok: false,
+            error: `x-gts-traits-schema in '${chainSchemaId}' cannot permit traits because ancestor '${traitsProhibitedBy}' declares false`,
+          };
+        }
         if (declaredSchema === false) {
           traitsProhibited = true;
+          traitsProhibitedBy ??= chainSchemaId;
         } else if (declaredSchema !== true) {
           const isPlainObject =
             typeof declaredSchema === 'object' && declaredSchema !== null && !Array.isArray(declaredSchema);

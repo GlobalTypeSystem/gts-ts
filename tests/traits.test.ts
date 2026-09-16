@@ -244,6 +244,21 @@ describe('OP#13 - boolean trait schemas (ADR-0002)', () => {
     expect(gts.validateEntity(kidId).ok).toBe(true);
   });
 
+  test('`false` rejects a descendant that declares an object trait schema', () => {
+    const gts = new GTS({ validateRefs: false });
+    const baseId = 'gts.x.unit.tr.falseschema.v1~';
+    const kidId = `${baseId}x.unit._.kid.v1~`;
+
+    gts.register(baseType(baseId, { 'x-gts-traits-schema': false }));
+    gts.register(
+      derivedType(kidId, baseId, {
+        'x-gts-traits-schema': { type: 'object', properties: { retention: { type: 'string' } } },
+      })
+    );
+
+    expect(gts.validateEntity(kidId).ok).toBe(false);
+  });
+
   test('`false` rejects any descendant that declares traits', () => {
     const gts = new GTS({ validateRefs: false });
     const baseId = 'gts.x.unit.tr.falsetr.v1~';
