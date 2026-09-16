@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.4](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.4)**, reaching full canonical conformance (`make e2e`: 485/485).
+Upgrades the implementation from GTS spec **v0.13.1** to **[v0.14.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.14.0)**, reaching full canonical conformance (`make e2e`: 501/501).
 
 ### Breaking
 
@@ -17,12 +17,20 @@ Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.4](https://git
   missing entity.
 - `POST /entities` now returns `422` when `validate=true` and the instance fails validation,
   instead of `200` with `ok: false`.
-- An `x-gts-traits` value is now checked for registry existence, but **only when the type its
-  `x-gts-ref` names is itself already registered** — a purely documentary reference to a
-  never-registered namespace is still accepted. Previously a syntactically valid,
-  correctly-prefixed `x-gts-traits` value naming an unregistered entity was accepted
-  unconditionally; gts-spec v0.13.3 issue #107 reverses that rationale, and the canonical test
-  that had pinned the old behavior was inverted.
+- **`x-gts-ref` existence is now enforced uniformly across every constraint form** (gts-spec
+  v0.14 §9.6). A referenced value must be a well-formed GTS id that matches the constraint
+  **and** resolve to at least one registered GTS type/instance — this now includes wildcard
+  patterns (`gts.x.foo.*`, `...v1~*`) and the bare `gts.*` wildcard, which previously skipped
+  the existence check. It supersedes the interim v0.13.x rule where a value was checked for
+  existence *only* when the concrete type its `x-gts-ref` named was itself already registered
+  (so a wildcard, or a reference into a never-registered namespace, was accepted
+  unconditionally). Consequently, previously-passing validations of unregistered values now
+  fail. Callers that need format/pattern validation without an existence requirement construct
+  the validator with `enforceExistence: false`. Mirrors the gts-go / gts-python reference
+  implementations.
+- **`x-gts-ref` may now use any GTS wildcard pattern (§10), not just `gts.*`** — e.g.
+  `gts.x.core.am.*` or a `~`-terminated `...v1~*`. A `~`-terminated reference matches the exact
+  identifier and any identifier derived from it.
 - `$$id` / `$$schema` / `$$ref` / `$$defs` are no longer accepted as aliases for `$id` /
   `$schema` / `$ref` / `$defs`. They were an artifact of the HttpRunner conformance harness
   escaping `$` to `$$` on the wire, never real GTS or JSON Schema syntax; a schema using them

@@ -15,16 +15,24 @@ export interface XGtsRefValidationError {
 
 export class XGtsRefValidator {
   private store: EntityLookup | undefined;
+  private enforceExistence: boolean;
 
   /**
    * @param store Entity registry used to check that referenced GTS IDs actually
    *   exist. Omit it (or pass `undefined`) to validate only the GTS-ID
    *   format/pattern of referenced values without requiring the referenced
-   *   entity to be registered - e.g. for `x-gts-traits` values, which are
-   *   schema-level example/default data rather than live references.
+   *   entity to be registered.
+   * @param enforceExistence When `true` (the default) and a `store` is
+   *   provided, an `x-gts-ref` value must resolve to a registered entity or
+   *   validation fails. Existence is enforced uniformly for every constraint
+   *   form, including wildcard patterns and the bare `gts.*` wildcard
+   *   (gts-spec §9.6). Set to `false` to validate only that the value is a
+   *   well-formed GTS id matching the constraint pattern, without requiring the
+   *   referenced entity to be registered.
    */
-  constructor(store?: EntityLookup) {
+  constructor(store?: EntityLookup, enforceExistence: boolean = true) {
     this.store = store;
+    this.enforceExistence = enforceExistence;
   }
 
   /**
@@ -451,40 +459,15 @@ export class XGtsRefValidator {
       };
     }
 
-    // Check if entity exists in store, when a store was provided. Callers
-    // that only need format/pattern validation (no existence requirement)
-    // construct this validator without a store.
-    //
-    // This is only meaningful - and only enforced - when `pattern` itself
-    // names a concrete, registered GTS type: a wildcard pattern (`gts.*`,
-    // `gts.x.foo.*`) names no single schema to check against, and a pattern
-    // whose named type was never registered in this store at all names a
-    // namespace this store has no knowledge of (e.g. a foreign/example
-    // namespace used purely to document a type's expected shape, as is
-    // common for `x-gts-traits-schema` property descriptions - see
-    // `TestCaseOp13_TraitsValid_AllResolved` et al in the canonical suite,
-    // which reference `gts.x.core.events.topic.v1~` without ever
-    // registering it and still expect success). Once the named type IS
-    // registered, though, the store has enough information to check
-    // instance-level existence, and a value naming a non-existent instance
-    // under it must fail (`TestCaseOp13_TraitRef_TopicRefNonexistent` /
-    // `TestCaseXGtsRef_PrefixAndSelfRef`, both of which register the
-    // referenced type before relying on this check).
-    //
-    // Residual risk (P5-R1, deliberately not closed here): this gate cannot
-    // distinguish "unregistered because it's a foreign/documentation
-    // namespace" from "unregistered because of a typo in the `x-gts-ref`
-    // type id itself". Both look identical to the store - `pattern` simply
-    // has no entry - so a typo'd type id silently disables the entire
-    // existence check for every value validated against it, the same way a
-    // genuinely-external namespace legitimately does, and validation
-    // reports success. The canonical suite requires exactly this shape
-    // (`TestCaseOp13_TraitsValid_AllResolved` needs an unregistered type to
-    // skip the check; `TestCaseOp13_TraitRef_TopicRefNonexistent` needs a
-    // registered type to enforce it), so no reformulation of this condition
-    // alone can close the gap without another signal (e.g. a separate
-    // registry of "known-external" namespaces) to tell the two cases apart.
-    if (this.store && !pattern.includes('*') && this.store.get(pattern)) {
+    // The referenced value must resolve to a registered entity when a store is
+    // available and existence enforcement is enabled. Existence is enforced
+    // uniformly for all constraint forms, including wildcard patterns and the
+    // bare `gts.*` wildcard (gts-spec §9.6): the value has already been checked
+    // to be a well-formed GTS id that matches the pattern, so it only remains
+    // to confirm at least one registered type/instance resolves it. Callers
+    // that only need format/pattern validation construct this validator with
+    // `enforceExistence` set to `false` (or without a store).
+    if (this.store && this.enforceExistence) {
       const entity = this.store.get(value);
       if (!entity) {
         return {
