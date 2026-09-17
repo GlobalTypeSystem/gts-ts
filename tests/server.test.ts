@@ -1340,6 +1340,33 @@ describe('configurable entity update mode (mirrors gts-go --allow-entity-updates
     await server.stop();
   });
 
+  test('replacing a schema refreshes Ajv references used by dependent schemas', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0, allowEntityUpdates: true });
+    const targetId = 'gts.x.unit.srv.updtarget.v1~';
+    const hostId = 'gts.x.unit.srv.updhost.v1~';
+    const instanceId = `${hostId}x.unit._.item.v1`;
+
+    await postEntity(server, { $id: `gts://${targetId}`, $schema: DRAFT7, type: 'string' });
+    await postEntity(server, {
+      $id: `gts://${hostId}`,
+      $schema: DRAFT7,
+      type: 'object',
+      required: ['value'],
+      properties: { value: { $ref: `gts://${targetId}` } },
+    });
+    await postEntity(server, { $id: `gts://${targetId}`, $schema: DRAFT7, type: 'integer' });
+    await postEntity(server, { id: instanceId, value: 42 });
+
+    const response = await server.instance.inject({
+      method: 'POST',
+      url: '/validate-instance',
+      payload: { instance_id: instanceId },
+    });
+    expect(JSON.parse(response.body).ok).toBe(true);
+
+    await server.stop();
+  });
+
   test('POST /type-schemas is likewise conflict-protected', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
     const typeId = 'gts.x.unit.srv.updschema.v1~';

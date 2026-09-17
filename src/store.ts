@@ -152,7 +152,8 @@ export class GtsStore {
     // check runs before any mutation below so the previously-registered content
     // is preserved on rejection. Mirrors gts-go's registerLocked conflict gate.
     const previous = this.byId.get(entity.id);
-    if (previous && !this.config.allowEntityUpdates && contentHash(previous.content) !== contentHash(entity.content)) {
+    const replacing = previous && contentHash(previous.content) !== contentHash(entity.content);
+    if (replacing && !this.config.allowEntityUpdates) {
       throw new EntityConflictError(entity.id);
     }
 
@@ -177,6 +178,9 @@ export class GtsStore {
       }
     }
 
+    if (replacing && previous.isSchema) {
+      this.ajv.removeSchema(entity.id);
+    }
     this.byId.set(entity.id, entity);
 
     // If this is a schema, add it to AJV for reference resolution
