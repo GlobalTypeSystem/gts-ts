@@ -1667,9 +1667,11 @@ describe('x-gts-ref schema existence traversal', () => {
   test('checks a concrete constraint type resolved through a relative pointer', () => {
     const constraintType = 'gts.x.unit.xref.relative_target.v1~';
     const schema = {
-      constraintType,
-      properties: {
-        link: { type: 'string', 'x-gts-ref': '/constraintType' },
+      'x-gts-traits-schema': {
+        constraintType,
+        properties: {
+          link: { type: 'string', 'x-gts-ref': '/x-gts-traits-schema/constraintType' },
+        },
       },
     };
     const validator = new XGtsRefValidator(missingStore);

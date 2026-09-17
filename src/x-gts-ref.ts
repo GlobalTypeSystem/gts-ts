@@ -18,6 +18,7 @@ const SCHEMA_VALUE_KEYWORDS = new Set([
   'then',
   'unevaluatedItems',
   'unevaluatedProperties',
+  'x-gts-traits-schema',
 ]);
 const SCHEMA_ARRAY_KEYWORDS = new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems']);
 const SCHEMA_MAP_KEYWORDS = new Set(['$defs', 'definitions', 'dependentSchemas', 'properties', 'patternProperties']);
