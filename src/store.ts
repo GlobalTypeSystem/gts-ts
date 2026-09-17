@@ -12,7 +12,7 @@ import {
 } from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
-import { XGtsRefValidator } from './x-gts-ref';
+import { visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
 import { GtsCompatibility, findCrossedBound, isEmptySchema } from './compatibility';
 import { GtsModifiers } from './modifiers';
 
@@ -1347,20 +1347,20 @@ export class GtsStore {
     if (typeof xGtsRef === 'string' && xGtsRef.startsWith('gts.') && !xGtsRef.includes('*')) {
       dependencies.add(xGtsRef);
     }
-    for (const [key, value] of Object.entries(node)) {
-      if (key !== '$ref' && key !== 'x-gts-ref') this.collectSchemaDependencies(value, dependencies);
-    }
+    visitJsonSubschemas(node, '', (subschema) => this.collectSchemaDependencies(subschema, dependencies));
     return dependencies;
   }
 
   private withoutRequired(node: any): any {
-    if (Array.isArray(node)) return node.map((value) => this.withoutRequired(value));
     if (!node || typeof node !== 'object') return node;
-    return Object.fromEntries(
-      Object.entries(node)
-        .filter(([key]) => key !== 'required')
-        .map(([key, value]) => [key, this.withoutRequired(value)])
-    );
+    const result = JSON.parse(JSON.stringify(node));
+    const removeRequired = (schema: any): void => {
+      if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return;
+      delete schema.required;
+      visitJsonSubschemas(schema, '', removeRequired);
+    };
+    removeRequired(result);
+    return result;
   }
 
   private validateSchemaAgainstParentLocal(schemaId: string, referencedIds?: Set<string>): ValidationResult {

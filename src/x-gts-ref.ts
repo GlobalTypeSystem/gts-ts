@@ -22,6 +22,33 @@ const SCHEMA_VALUE_KEYWORDS = new Set([
 const SCHEMA_ARRAY_KEYWORDS = new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems']);
 const SCHEMA_MAP_KEYWORDS = new Set(['$defs', 'definitions', 'dependentSchemas', 'properties', 'patternProperties']);
 
+export function visitJsonSubschemas(schema: any, path: string, visit: (subschema: any, path: string) => void): void {
+  for (const [key, value] of Object.entries(schema)) {
+    const nestedPath = path ? `${path}/${key}` : key;
+    if (SCHEMA_VALUE_KEYWORDS.has(key)) {
+      visit(value, nestedPath);
+    } else if (SCHEMA_ARRAY_KEYWORDS.has(key) && Array.isArray(value)) {
+      value.forEach((item, index) => visit(item, `${nestedPath}[${index}]`));
+    } else if (SCHEMA_MAP_KEYWORDS.has(key) && value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [name, childSchema] of Object.entries(value)) {
+        visit(childSchema, `${nestedPath}/${name}`);
+      }
+    } else if (key === 'items') {
+      if (Array.isArray(value)) {
+        value.forEach((item, index) => visit(item, `${nestedPath}[${index}]`));
+      } else {
+        visit(value, nestedPath);
+      }
+    } else if (key === 'dependencies' && value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [name, dependency] of Object.entries(value)) {
+        if (!Array.isArray(dependency)) {
+          visit(dependency, `${nestedPath}/${name}`);
+        }
+      }
+    }
+  }
+}
+
 export interface XGtsRefValidationError {
   fieldPath: string;
   value: any;
@@ -291,25 +318,9 @@ export class XGtsRefValidator {
       }
     }
 
-    // Recurse into nested structures
-    for (const key in schema) {
-      if (key === 'x-gts-ref') continue;
-
-      const nestedPath = path ? `${path}/${key}` : key;
-      const value = schema[key];
-
-      if (value && typeof value === 'object') {
-        if (Array.isArray(value)) {
-          value.forEach((item, idx) => {
-            if (item && typeof item === 'object') {
-              this.visitSchema(item, `${nestedPath}[${idx}]`, rootSchema, errors);
-            }
-          });
-        } else {
-          this.visitSchema(value, nestedPath, rootSchema, errors);
-        }
-      }
-    }
+    visitJsonSubschemas(schema, path, (subschema, subschemaPath) => {
+      this.visitSchema(subschema, subschemaPath, rootSchema, errors);
+    });
   }
 
   private validateRefValue(
@@ -511,59 +522,42 @@ export class XGtsRefValidator {
    * constraint type even when no value is supplied: gts-spec §9.6 leaves
    * reference-existence checking to the implementation, and the reference
    * implementation treats a dangling x-gts-ref target like a dangling $ref.
-   * Wildcard patterns (which name a family, not a single type) and relative
-   * pointer references (validated elsewhere) are skipped. Existence is only
-   * checked when a store is available and enforcement is enabled.
+   * Wildcard patterns name a family rather than one concrete dependency.
+   * Relative pointer references are resolved against the root schema before
+   * their target existence is checked. Existence is only checked when a store
+   * is available and enforcement is enabled.
    */
   validateSchemaRefExistence(schema: any, schemaPath: string = ''): XGtsRefValidationError[] {
     const errors: XGtsRefValidationError[] = [];
     if (!this.store || !this.enforceExistence) {
       return errors;
     }
-    this.visitSchemaRefExistence(schema, schemaPath, errors);
+    this.visitSchemaRefExistence(schema, schemaPath, schema, errors);
     return errors;
   }
 
-  private visitSchemaRefExistence(schema: any, path: string, errors: XGtsRefValidationError[]): void {
+  private visitSchemaRefExistence(schema: any, path: string, rootSchema: any, errors: XGtsRefValidationError[]): void {
     if (!schema || typeof schema !== 'object') return;
 
     const ref = schema['x-gts-ref'];
-    if (typeof ref === 'string' && ref.startsWith('gts.') && !ref.includes('*')) {
+    const resolvedRef = typeof ref === 'string' && ref.startsWith('/') ? this.resolvePointer(rootSchema, ref) : ref;
+    if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.') && !resolvedRef.includes('*')) {
       const refPath = path ? `${path}/x-gts-ref` : 'x-gts-ref';
-      if (this.store && !this.store.get(ref)) {
+      if (this.store && !this.store.get(resolvedRef)) {
         errors.push({
           fieldPath: refPath,
           value: ref,
-          refPattern: ref,
-          reason: `x-gts-ref constraint type '${ref}' is not registered`,
+          refPattern: resolvedRef,
+          reason: `x-gts-ref constraint type '${resolvedRef}' is not registered`,
         });
+      } else {
+        this.referencedIds.add(resolvedRef);
       }
     }
 
-    for (const [key, value] of Object.entries(schema)) {
-      const nestedPath = path ? `${path}/${key}` : key;
-      if (SCHEMA_VALUE_KEYWORDS.has(key)) {
-        this.visitSchemaRefExistence(value, nestedPath, errors);
-      } else if (SCHEMA_ARRAY_KEYWORDS.has(key) && Array.isArray(value)) {
-        value.forEach((item, index) => this.visitSchemaRefExistence(item, `${nestedPath}[${index}]`, errors));
-      } else if (SCHEMA_MAP_KEYWORDS.has(key) && value && typeof value === 'object' && !Array.isArray(value)) {
-        for (const [name, childSchema] of Object.entries(value)) {
-          this.visitSchemaRefExistence(childSchema, `${nestedPath}/${name}`, errors);
-        }
-      } else if (key === 'items') {
-        if (Array.isArray(value)) {
-          value.forEach((item, index) => this.visitSchemaRefExistence(item, `${nestedPath}[${index}]`, errors));
-        } else {
-          this.visitSchemaRefExistence(value, nestedPath, errors);
-        }
-      } else if (key === 'dependencies' && value && typeof value === 'object' && !Array.isArray(value)) {
-        for (const [name, dependency] of Object.entries(value)) {
-          if (!Array.isArray(dependency)) {
-            this.visitSchemaRefExistence(dependency, `${nestedPath}/${name}`, errors);
-          }
-        }
-      }
-    }
+    visitJsonSubschemas(schema, path, (subschema, subschemaPath) => {
+      this.visitSchemaRefExistence(subschema, subschemaPath, rootSchema, errors);
+    });
   }
 
   private containsXGtsRef(schema: any): boolean {

@@ -1622,26 +1622,61 @@ describe('x-gts-ref schema existence traversal', () => {
 
   test('does not interpret annotation data as a nested schema', () => {
     const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
-      default: { 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' },
+      default: { 'x-gts-ref': 'not-a-gts-id' },
       const: { 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' },
-      examples: [{ 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' }],
+      examples: [{ 'x-gts-ref': 42 }],
     });
 
     expect(errors).toHaveLength(0);
+
+    const gts = new GTS();
+    const id = 'gts.x.unit.xref.annotation_holder.v1~';
+    gts.register({
+      $id: `gts://${id}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        payload: {
+          type: 'object',
+          default: { 'x-gts-ref': 'not-a-gts-id' },
+          const: { 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' },
+          examples: [{ 'x-gts-ref': 42 }],
+        },
+      },
+    });
+    expect(gts.validateSchemaAgainstParent(id).ok).toBe(true);
   });
 
   test('checks the schema of a property named x-gts-ref', () => {
-    const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
+    const schema = {
       properties: {
         'x-gts-ref': {
           type: 'string',
           'x-gts-ref': 'gts.x.unit.xref.property.v1~',
         },
       },
-    });
+    };
+    const validator = new XGtsRefValidator(missingStore);
+    expect(validator.validateSchema(schema)).toHaveLength(0);
+    const errors = validator.validateSchemaRefExistence(schema);
 
     expect(errors).toHaveLength(1);
     expect(errors[0].fieldPath).toBe('properties/x-gts-ref/x-gts-ref');
+  });
+
+  test('checks a concrete constraint type resolved through a relative pointer', () => {
+    const constraintType = 'gts.x.unit.xref.relative_target.v1~';
+    const schema = {
+      constraintType,
+      properties: {
+        link: { type: 'string', 'x-gts-ref': '/constraintType' },
+      },
+    };
+    const validator = new XGtsRefValidator(missingStore);
+    const errors = validator.validateSchemaRefExistence(schema);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].refPattern).toBe(constraintType);
   });
 });
 
