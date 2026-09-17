@@ -6,6 +6,22 @@
 import { Gts } from './gts';
 import { EntityLookup, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS } from './types';
 
+const SCHEMA_VALUE_KEYWORDS = new Set([
+  'additionalItems',
+  'additionalProperties',
+  'contains',
+  'contentSchema',
+  'else',
+  'if',
+  'not',
+  'propertyNames',
+  'then',
+  'unevaluatedItems',
+  'unevaluatedProperties',
+]);
+const SCHEMA_ARRAY_KEYWORDS = new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems']);
+const SCHEMA_MAP_KEYWORDS = new Set(['$defs', 'definitions', 'dependentSchemas', 'properties', 'patternProperties']);
+
 export interface XGtsRefValidationError {
   fieldPath: string;
   value: any;
@@ -524,19 +540,27 @@ export class XGtsRefValidator {
       }
     }
 
-    for (const key in schema) {
-      if (key === 'x-gts-ref') continue;
+    for (const [key, value] of Object.entries(schema)) {
       const nestedPath = path ? `${path}/${key}` : key;
-      const value = schema[key];
-      if (value && typeof value === 'object') {
+      if (SCHEMA_VALUE_KEYWORDS.has(key)) {
+        this.visitSchemaRefExistence(value, nestedPath, errors);
+      } else if (SCHEMA_ARRAY_KEYWORDS.has(key) && Array.isArray(value)) {
+        value.forEach((item, index) => this.visitSchemaRefExistence(item, `${nestedPath}[${index}]`, errors));
+      } else if (SCHEMA_MAP_KEYWORDS.has(key) && value && typeof value === 'object' && !Array.isArray(value)) {
+        for (const [name, childSchema] of Object.entries(value)) {
+          this.visitSchemaRefExistence(childSchema, `${nestedPath}/${name}`, errors);
+        }
+      } else if (key === 'items') {
         if (Array.isArray(value)) {
-          value.forEach((item, idx) => {
-            if (item && typeof item === 'object') {
-              this.visitSchemaRefExistence(item, `${nestedPath}[${idx}]`, errors);
-            }
-          });
+          value.forEach((item, index) => this.visitSchemaRefExistence(item, `${nestedPath}[${index}]`, errors));
         } else {
           this.visitSchemaRefExistence(value, nestedPath, errors);
+        }
+      } else if (key === 'dependencies' && value && typeof value === 'object' && !Array.isArray(value)) {
+        for (const [name, dependency] of Object.entries(value)) {
+          if (!Array.isArray(dependency)) {
+            this.visitSchemaRefExistence(dependency, `${nestedPath}/${name}`, errors);
+          }
         }
       }
     }

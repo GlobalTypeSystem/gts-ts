@@ -1617,6 +1617,34 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
   });
 });
 
+describe('x-gts-ref schema existence traversal', () => {
+  const missingStore = { get: () => undefined };
+
+  test('does not interpret annotation data as a nested schema', () => {
+    const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
+      default: { 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' },
+      const: { 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' },
+      examples: [{ 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' }],
+    });
+
+    expect(errors).toHaveLength(0);
+  });
+
+  test('checks the schema of a property named x-gts-ref', () => {
+    const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
+      properties: {
+        'x-gts-ref': {
+          type: 'string',
+          'x-gts-ref': 'gts.x.unit.xref.property.v1~',
+        },
+      },
+    });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].fieldPath).toBe('properties/x-gts-ref/x-gts-ref');
+  });
+});
+
 // P5-R2 - `visitInstance` (src/x-gts-ref.ts) must fail closed when a
 // `$ref` it is asked to follow does not resolve to a usable schema, rather
 // than silently `return`ing and reporting no violation. Two distinct
