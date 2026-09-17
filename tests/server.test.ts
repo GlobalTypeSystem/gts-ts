@@ -372,6 +372,25 @@ describe('GET /openapi', () => {
 
     await server.stop();
   });
+
+  test('documents conflict responses for entity and type-schema registration', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const response = await server.instance.inject({ method: 'GET', url: '/openapi' });
+    const paths = JSON.parse(response.body).paths;
+
+    for (const path of ['/entities', '/type-schemas']) {
+      expect(paths[path].post.responses['409']).toEqual({
+        description: 'Entity conflict',
+        content: {
+          'application/json': {
+            schema: { $ref: '#/components/schemas/OperationResult' },
+          },
+        },
+      });
+    }
+
+    await server.stop();
+  });
 });
 
 // ---------------------------------------------------------------------------

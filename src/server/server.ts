@@ -1151,6 +1151,14 @@ export class GtsServer {
                 },
               },
             },
+            409: {
+              description: 'Entity conflict',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/OperationResult' },
+                },
+              },
+            },
           },
         },
       },
@@ -1244,6 +1252,14 @@ export class GtsServer {
           responses: {
             200: {
               description: 'Operation result',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/OperationResult' },
+                },
+              },
+            },
+            409: {
+              description: 'Entity conflict',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/OperationResult' },
