@@ -16,6 +16,7 @@ export interface XGtsRefValidationError {
 export class XGtsRefValidator {
   private store: EntityLookup | undefined;
   private enforceExistence: boolean;
+  private referencedIds: Set<string> = new Set();
 
   /**
    * @param store Entity registry used to check that referenced GTS IDs actually
@@ -33,6 +34,10 @@ export class XGtsRefValidator {
   constructor(store?: EntityLookup, enforceExistence: boolean = true) {
     this.store = store;
     this.enforceExistence = enforceExistence;
+  }
+
+  getReferencedIds(): Set<string> {
+    return new Set(this.referencedIds);
   }
 
   /**
@@ -477,6 +482,7 @@ export class XGtsRefValidator {
           reason: `Referenced entity '${value}' not found in registry`,
         };
       }
+      this.referencedIds.add(value);
     }
 
     return null;

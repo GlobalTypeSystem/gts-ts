@@ -241,6 +241,65 @@ export class GtsStore {
   }
 
   validateInstance(gtsId: string): ValidationResult {
+    return this.validateInstanceTransitive(gtsId, new Set(), new Map());
+  }
+
+  private validateInstanceTransitive(
+    gtsId: string,
+    visiting: Set<string>,
+    completed: Map<string, ValidationResult>
+  ): ValidationResult {
+    const key = `instance:${gtsId}`;
+    const cached = completed.get(key);
+    if (cached) return cached;
+    if (visiting.has(key)) return { id: gtsId, ok: true, valid: true, error: '' };
+
+    visiting.add(key);
+    const referencedIds = new Set<string>();
+    const localResult = this.validateInstanceLocal(gtsId, referencedIds);
+    if (!localResult.ok) {
+      visiting.delete(key);
+      completed.set(key, localResult);
+      return localResult;
+    }
+
+    let objId = gtsId;
+    if (Gts.isValidGtsID(gtsId)) objId = Gts.parseGtsID(gtsId).id;
+    const obj = this.get(objId)!;
+    const typeResult = this.validateSchemaTransitive(obj.schemaId!, visiting, completed);
+    if (!typeResult.ok) {
+      const result = {
+        id: gtsId,
+        ok: false,
+        valid: false,
+        error: `Instance type '${obj.schemaId}' is invalid: ${typeResult.error}`,
+      };
+      visiting.delete(key);
+      completed.set(key, result);
+      return result;
+    }
+
+    for (const dependencyId of referencedIds) {
+      const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed);
+      if (!dependencyResult.ok) {
+        const result = {
+          id: gtsId,
+          ok: false,
+          valid: false,
+          error: `Referenced entity '${dependencyId}' is invalid: ${dependencyResult.error}`,
+        };
+        visiting.delete(key);
+        completed.set(key, result);
+        return result;
+      }
+    }
+
+    visiting.delete(key);
+    completed.set(key, localResult);
+    return localResult;
+  }
+
+  private validateInstanceLocal(gtsId: string, referencedIds?: Set<string>): ValidationResult {
     try {
       let objId: string = gtsId;
       if (Gts.isValidGtsID(gtsId)) {
@@ -324,6 +383,9 @@ export class GtsStore {
           valid: false,
           error: `x-gts-ref validation failed: ${errorMsgs}`,
         };
+      }
+      for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
+        referencedIds?.add(dependencyId);
       }
 
       return {
@@ -1189,6 +1251,115 @@ export class GtsStore {
   }
 
   validateSchemaAgainstParent(schemaId: string): ValidationResult {
+    return this.validateSchemaTransitive(schemaId, new Set(), new Map());
+  }
+
+  private validateSchemaTransitive(
+    schemaId: string,
+    visiting: Set<string>,
+    completed: Map<string, ValidationResult>
+  ): ValidationResult {
+    const key = `schema:${schemaId}`;
+    const cached = completed.get(key);
+    if (cached) return cached;
+    if (visiting.has(key)) return { id: schemaId, ok: true, error: '' };
+
+    visiting.add(key);
+    const referencedIds = new Set<string>();
+    const localResult = this.validateSchemaAgainstParentLocal(schemaId, referencedIds);
+    if (!localResult.ok) {
+      visiting.delete(key);
+      completed.set(key, localResult);
+      return localResult;
+    }
+
+    const entity = this.get(schemaId)!;
+    const chain = this.buildSchemaChain(schemaId);
+    for (const ancestorId of chain.slice(0, -1)) {
+      const ancestorResult = this.validateSchemaTransitive(ancestorId, visiting, completed);
+      if (!ancestorResult.ok) {
+        const result = {
+          id: schemaId,
+          ok: false,
+          error: `Ancestor type '${ancestorId}' is invalid: ${ancestorResult.error}`,
+        };
+        visiting.delete(key);
+        completed.set(key, result);
+        return result;
+      }
+    }
+
+    for (const dependencyId of this.collectSchemaDependencies(entity.content)) {
+      const dependencyResult = this.validateSchemaTransitive(dependencyId, visiting, completed);
+      if (!dependencyResult.ok) {
+        const result = {
+          id: schemaId,
+          ok: false,
+          error: `Referenced type '${dependencyId}' is invalid: ${dependencyResult.error}`,
+        };
+        visiting.delete(key);
+        completed.set(key, result);
+        return result;
+      }
+    }
+
+    for (const dependencyId of referencedIds) {
+      const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed);
+      if (!dependencyResult.ok) {
+        const result = {
+          id: schemaId,
+          ok: false,
+          error: `Referenced trait entity '${dependencyId}' is invalid: ${dependencyResult.error}`,
+        };
+        visiting.delete(key);
+        completed.set(key, result);
+        return result;
+      }
+    }
+
+    visiting.delete(key);
+    completed.set(key, localResult);
+    return localResult;
+  }
+
+  private validateEntityTransitive(
+    entityId: string,
+    visiting: Set<string>,
+    completed: Map<string, ValidationResult>
+  ): ValidationResult {
+    const entity = this.get(entityId);
+    if (!entity) return { id: entityId, ok: false, error: `Entity not found: ${entityId}` };
+    return entity.isSchema
+      ? this.validateSchemaTransitive(entityId, visiting, completed)
+      : this.validateInstanceTransitive(entityId, visiting, completed);
+  }
+
+  private collectSchemaDependencies(node: any, dependencies: Set<string> = new Set()): Set<string> {
+    if (!node || typeof node !== 'object') return dependencies;
+    if (typeof node.$ref === 'string' && node.$ref.startsWith(GTS_URI_PREFIX)) {
+      dependencies.add(node.$ref.substring(GTS_URI_PREFIX.length));
+    }
+    const xGtsRef = node['x-gts-ref'];
+    if (typeof xGtsRef === 'string' && xGtsRef.startsWith('gts.') && !xGtsRef.includes('*')) {
+      dependencies.add(xGtsRef);
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key !== '$ref' && key !== 'x-gts-ref') this.collectSchemaDependencies(value, dependencies);
+    }
+    return dependencies;
+  }
+
+  private withoutRequired(node: any): any {
+    if (Array.isArray(node)) return node.map((value) => this.withoutRequired(value));
+    if (!node || typeof node !== 'object') return node;
+    return Object.fromEntries(
+      Object.entries(node)
+        .filter(([key]) => key !== 'required')
+        .map(([key, value]) => [key, this.withoutRequired(value)])
+    );
+  }
+
+  private validateSchemaAgainstParentLocal(schemaId: string, referencedIds?: Set<string>): ValidationResult {
     const entity = this.get(schemaId);
     if (!entity) {
       return { id: schemaId, ok: false, error: `Entity not found: ${schemaId}` };
@@ -1239,7 +1410,7 @@ export class GtsStore {
       const parentId = chain.length > 1 ? chain[chain.length - 2] : null;
       if (!parentId) {
         // Base schema with no parent → still validate traits
-        return this.validateSchemaTraits(schemaId);
+        return this.validateSchemaTraits(schemaId, referencedIds);
       }
 
       const parentEntity = this.get(parentId);
@@ -1270,7 +1441,7 @@ export class GtsStore {
       }
 
       // OP#13: Validate schema traits across the inheritance chain
-      const traitsResult = this.validateSchemaTraits(schemaId);
+      const traitsResult = this.validateSchemaTraits(schemaId, referencedIds);
       if (!traitsResult.ok) {
         return traitsResult;
       }
@@ -1299,7 +1470,7 @@ export class GtsStore {
    * There is no bespoke immutability rule: a publisher locks a trait value with
    * `const` in the trait-schema, which the standard validation in step 4 enforces.
    */
-  private validateSchemaTraits(schemaId: string): ValidationResult {
+  private validateSchemaTraits(schemaId: string, referencedIds?: Set<string>): ValidationResult {
     let chain: string[];
     try {
       chain = this.buildSchemaChain(schemaId);
@@ -1414,23 +1585,20 @@ export class GtsStore {
       return { id: schemaId, ok: true, error: '' };
     }
 
-    if (!isAbstract) {
-      try {
-        const validate = this.ajv.compile(this.normalizeSchema(effectiveSchema));
-        if (!validate(materialized)) {
-          // P6-4: shared formatter, for the same reason as `validateCastResult`
-          // above - one Ajv-error-to-string convention, not four.
-          const errors =
-            validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
-          return { id: schemaId, ok: false, error: `trait validation: ${errors}` };
-        }
-      } catch (e) {
-        return {
-          id: schemaId,
-          ok: false,
-          error: `failed to compile trait schema: ${e instanceof Error ? e.message : String(e)}`,
-        };
+    try {
+      const schemaForValidation = isAbstract ? this.withoutRequired(effectiveSchema) : effectiveSchema;
+      const validate = this.ajv.compile(this.normalizeSchema(schemaForValidation));
+      if (!validate(materialized)) {
+        const errors =
+          validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
+        return { id: schemaId, ok: false, error: `trait validation: ${errors}` };
       }
+    } catch (e) {
+      return {
+        id: schemaId,
+        ok: false,
+        error: `failed to compile trait schema: ${e instanceof Error ? e.message : String(e)}`,
+      };
     }
 
     // `x-gts-ref` is an assertion keyword (§9.6) that plain Ajv validation
@@ -1476,6 +1644,9 @@ export class GtsStore {
         ok: false,
         error: `x-gts-ref validation failed: ${xGtsRefErrors.map((err) => err.reason).join('; ')}`,
       };
+    }
+    for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
+      referencedIds?.add(dependencyId);
     }
 
     return { id: schemaId, ok: true, error: '' };
