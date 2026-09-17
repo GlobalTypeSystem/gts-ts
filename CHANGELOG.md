@@ -31,7 +31,7 @@ Upgrades the implementation from GTS spec **v0.13.3** to **[v0.14.0](https://git
 
 ## [0.5.0] - 2026-09-15
 
-Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.3](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.3)**, reaching full canonical conformance (`make e2e`: 485/485).
+Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.3](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.3)**.
 
 ### Breaking
 
