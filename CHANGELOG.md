@@ -14,6 +14,7 @@ Upgrades the implementation from GTS spec **v0.13.3** to **[v0.14.0](https://git
 ### Breaking
 
 - Registering an entity under an existing id with different content now returns `409 Conflict` (`EntityConflictError`) by default instead of replacing it. Preserve replacement behavior by opting in with `new GTS({ allowEntityUpdates: true })` or `--allow-entity-updates`.
+- The exported `GtsConfig` interface now requires `allowEntityUpdates`; consumers constructing a complete `GtsConfig` value must set it explicitly. Constructors continue to accept `Partial<GtsConfig>`.
 - `x-gts-ref` existence is now enforced uniformly for referenced values across concrete references and wildcard patterns, including `gts.*`. Values that previously validated without a corresponding registered entity now fail validation.
 - Explicit Type Schema validation now rejects a concrete `x-gts-ref` constraint whose target is not a registered entity, including when that constraint is reached through a local JSON Schema `$ref`.
 - `validateInstance()` and `validateSchemaAgainstParent()` now validate dependencies transitively, so a locally valid entity fails when its type, an ancestor, or a referenced entity is invalid.
