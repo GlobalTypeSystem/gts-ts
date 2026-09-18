@@ -26,6 +26,7 @@ import {
   CastResult,
   GtsConfig,
   EntityLookup,
+  JsonEntity,
 } from './types';
 
 export const isValidGtsID = (id: string): boolean => Gts.isValidGtsID(id);
@@ -52,9 +53,16 @@ export class GTS {
    * `GtsExtractor`'s document-shape heuristic, which cannot detect a schema
    * that embeds no `$schema`/root-type keyword at all.
    */
-  register(content: any, forceIsSchema?: boolean): void {
+  register(content: any, forceIsSchema?: boolean): JsonEntity | undefined {
     const entity = createJsonEntity(content, undefined, forceIsSchema);
-    this.store.register(entity);
+    return this.store.register(entity);
+  }
+
+  rollbackRegistration(id: string, previous?: JsonEntity): void {
+    this.store.unregister(id);
+    if (previous) {
+      this.store.register(previous);
+    }
   }
 
   /**

@@ -1804,4 +1804,22 @@ describe('entity content hash caching', () => {
 
     expect(addSchema).toHaveBeenCalledTimes(1);
   });
+
+  test('revalidates references for identical content', () => {
+    const store = new GtsStore({ validateRefs: true });
+    const targetId = 'gts.x.unit.hash.target.v1~';
+    const hostId = 'gts.x.unit.hash.host.v1~';
+    const target = createJsonEntity({ $id: `gts://${targetId}`, $schema: 'http://json-schema.org/draft-07/schema#' });
+    const host = createJsonEntity({
+      $id: `gts://${hostId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      $ref: `gts://${targetId}`,
+    });
+
+    store.register(target);
+    store.register(host);
+    store.unregister(targetId);
+
+    expect(() => store.register(createJsonEntity(host.content))).toThrow(`Unresolved reference: ${targetId}`);
+  });
 });

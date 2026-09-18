@@ -125,7 +125,7 @@ export class GtsStore {
     throw new Error(`Unresolvable GTS reference: ${uri}`);
   }
 
-  register(entity: JsonEntity): void {
+  register(entity: JsonEntity): JsonEntity | undefined {
     // A malformed entity id would silently break every ancestor-chain
     // computation downstream (`buildSchemaChain` and friends), which then
     // fail open by treating the entity as if it had no ancestors at all -
@@ -165,9 +165,6 @@ export class GtsStore {
       this.contentHashes.set(entity.id, previousHash);
       replacing = previousHash !== incomingHash;
     }
-    if (previous && !replacing) {
-      return;
-    }
     if (replacing && !this.config.allowEntityUpdates) {
       throw new EntityConflictError(entity.id);
     }
@@ -193,7 +190,8 @@ export class GtsStore {
       }
     }
 
-    if (replacing && previous?.isSchema) {
+    const schemaUnchanged = !!previous && !replacing && previous.isSchema && entity.isSchema;
+    if (previous?.isSchema && !schemaUnchanged) {
       this.ajv.removeSchema(entity.id);
     }
     this.byId.set(entity.id, entity);
@@ -202,7 +200,7 @@ export class GtsStore {
     }
 
     // If this is a schema, add it to AJV for reference resolution
-    if (entity.isSchema && entity.content) {
+    if (entity.isSchema && entity.content && !schemaUnchanged) {
       try {
         const normalizedSchema = this.normalizeSchema(entity.content);
         // Set $id to the GTS ID if not already set
@@ -211,9 +209,10 @@ export class GtsStore {
         }
         this.ajv.addSchema(normalizedSchema, entity.id);
       } catch (err) {
-        // Ignore malformed schemas; identical schemas return before this path.
+        // Ignore malformed schemas; unchanged schemas do not reach this path.
       }
     }
+    return previous;
   }
 
   get(id: string): JsonEntity | undefined {

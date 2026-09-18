@@ -356,7 +356,7 @@ export class GtsServer {
       }
 
       // Register the entity
-      this.store.register(content, options?.forceIsSchema);
+      const previous = this.store.register(content, options?.forceIsSchema);
 
       // Validate instance if requested
       if (validate && !entity.isSchema) {
@@ -381,12 +381,12 @@ export class GtsServer {
         // `validateSchemaAgainstParent` looks the entity up by id (via
         // `store.get`), so it can only run post-registration - unlike
         // `validateSchemaStrict` and the x-gts-ref checks above. If it
-        // rejects, undo the `store.register()` above (both the `byId` index
-        // and the Ajv schema entry) so a 422 response never leaves a
-        // retrievable, derivable schema behind.
+        // rejects, roll back the `store.register()` above (both the `byId`
+        // index and the Ajv schema entry) so a 422 response restores any
+        // previous entity rather than deleting or replacing it.
         const parentResult = this.store.validateSchemaAgainstParent(entity.id);
         if (!parentResult.ok) {
-          this.store.unregister(entity.id);
+          this.store.rollbackRegistration(entity.id, previous);
           reply.code(422);
           return {
             ok: false,
