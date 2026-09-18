@@ -207,8 +207,36 @@ export class XGtsRefValidator {
     }
 
     // Recurse into array items
-    if (schema.type === 'array' && schema.items) {
-      if (Array.isArray(instance)) {
+    if (schema.type === 'array' && Array.isArray(instance)) {
+      if (Array.isArray(schema.prefixItems)) {
+        schema.prefixItems.forEach((itemSchema: any, idx: number) => {
+          if (idx < instance.length) {
+            const itemPath = `${path}[${idx}]`;
+            this.visitInstance(instance[idx], itemSchema, itemPath, rootSchema, errors, depth, pathBudget);
+          }
+        });
+        if (schema.items && !Array.isArray(schema.items)) {
+          instance.slice(schema.prefixItems.length).forEach((item, offset) => {
+            const idx = schema.prefixItems.length + offset;
+            const itemPath = `${path}[${idx}]`;
+            this.visitInstance(item, schema.items, itemPath, rootSchema, errors, depth, pathBudget);
+          });
+        }
+      } else if (Array.isArray(schema.items)) {
+        schema.items.forEach((itemSchema: any, idx: number) => {
+          if (idx < instance.length) {
+            const itemPath = `${path}[${idx}]`;
+            this.visitInstance(instance[idx], itemSchema, itemPath, rootSchema, errors, depth, pathBudget);
+          }
+        });
+        if (schema.additionalItems && !Array.isArray(schema.additionalItems)) {
+          instance.slice(schema.items.length).forEach((item, offset) => {
+            const idx = schema.items.length + offset;
+            const itemPath = `${path}[${idx}]`;
+            this.visitInstance(item, schema.additionalItems, itemPath, rootSchema, errors, depth, pathBudget);
+          });
+        }
+      } else if (schema.items) {
         instance.forEach((item, idx) => {
           const itemPath = `${path}[${idx}]`;
           this.visitInstance(item, schema.items, itemPath, rootSchema, errors, depth, pathBudget);

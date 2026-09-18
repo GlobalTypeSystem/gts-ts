@@ -1774,6 +1774,32 @@ describe('P5-R2 - $ref resolution fails closed instead of silently skipping the 
   });
 });
 
+describe('x-gts-ref array tuple traversal', () => {
+  const target = 'gts.x.unit.xref.array_target.v1~';
+
+  test('uses additionalItems after Draft-07 tuple items', () => {
+    const errors = new XGtsRefValidator().validateInstance(['tuple-prefix', 'gts.x.unit.xref.other.v1~'], {
+      type: 'array',
+      items: [{ type: 'string' }],
+      additionalItems: { type: 'string', 'x-gts-ref': target },
+    });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].fieldPath).toBe('[1]');
+  });
+
+  test('uses items only after Draft 2020-12 prefixItems', () => {
+    const errors = new XGtsRefValidator().validateInstance(['tuple-prefix', 'gts.x.unit.xref.other.v1~'], {
+      type: 'array',
+      prefixItems: [{ type: 'string' }],
+      items: { type: 'string', 'x-gts-ref': target },
+    });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].fieldPath).toBe('[1]');
+  });
+});
+
 describe('entity content identity', () => {
   test('accepts content matching a stored entity mutated through get()', () => {
     const gts = new GTS();
