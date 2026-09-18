@@ -1774,20 +1774,27 @@ describe('P5-R2 - $ref resolution fails closed instead of silently skipping the 
   });
 });
 
-describe('entity content hash caching', () => {
-  test('hashes unique entries lazily and caches the stored hash after re-submission', () => {
-    const store = new GtsStore();
-    const id = 'gts.x.unit.hash.cache.v1~x.unit._.item.v1';
-    store.register(createJsonEntity({ id, value: 'same' }));
+describe('entity content identity', () => {
+  test('accepts content matching a stored entity mutated through get()', () => {
+    const gts = new GTS();
+    const id = 'gts.x.unit.hash.mutable.v1~x.unit._.item.v1';
+    gts.register({ id, value: 1 });
+    gts.register({ id, value: 1 });
+    gts.get(id).value = 2;
 
-    expect(store['contentHashes'].has(id)).toBe(false);
+    expect(() => gts.register({ id, value: 2 })).not.toThrow();
+    expect(gts.get(id).value).toBe(2);
+  });
 
-    store.register(createJsonEntity({ value: 'same', id }));
-    const cached = store['contentHashes'].get(id);
-    expect(cached).toBeDefined();
+  test('rejects content differing from a stored entity mutated through get()', () => {
+    const gts = new GTS();
+    const id = 'gts.x.unit.hash.mutable_conflict.v1~x.unit._.item.v1';
+    gts.register({ id, value: 1 });
+    gts.register({ id, value: 1 });
+    gts.get(id).value = 2;
 
-    store.register(createJsonEntity({ id, value: 'same' }));
-    expect(store['contentHashes'].get(id)).toBe(cached);
+    expect(() => gts.register({ id, value: 1 })).toThrow(/already registered with different content/);
+    expect(gts.get(id).value).toBe(2);
   });
 
   test('does not add an identical schema to Ajv twice', () => {

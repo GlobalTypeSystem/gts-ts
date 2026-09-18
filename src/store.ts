@@ -81,7 +81,6 @@ function contentHash(content: Record<string, any>): string {
 
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
-  private contentHashes: Map<string, string> = new Map();
   private config: GtsConfig;
   private ajv: Ajv;
 
@@ -153,18 +152,11 @@ export class GtsStore {
 
     // Protect registry state: unless entity updates are allowed, re-registering
     // an id with *different* content is rejected (EntityConflictError, surfaced
-    // as HTTP 409), while an identical re-submission stays idempotent. Hashes
-    // are computed lazily so unique preload entries pay no serialization cost,
-    // and the stored content is hashed at most once across re-submissions.
+    // as HTTP 409), while an identical re-submission stays idempotent. Stored
+    // content remains mutable through get(), so both hashes must reflect the
+    // values at comparison time rather than relying on a cached snapshot.
     const previous = this.byId.get(entity.id);
-    let incomingHash: string | undefined;
-    let replacing = false;
-    if (previous) {
-      const previousHash = this.contentHashes.get(entity.id) ?? contentHash(previous.content);
-      incomingHash = contentHash(entity.content);
-      this.contentHashes.set(entity.id, previousHash);
-      replacing = previousHash !== incomingHash;
-    }
+    const replacing = !!previous && contentHash(previous.content) !== contentHash(entity.content);
     if (replacing && !this.config.allowEntityUpdates) {
       throw new EntityConflictError(entity.id);
     }
@@ -195,9 +187,6 @@ export class GtsStore {
       this.ajv.removeSchema(entity.id);
     }
     this.byId.set(entity.id, entity);
-    if (incomingHash) {
-      this.contentHashes.set(entity.id, incomingHash);
-    }
 
     // If this is a schema, add it to AJV for reference resolution
     if (entity.isSchema && entity.content && !schemaUnchanged) {
@@ -232,7 +221,6 @@ export class GtsStore {
       return;
     }
     this.byId.delete(id);
-    this.contentHashes.delete(id);
     if (entity.isSchema) {
       try {
         this.ajv.removeSchema(id);
