@@ -1,5 +1,5 @@
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { GTS, createJsonEntity, EntityConflictError } from '../index';
+import { GTS, createJsonEntity, EntityConflictError, EntityContentDepthError } from '../index';
 import { XGtsRefValidator } from '../x-gts-ref';
 import {
   ServerConfig,
@@ -403,11 +403,13 @@ export class GtsServer {
         type_id: entity.schemaId,
       };
     } catch (error) {
-      // A changed re-registration of an existing entity is a conflict, not a
-      // generic failure: surface it as HTTP 409 (mirrors gts-go). Every other
-      // error keeps the default status.
+      // A changed re-registration is a conflict, while content too deeply
+      // nested to compare safely is an unprocessable entity. Other errors keep
+      // the default status.
       if (error instanceof EntityConflictError) {
         reply.code(409);
+      } else if (error instanceof EntityContentDepthError) {
+        reply.code(422);
       }
       return {
         ok: false,

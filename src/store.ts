@@ -6,6 +6,7 @@ import {
   JsonEntity,
   ValidationResult,
   EntityConflictError,
+  EntityContentDepthError,
   GTS_URI_PREFIX,
   MAX_SCHEMA_DEPTH,
   MAX_SCHEMA_PATHS,
@@ -54,13 +55,16 @@ function isPlainSchemaObject(value: unknown): value is Record<string, any> {
  * always produces an equal string. Mirrors gts-go's reliance on Go's
  * `encoding/json` sorting map keys.
  */
-function canonicalJson(value: any): string {
+function canonicalJson(value: any, depth: number = 0): string {
+  if (depth > MAX_SCHEMA_DEPTH) {
+    throw new EntityContentDepthError();
+  }
   if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(',')}]`;
+    return `[${value.map((item) => canonicalJson(item, depth + 1)).join(',')}]`;
   }
   if (value !== null && typeof value === 'object') {
     const keys = Object.keys(value).sort();
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key], depth + 1)}`).join(',')}}`;
   }
   return JSON.stringify(value);
 }

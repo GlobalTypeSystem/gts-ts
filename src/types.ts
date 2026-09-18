@@ -208,6 +208,13 @@ export class EntityConflictError extends Error {
   }
 }
 
+export class EntityContentDepthError extends Error {
+  constructor() {
+    super(`Entity content nests deeper than ${MAX_SCHEMA_DEPTH} levels and cannot be compared safely`);
+    this.name = 'EntityContentDepthError';
+  }
+}
+
 export class InvalidGtsIDError extends Error {
   constructor(
     public gtsId: string,

@@ -1,3 +1,4 @@
+import { MAX_SCHEMA_DEPTH } from '../src';
 import { GtsServer } from '../src/server/server';
 
 const DRAFT7 = 'http://json-schema.org/draft-07/schema#';
@@ -1328,6 +1329,24 @@ describe('configurable entity update mode (mirrors gts-go --allow-entity-updates
 
     expect((await postEntity(server, schema)).statusCode).toBe(200);
     expect((await postEntity(server, schema)).statusCode).toBe(200);
+
+    await server.stop();
+  });
+
+  test('deeply nested content is rejected cleanly when comparing a re-submission', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const content: Record<string, any> = { id: 'gts.x.unit.srv.deep.v1~x.unit._.item.v1' };
+    let cursor = content;
+    for (let depth = 0; depth <= MAX_SCHEMA_DEPTH; depth++) {
+      cursor.nested = {};
+      cursor = cursor.nested;
+    }
+
+    expect((await postEntity(server, content)).statusCode).toBe(200);
+    const response = await postEntity(server, content);
+
+    expect(response.statusCode).toBe(422);
+    expect(JSON.parse(response.body).error).toMatch(/nests deeper/);
 
     await server.stop();
   });
