@@ -165,6 +165,9 @@ export class GtsStore {
       this.contentHashes.set(entity.id, previousHash);
       replacing = previousHash !== incomingHash;
     }
+    if (previous && !replacing) {
+      return;
+    }
     if (replacing && !this.config.allowEntityUpdates) {
       throw new EntityConflictError(entity.id);
     }
@@ -208,7 +211,7 @@ export class GtsStore {
         }
         this.ajv.addSchema(normalizedSchema, entity.id);
       } catch (err) {
-        // Ignore errors adding schema - it might already exist or be invalid
+        // Ignore malformed schemas; identical schemas return before this path.
       }
     }
   }

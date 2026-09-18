@@ -1766,4 +1766,19 @@ describe('entity content hash caching', () => {
     store.register(createJsonEntity({ id, value: 'same' }));
     expect(store['contentHashes'].get(id)).toBe(cached);
   });
+
+  test('does not add an identical schema to Ajv twice', () => {
+    const store = new GtsStore();
+    const content = {
+      $id: 'gts://gts.x.unit.hash.schema.v1~',
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+    };
+    const addSchema = jest.spyOn(store['ajv'], 'addSchema');
+
+    store.register(createJsonEntity(content));
+    store.register(createJsonEntity({ type: 'object', $schema: content.$schema, $id: content.$id }));
+
+    expect(addSchema).toHaveBeenCalledTimes(1);
+  });
 });
