@@ -1750,3 +1750,20 @@ describe('P5-R2 - $ref resolution fails closed instead of silently skipping the 
     expect(errors[0].refPattern).toBe('');
   });
 });
+
+describe('entity content hash caching', () => {
+  test('hashes unique entries lazily and caches the stored hash after re-submission', () => {
+    const store = new GtsStore();
+    const id = 'gts.x.unit.hash.cache.v1~x.unit._.item.v1';
+    store.register(createJsonEntity({ id, value: 'same' }));
+
+    expect(store['contentHashes'].has(id)).toBe(false);
+
+    store.register(createJsonEntity({ value: 'same', id }));
+    const cached = store['contentHashes'].get(id);
+    expect(cached).toBeDefined();
+
+    store.register(createJsonEntity({ id, value: 'same' }));
+    expect(store['contentHashes'].get(id)).toBe(cached);
+  });
+});
