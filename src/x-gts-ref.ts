@@ -541,9 +541,16 @@ export class XGtsRefValidator {
     if (!schema || typeof schema !== 'object') return;
 
     const ref = schema['x-gts-ref'];
+    const refPath = path ? `${path}/x-gts-ref` : 'x-gts-ref';
     const resolvedRef = typeof ref === 'string' && ref.startsWith('/') ? this.resolvePointer(rootSchema, ref) : ref;
-    if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.') && !resolvedRef.includes('*')) {
-      const refPath = path ? `${path}/x-gts-ref` : 'x-gts-ref';
+    if (typeof ref === 'string' && ref.startsWith('/') && !resolvedRef) {
+      errors.push({
+        fieldPath: refPath,
+        value: ref,
+        refPattern: '',
+        reason: `x-gts-ref constraint pointer '${ref}' does not resolve to a string`,
+      });
+    } else if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.') && !resolvedRef.includes('*')) {
       if (this.store && !this.store.get(resolvedRef)) {
         errors.push({
           fieldPath: refPath,

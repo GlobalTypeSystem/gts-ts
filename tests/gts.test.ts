@@ -1680,6 +1680,29 @@ describe('x-gts-ref schema existence traversal', () => {
     expect(errors).toHaveLength(1);
     expect(errors[0].refPattern).toBe(constraintType);
   });
+
+  test('rejects a relative constraint pointer that resolves nowhere', () => {
+    const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
+      properties: {
+        link: { type: 'string', 'x-gts-ref': '/missing' },
+      },
+    });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].reason).toMatch(/does not resolve to a string/);
+  });
+
+  test('rejects a relative constraint pointer that resolves to a non-string', () => {
+    const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
+      examples: ['not-a-constraint-type'],
+      properties: {
+        link: { type: 'string', 'x-gts-ref': '/examples' },
+      },
+    });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].reason).toMatch(/does not resolve to a string/);
+  });
 });
 
 // P5-R2 - `visitInstance` (src/x-gts-ref.ts) must fail closed when a
