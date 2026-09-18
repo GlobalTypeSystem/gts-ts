@@ -2,6 +2,17 @@ import { GtsServer } from '../src/server/server';
 
 const DRAFT7 = 'http://json-schema.org/draft-07/schema#';
 
+describe('HTTP connection lifecycle', () => {
+  test('closes responses to bound idle file descriptors', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const response = await server.instance.inject({ method: 'GET', url: '/health' });
+
+    expect(response.headers.connection).toBe('close');
+
+    await server.stop();
+  });
+});
+
 describe('POST /type-schemas', () => {
   test('rejects a type_id that does not end with the required "~" (spec 2.1 / 11.1 Rule C.1)', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
