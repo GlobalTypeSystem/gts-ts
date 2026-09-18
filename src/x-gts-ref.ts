@@ -4,7 +4,7 @@
  */
 
 import { Gts } from './gts';
-import { EntityLookup, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS } from './types';
+import { EntityLookup, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS, GtsRefValidationMode } from './types';
 
 const SCHEMA_VALUE_KEYWORDS = new Set([
   'additionalItems',
@@ -59,29 +59,21 @@ export interface XGtsRefValidationError {
 
 export class XGtsRefValidator {
   private store: EntityLookup | undefined;
-  private enforceExistence: boolean;
+  private mode: GtsRefValidationMode;
   private referencedIds: Set<string> = new Set();
+  private referencedWildcardPatterns: Set<string> = new Set();
 
-  /**
-   * @param store Entity registry used to check that referenced GTS IDs actually
-   *   exist. Omit it (or pass `undefined`) to validate only the GTS-ID
-   *   format/pattern of referenced values without requiring the referenced
-   *   entity to be registered.
-   * @param enforceExistence When `true` (the default) and a `store` is
-   *   provided, an `x-gts-ref` value must resolve to a registered entity or
-   *   validation fails. Existence is enforced uniformly for every constraint
-   *   form, including wildcard patterns and the bare `gts.*` wildcard
-   *   (gts-spec §9.6). Set to `false` to validate only that the value is a
-   *   well-formed GTS id matching the constraint pattern, without requiring the
-   *   referenced entity to be registered.
-   */
-  constructor(store?: EntityLookup, enforceExistence: boolean = true) {
+  constructor(store?: EntityLookup, mode: GtsRefValidationMode | boolean = GtsRefValidationMode.Full) {
     this.store = store;
-    this.enforceExistence = enforceExistence;
+    this.mode = typeof mode === 'boolean' ? (mode ? GtsRefValidationMode.Presence : GtsRefValidationMode.None) : mode;
   }
 
   getReferencedIds(): Set<string> {
     return new Set(this.referencedIds);
+  }
+
+  getReferencedWildcardPatterns(): Set<string> {
+    return new Set(this.referencedWildcardPatterns);
   }
 
   /**
@@ -525,10 +517,8 @@ export class XGtsRefValidator {
     // uniformly for all constraint forms, including wildcard patterns and the
     // bare `gts.*` wildcard (gts-spec §9.6): the value has already been checked
     // to be a well-formed GTS id that matches the pattern, so it only remains
-    // to confirm at least one registered type/instance resolves it. Callers
-    // that only need format/pattern validation construct this validator with
-    // `enforceExistence` set to `false` (or without a store).
-    if (this.store && this.enforceExistence) {
+    // to confirm at least one registered type/instance resolves it.
+    if (this.store && this.mode !== GtsRefValidationMode.None) {
       const entity = this.store.get(value);
       if (!entity) {
         return {
@@ -558,7 +548,7 @@ export class XGtsRefValidator {
    */
   validateSchemaRefExistence(schema: any, schemaPath: string = ''): XGtsRefValidationError[] {
     const errors: XGtsRefValidationError[] = [];
-    if (!this.store || !this.enforceExistence) {
+    if (!this.store || this.mode === GtsRefValidationMode.None) {
       return errors;
     }
     this.visitSchemaRefExistence(schema, schemaPath, schema, errors);
@@ -578,8 +568,21 @@ export class XGtsRefValidator {
         refPattern: '',
         reason: `x-gts-ref constraint pointer '${ref}' does not resolve to a string`,
       });
-    } else if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.') && !resolvedRef.includes('*')) {
-      if (this.store && !this.store.get(resolvedRef)) {
+    } else if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.')) {
+      if (resolvedRef.includes('*')) {
+        const matches =
+          this.store?.getAll?.().filter((entity) => Gts.matchIDPattern(entity.id, resolvedRef).match) ?? [];
+        if (matches.length === 0) {
+          errors.push({
+            fieldPath: refPath,
+            value: ref,
+            refPattern: resolvedRef,
+            reason: `x-gts-ref wildcard constraint '${resolvedRef}' has no registered match`,
+          });
+        } else {
+          this.referencedWildcardPatterns.add(resolvedRef);
+        }
+      } else if (this.store && !this.store.get(resolvedRef)) {
         errors.push({
           fieldPath: refPath,
           value: ref,

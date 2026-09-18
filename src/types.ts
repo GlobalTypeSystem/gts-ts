@@ -183,8 +183,17 @@ export interface GtsConfig {
  * look entities up. `GtsStore` satisfies this structurally, so no call site
  * changes and no import cycle.
  */
+export const GtsRefValidationMode = {
+  None: 'none',
+  Presence: 'presence',
+  Full: 'full',
+} as const;
+
+export type GtsRefValidationMode = (typeof GtsRefValidationMode)[keyof typeof GtsRefValidationMode];
+
 export interface EntityLookup {
   get(id: string): JsonEntity | undefined;
+  getAll?(): JsonEntity[];
 }
 
 export interface JsonEntity {
