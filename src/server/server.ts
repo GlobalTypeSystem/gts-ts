@@ -1,5 +1,5 @@
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { GTS, createJsonEntity } from '../index';
+import { GTS, createJsonEntity, EntityConflictError, EntityContentDepthError, GtsRefValidationMode } from '../index';
 import { XGtsRefValidator } from '../x-gts-ref';
 import {
   ServerConfig,
@@ -21,6 +21,12 @@ import {
 import * as gts from '../index';
 import { PACKAGE_VERSION } from '../version';
 
+function parseGtsRefValidationMode(value: unknown): GtsRefValidationMode | null {
+  if (value === undefined) return GtsRefValidationMode.Full;
+  const modes = Object.values(GtsRefValidationMode) as unknown[];
+  return modes.includes(value) ? (value as GtsRefValidationMode) : null;
+}
+
 export class GtsServer {
   private fastify: FastifyInstance;
   private store: GTS;
@@ -28,7 +34,7 @@ export class GtsServer {
 
   constructor(config: ServerConfig) {
     this.config = config;
-    this.store = new GTS({ validateRefs: false });
+    this.store = new GTS({ validateRefs: false, allowEntityUpdates: config.allowEntityUpdates ?? false });
 
     this.fastify = Fastify({
       logger:
@@ -49,6 +55,7 @@ export class GtsServer {
       routerOptions: {
         maxParamLength: 2048,
       },
+      forceCloseConnections: true,
     });
 
     this.setupMiddleware();
@@ -69,6 +76,10 @@ export class GtsServer {
       reply.header('Access-Control-Allow-Origin', '*');
       reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       reply.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      // The conformance client leaves one keep-alive socket idle per case, so
+      // close responses explicitly to stay below the default macOS fd limit.
+      // This intentionally favors bounded descriptors over connection reuse.
+      reply.header('Connection', 'close');
     });
 
     // Handle OPTIONS requests
@@ -257,7 +268,7 @@ export class GtsServer {
   private async handleAddEntity(
     request: FastifyRequest<{
       Body: any;
-      Querystring: { validate?: string; validation?: string };
+      Querystring: { validate?: string; validation?: string; 'gts-ref-validation'?: string };
     }>,
     reply: FastifyReply,
     options?: { forceIsSchema?: boolean }
@@ -265,6 +276,11 @@ export class GtsServer {
     try {
       const content = request.body;
       const validate = request.query.validate === 'true' || request.query.validation === 'true';
+      const refValidation = parseGtsRefValidationMode(request.query['gts-ref-validation']);
+      if (refValidation === null) {
+        reply.code(422);
+        return { ok: false, error: 'gts-ref-validation must be one of: none, presence, full' };
+      }
       // `forceIsSchema` (P6-2/P6-3): `POST /type-schemas` calls through here
       // with the caller's declared intent - the registered entity IS a GTS
       // Type Schema by construction, regardless of whether `content` embeds
@@ -351,11 +367,11 @@ export class GtsServer {
       }
 
       // Register the entity
-      this.store.register(content, options?.forceIsSchema);
+      const previous = this.store.register(content, options?.forceIsSchema);
 
       // Validate instance if requested
       if (validate && !entity.isSchema) {
-        const result = this.store.validateInstance(entity.id);
+        const result = this.store.validateInstance(entity.id, refValidation);
         if (!result.ok) {
           reply.code(422);
           return {
@@ -376,12 +392,12 @@ export class GtsServer {
         // `validateSchemaAgainstParent` looks the entity up by id (via
         // `store.get`), so it can only run post-registration - unlike
         // `validateSchemaStrict` and the x-gts-ref checks above. If it
-        // rejects, undo the `store.register()` above (both the `byId` index
-        // and the Ajv schema entry) so a 422 response never leaves a
-        // retrievable, derivable schema behind.
-        const parentResult = this.store.validateSchemaAgainstParent(entity.id);
+        // rejects, roll back the `store.register()` above (both the `byId`
+        // index and the Ajv schema entry) so a 422 response restores any
+        // previous entity rather than deleting or replacing it.
+        const parentResult = this.store.validateSchemaAgainstParent(entity.id, refValidation);
         if (!parentResult.ok) {
-          this.store.unregister(entity.id);
+          this.store.rollbackRegistration(entity.id, previous);
           reply.code(422);
           return {
             ok: false,
@@ -398,6 +414,14 @@ export class GtsServer {
         type_id: entity.schemaId,
       };
     } catch (error) {
+      // A changed re-registration is a conflict, while content too deeply
+      // nested to compare safely is an unprocessable entity. Other errors keep
+      // the default status.
+      if (error instanceof EntityConflictError) {
+        reply.code(409);
+      } else if (error instanceof EntityContentDepthError) {
+        reply.code(422);
+      }
       return {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
@@ -693,17 +717,22 @@ export class GtsServer {
 
   // OP#6 - Validate Instance
   private async handleValidateInstance(
-    request: FastifyRequest<{ Body: ValidateInstanceBody }>,
+    request: FastifyRequest<{ Body: ValidateInstanceBody; Querystring: { 'gts-ref-validation'?: string } }>,
     reply: FastifyReply
   ): Promise<any> {
     const { instance_id } = request.body;
+    const refValidation = parseGtsRefValidationMode(request.query['gts-ref-validation']);
 
+    if (refValidation === null) {
+      reply.code(422);
+      return { ok: false, error: 'gts-ref-validation must be one of: none, presence, full' };
+    }
     if (!instance_id) {
       reply.code(400);
       throw new Error('Missing required field: instance_id');
     }
 
-    return this.store.validateInstance(instance_id);
+    return this.store.validateInstance(instance_id, refValidation);
   }
 
   // OP#7 - Resolve Relationships
@@ -811,14 +840,19 @@ export class GtsServer {
 
   // OP#12 - Validate Type Schema
   private async handleValidateTypeSchema(
-    request: FastifyRequest<{ Body: ValidateTypeSchemaBody }>,
-    _reply: FastifyReply
+    request: FastifyRequest<{ Body: ValidateTypeSchemaBody; Querystring: { 'gts-ref-validation'?: string } }>,
+    reply: FastifyReply
   ): Promise<any> {
     const { type_id } = request.body;
+    const refValidation = parseGtsRefValidationMode(request.query['gts-ref-validation']);
+    if (refValidation === null) {
+      reply.code(422);
+      return { ok: false, error: 'gts-ref-validation must be one of: none, presence, full' };
+    }
     if (!type_id) {
       return { ok: false, error: 'Missing required field: type_id' };
     }
-    const parentResult = this.store.validateSchemaAgainstParent(type_id);
+    const parentResult = this.store.validateSchemaAgainstParent(type_id, refValidation);
     if (!parentResult.ok) {
       return {
         ...parentResult,
@@ -830,15 +864,20 @@ export class GtsServer {
 
   // OP#12 - Validate Entity (unified)
   private async handleValidateEntity(
-    request: FastifyRequest<{ Body: ValidateEntityBody }>,
-    _reply: FastifyReply
+    request: FastifyRequest<{ Body: ValidateEntityBody; Querystring: { 'gts-ref-validation'?: string } }>,
+    reply: FastifyReply
   ): Promise<any> {
     const id = request.body.entity_id || request.body.gts_id;
+    const refValidation = parseGtsRefValidationMode(request.query['gts-ref-validation']);
+    if (refValidation === null) {
+      reply.code(422);
+      return { ok: false, error: 'gts-ref-validation must be one of: none, presence, full' };
+    }
     if (!id) {
       return { ok: false, error: 'Missing required field: entity_id or gts_id' };
     }
 
-    return this.store.validateEntity(id);
+    return this.store.validateEntity(id, refValidation);
   }
 
   // OP#6 - Validate JSON: route-level body-shape guard shared by both
@@ -1127,6 +1166,14 @@ export class GtsServer {
                 },
               },
             },
+            409: {
+              description: 'Entity conflict',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/OperationResult' },
+                },
+              },
+            },
           },
         },
       },
@@ -1220,6 +1267,14 @@ export class GtsServer {
           responses: {
             200: {
               description: 'Operation result',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/OperationResult' },
+                },
+              },
+            },
+            409: {
+              description: 'Entity conflict',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/OperationResult' },

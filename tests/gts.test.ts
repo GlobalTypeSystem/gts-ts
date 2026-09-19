@@ -10,7 +10,7 @@ import {
   extractID,
 } from '../src';
 import { MAX_SCHEMA_DEPTH } from '../src/types';
-import { XGtsRefValidator } from '../src/x-gts-ref';
+import { X_GTS_REF_SELF, XGtsRefValidator } from '../src/x-gts-ref';
 
 describe('GTS Core Operations', () => {
   describe('OP#1 - ID Validation', () => {
@@ -1120,9 +1120,9 @@ describe('Phase 4 - $$ escaping artifacts are not GTS/JSON-Schema keywords', () 
   describe('canonical: DoubleDollarRefNotMapped', () => {
     const BASE = 'gts.x.test6.dref.base.v1~';
     const DER_REF = 'gts.x.test6.dref.base.v1~x.test6._.der_ref.v1~';
-    const DER_DD = 'gts.x.test6.dref.base.v1~x.test6._.der_dd.v1~';
+    const DER_DD = 'gts.x.test6.dref_dd.standalone.v1~';
     const INST_REF = 'gts.x.test6.dref.base.v1~x.test6._.der_ref.v1~x.y._.i1.v1.0';
-    const INST_DD = 'gts.x.test6.dref.base.v1~x.test6._.der_dd.v1~x.y._.i2.v1.0';
+    const INST_DD = 'gts.x.test6.dref_dd.standalone.v1~x.y._.i2.v1.0';
 
     function setup(): GTS {
       const gts = new GTS();
@@ -1197,6 +1197,67 @@ describe('Phase 4 - $$ escaping artifacts are not GTS/JSON-Schema keywords', () 
       const result = gts.validateSchemaAgainstParent(DERIVED);
       expect(result.ok).toBe(false);
       expect(result.error).toContain('base_field');
+    });
+  });
+
+  describe('explicit schema validation resolves GTS references', () => {
+    test('rejects a missing concrete x-gts-ref target reached through a local $ref', () => {
+      const gts = new GTS({ validateRefs: false });
+      const id = 'gts.x.test12.xrefmissing.holder.v1~';
+      gts.register({
+        $id: `gts://${id}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { ref: { $ref: '#/definitions/TargetRef' } },
+        definitions: {
+          TargetRef: {
+            type: 'string',
+            'x-gts-ref': 'gts.x.test12.xrefmissing.target.v1~',
+          },
+        },
+      });
+
+      const result = gts.validateSchemaAgainstParent(id);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain(
+        "x-gts-ref constraint type 'gts.x.test12.xrefmissing.target.v1~' is not registered"
+      );
+    });
+
+    test('rejects a missing GTS reference target', () => {
+      const gts = new GTS({ validateRefs: false });
+      const id = 'gts.x.test12.refmissing.host.v1~';
+      gts.register({
+        $id: `gts://${id}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        allOf: [{ $ref: 'gts://gts.x.test12.refmissing.target.v1~' }],
+      });
+
+      const result = gts.validateSchemaAgainstParent(id);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Unresolvable $ref');
+    });
+
+    test('rejects a missing derived GTS reference target', () => {
+      const gts = new GTS({ validateRefs: false });
+      const target = 'gts.x.test12.refpartial.target.v1~';
+      const host = 'gts.x.test12.refpartial.host.v1~';
+      gts.register({
+        $id: `gts://${target}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+      });
+      gts.register({
+        $id: `gts://${host}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        allOf: [{ $ref: `gts://${target}x.test12._.missing.v1~` }],
+      });
+
+      const result = gts.validateSchemaAgainstParent(host);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Unresolvable $ref');
     });
   });
 
@@ -1556,6 +1617,72 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
   });
 });
 
+describe('x-gts-ref schema existence traversal', () => {
+  const missingStore = { get: () => undefined };
+
+  test('does not interpret annotation data as a nested schema', () => {
+    const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
+      default: { 'x-gts-ref': 'not-a-gts-id' },
+      const: { 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' },
+      examples: [{ 'x-gts-ref': 42 }],
+    });
+
+    expect(errors).toHaveLength(0);
+
+    const gts = new GTS();
+    const id = 'gts.x.unit.xref.annotation_holder.v1~';
+    gts.register({
+      $id: `gts://${id}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        payload: {
+          type: 'object',
+          default: { 'x-gts-ref': 'not-a-gts-id' },
+          const: { 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' },
+          examples: [{ 'x-gts-ref': 42 }],
+        },
+      },
+    });
+    expect(gts.validateSchemaAgainstParent(id).ok).toBe(true);
+  });
+
+  test('checks the schema of a property named x-gts-ref', () => {
+    const schema = {
+      properties: {
+        'x-gts-ref': {
+          type: 'string',
+          'x-gts-ref': 'gts.x.unit.xref.property.v1~',
+        },
+      },
+    };
+    const validator = new XGtsRefValidator(missingStore);
+    expect(validator.validateSchema(schema)).toHaveLength(0);
+    const errors = validator.validateSchemaRefExistence(schema);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].fieldPath).toBe('properties/x-gts-ref/x-gts-ref');
+  });
+
+  test('recognizes only the reserved /$id self-reference', () => {
+    const validator = new XGtsRefValidator(missingStore);
+    expect(validator.isSelfReference(X_GTS_REF_SELF)).toBe(true);
+    expect(validator.isSelfReference('/properties/id')).toBe(false);
+  });
+
+  test.each(['/x-gts-traits-schema/constraintType', '/missing', '/examples'])(
+    'rejects unsupported x-gts-ref pointer %s',
+    (ref) => {
+      const errors = new XGtsRefValidator(missingStore).validateSchema({
+        properties: { link: { type: 'string', 'x-gts-ref': ref } },
+      });
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0].reason).toContain("must be a GTS identifier, wildcard, or '/$id'");
+    }
+  );
+});
+
 // P5-R2 - `visitInstance` (src/x-gts-ref.ts) must fail closed when a
 // `$ref` it is asked to follow does not resolve to a usable schema, rather
 // than silently `return`ing and reporting no violation. Two distinct
@@ -1622,5 +1749,88 @@ describe('P5-R2 - $ref resolution fails closed instead of silently skipping the 
     expect(errors).toHaveLength(1);
     expect(errors[0].reason).toMatch(/Cannot resolve \$ref '#\/oneOf' for x-gts-ref traversal/);
     expect(errors[0].refPattern).toBe('');
+  });
+});
+
+describe('x-gts-ref array tuple traversal', () => {
+  const target = 'gts.x.unit.xref.array_target.v1~';
+
+  test('uses additionalItems after Draft-07 tuple items', () => {
+    const errors = new XGtsRefValidator().validateInstance(['tuple-prefix', 'gts.x.unit.xref.other.v1~'], {
+      type: 'array',
+      items: [{ type: 'string' }],
+      additionalItems: { type: 'string', 'x-gts-ref': target },
+    });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].fieldPath).toBe('[1]');
+  });
+
+  test('uses items only after Draft 2020-12 prefixItems', () => {
+    const errors = new XGtsRefValidator().validateInstance(['tuple-prefix', 'gts.x.unit.xref.other.v1~'], {
+      type: 'array',
+      prefixItems: [{ type: 'string' }],
+      items: { type: 'string', 'x-gts-ref': target },
+    });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].fieldPath).toBe('[1]');
+  });
+});
+
+describe('entity content identity', () => {
+  test('accepts content matching a stored entity mutated through get()', () => {
+    const gts = new GTS();
+    const id = 'gts.x.unit.hash.mutable.v1~x.unit._.item.v1';
+    gts.register({ id, value: 1 });
+    gts.register({ id, value: 1 });
+    gts.get(id).value = 2;
+
+    expect(() => gts.register({ id, value: 2 })).not.toThrow();
+    expect(gts.get(id).value).toBe(2);
+  });
+
+  test('rejects content differing from a stored entity mutated through get()', () => {
+    const gts = new GTS();
+    const id = 'gts.x.unit.hash.mutable_conflict.v1~x.unit._.item.v1';
+    gts.register({ id, value: 1 });
+    gts.register({ id, value: 1 });
+    gts.get(id).value = 2;
+
+    expect(() => gts.register({ id, value: 1 })).toThrow(/already registered with different content/);
+    expect(gts.get(id).value).toBe(2);
+  });
+
+  test('does not add an identical schema to Ajv twice', () => {
+    const store = new GtsStore();
+    const content = {
+      $id: 'gts://gts.x.unit.hash.schema.v1~',
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+    };
+    const addSchema = jest.spyOn(store['ajv'], 'addSchema');
+
+    store.register(createJsonEntity(content));
+    store.register(createJsonEntity({ type: 'object', $schema: content.$schema, $id: content.$id }));
+
+    expect(addSchema).toHaveBeenCalledTimes(1);
+  });
+
+  test('revalidates references for identical content', () => {
+    const store = new GtsStore({ validateRefs: true });
+    const targetId = 'gts.x.unit.hash.target.v1~';
+    const hostId = 'gts.x.unit.hash.host.v1~';
+    const target = createJsonEntity({ $id: `gts://${targetId}`, $schema: 'http://json-schema.org/draft-07/schema#' });
+    const host = createJsonEntity({
+      $id: `gts://${hostId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      $ref: `gts://${targetId}`,
+    });
+
+    store.register(target);
+    store.register(host);
+    store.unregister(targetId);
+
+    expect(() => store.register(createJsonEntity(host.content))).toThrow(`Unresolved reference: ${targetId}`);
   });
 });

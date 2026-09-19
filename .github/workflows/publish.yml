@@ -13,12 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -27,8 +28,13 @@ jobs:
       # The release name/tag must start with "v" (e.g. v0.5.0). Strip the
       # leading "v" and ensure it matches the "version" field in package.json.
       - name: Verify release version matches package.json
+        env:
+          # Pass the release tag through the environment rather than
+          # interpolating `${{ ... }}` directly into the shell, so a crafted
+          # tag name cannot break out of the assignment and inject commands
+          # (script injection / CWE-78).
+          RELEASE_NAME: ${{ github.event.release.tag_name }}
         run: |
-          RELEASE_NAME="${{ github.event.release.tag_name }}"
           echo "Release tag: $RELEASE_NAME"
 
           case "$RELEASE_NAME" in

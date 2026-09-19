@@ -1,6 +1,18 @@
+import { MAX_SCHEMA_DEPTH } from '../src';
 import { GtsServer } from '../src/server/server';
 
 const DRAFT7 = 'http://json-schema.org/draft-07/schema#';
+
+describe('HTTP connection lifecycle', () => {
+  test('closes responses to bound idle file descriptors', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const response = await server.instance.inject({ method: 'GET', url: '/health' });
+
+    expect(response.headers.connection).toBe('close');
+
+    await server.stop();
+  });
+});
 
 describe('POST /type-schemas', () => {
   test('rejects a type_id that does not end with the required "~" (spec 2.1 / 11.1 Rule C.1)', async () => {
@@ -369,6 +381,25 @@ describe('GET /openapi', () => {
     // hard-coded literal that can drift from the published version.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     expect(body.info.version).toBe(require('../package.json').version);
+
+    await server.stop();
+  });
+
+  test('documents conflict responses for entity and type-schema registration', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const response = await server.instance.inject({ method: 'GET', url: '/openapi' });
+    const paths = JSON.parse(response.body).paths;
+
+    for (const path of ['/entities', '/type-schemas']) {
+      expect(paths[path].post.responses['409']).toEqual({
+        description: 'Entity conflict',
+        content: {
+          'application/json': {
+            schema: { $ref: '#/components/schemas/OperationResult' },
+          },
+        },
+      });
+    }
 
     await server.stop();
   });
@@ -1270,6 +1301,209 @@ describe('Phase 6 review findings', () => {
     expect(body.ok).toBe(false);
     expect(body.error).toMatch(/\/a is not of type 'string'/);
     expect(body.error).toMatch(/\/b is not of type 'number'/);
+
+    await server.stop();
+  });
+});
+
+describe('configurable entity update mode (mirrors gts-go --allow-entity-updates)', () => {
+  // By default the registry protects its state: an identical re-submission is
+  // idempotent, but changing the content of an already-registered id is a
+  // conflict (HTTP 409). `--allow-entity-updates` opts into replacement.
+  const schema = {
+    $id: 'gts://gts.x.unit.srv.updmode.v1~',
+    $schema: DRAFT7,
+    type: 'object',
+    properties: { name: { type: 'string' } },
+  };
+  const schemaChanged = {
+    ...schema,
+    properties: { name: { type: 'integer' } },
+  };
+
+  const postEntity = (server: GtsServer, payload: unknown) =>
+    server.instance.inject({ method: 'POST', url: '/entities', payload: payload as any });
+
+  test('an identical re-submission stays idempotent (200)', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+
+    expect((await postEntity(server, schema)).statusCode).toBe(200);
+    expect((await postEntity(server, schema)).statusCode).toBe(200);
+
+    await server.stop();
+  });
+
+  test('failed validation of an identical schema preserves the registered entity', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const id = 'gts.x.unit.srv.revalidate.v1~';
+    const content = {
+      $id: `gts://${id}`,
+      $schema: DRAFT7,
+      type: 'object',
+      properties: { ref: { type: 'string', 'x-gts-ref': 'gts.x.unit.srv.missing.v1~' } },
+    };
+
+    expect((await postEntity(server, content)).statusCode).toBe(200);
+    const rejected = await server.instance.inject({
+      method: 'POST',
+      url: '/entities?validate=true',
+      payload: content,
+    });
+    expect(rejected.statusCode).toBe(422);
+
+    const get = await server.instance.inject({ method: 'GET', url: `/entities/${encodeURIComponent(id)}` });
+    expect(JSON.parse(get.body).ok).toBe(true);
+
+    await server.stop();
+  });
+
+  test('failed validation of an allowed replacement restores the original schema', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0, allowEntityUpdates: true });
+    const id = 'gts.x.unit.srv.rollback.v1~';
+    const original = { $id: `gts://${id}`, $schema: DRAFT7, title: 'original', type: 'object' };
+    const replacement = {
+      ...original,
+      title: 'replacement',
+      properties: { ref: { type: 'string', 'x-gts-ref': 'gts.x.unit.srv.missing.v1~' } },
+    };
+
+    expect((await postEntity(server, original)).statusCode).toBe(200);
+    const rejected = await server.instance.inject({
+      method: 'POST',
+      url: '/entities?validate=true',
+      payload: replacement,
+    });
+    expect(rejected.statusCode).toBe(422);
+
+    const get = await server.instance.inject({ method: 'GET', url: `/entities/${encodeURIComponent(id)}` });
+    expect(JSON.parse(get.body).content.title).toBe('original');
+
+    await server.stop();
+  });
+
+  test('an identical explicit type registration refreshes the stored entity envelope', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const id = 'gts.x.unit.srv.force_schema.v1~';
+
+    expect((await postEntity(server, { $id: id })).statusCode).toBe(200);
+    const registered = await server.instance.inject({
+      method: 'POST',
+      url: '/type-schemas',
+      payload: { type_id: id, type_schema: {} },
+    });
+    expect(registered.statusCode).toBe(200);
+
+    const validated = await server.instance.inject({
+      method: 'POST',
+      url: `/validate-json/${id}`,
+      payload: {},
+    });
+    expect(validated.statusCode).toBe(200);
+    expect(JSON.parse(validated.body).ok).toBe(true);
+
+    await server.stop();
+  });
+
+  test('deeply nested content is rejected cleanly when comparing a re-submission', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const content: Record<string, any> = { id: 'gts.x.unit.srv.deep.v1~x.unit._.item.v1' };
+    let cursor = content;
+    for (let depth = 0; depth <= MAX_SCHEMA_DEPTH; depth++) {
+      cursor.nested = {};
+      cursor = cursor.nested;
+    }
+
+    expect((await postEntity(server, content)).statusCode).toBe(200);
+    const response = await postEntity(server, content);
+
+    expect(response.statusCode).toBe(422);
+    expect(JSON.parse(response.body).error).toMatch(/nests deeper/);
+
+    await server.stop();
+  });
+
+  test('a changed re-submission is rejected with 409 and the original content is preserved', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+
+    expect((await postEntity(server, schema)).statusCode).toBe(200);
+
+    const conflict = await postEntity(server, schemaChanged);
+    expect(conflict.statusCode).toBe(409);
+    const conflictBody = JSON.parse(conflict.body);
+    expect(conflictBody.ok).toBe(false);
+    expect(conflictBody.error).toMatch(/already registered with different content/);
+
+    // The previously-registered content must be untouched.
+    const get = await server.instance.inject({
+      method: 'GET',
+      url: `/entities/${encodeURIComponent('gts.x.unit.srv.updmode.v1~')}`,
+    });
+    const stored = JSON.parse(get.body);
+    expect(stored.content.properties.name.type).toBe('string');
+
+    await server.stop();
+  });
+
+  test('--allow-entity-updates replaces the changed entity (200)', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0, allowEntityUpdates: true });
+
+    expect((await postEntity(server, schema)).statusCode).toBe(200);
+    expect((await postEntity(server, schemaChanged)).statusCode).toBe(200);
+
+    const get = await server.instance.inject({
+      method: 'GET',
+      url: `/entities/${encodeURIComponent('gts.x.unit.srv.updmode.v1~')}`,
+    });
+    const stored = JSON.parse(get.body);
+    expect(stored.content.properties.name.type).toBe('integer');
+
+    await server.stop();
+  });
+
+  test('replacing a schema refreshes Ajv references used by dependent schemas', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0, allowEntityUpdates: true });
+    const targetId = 'gts.x.unit.srv.updtarget.v1~';
+    const hostId = 'gts.x.unit.srv.updhost.v1~';
+    const instanceId = `${hostId}x.unit._.item.v1`;
+
+    await postEntity(server, { $id: `gts://${targetId}`, $schema: DRAFT7, type: 'string' });
+    await postEntity(server, {
+      $id: `gts://${hostId}`,
+      $schema: DRAFT7,
+      type: 'object',
+      required: ['value'],
+      properties: { value: { $ref: `gts://${targetId}` } },
+    });
+    await postEntity(server, { $id: `gts://${targetId}`, $schema: DRAFT7, type: 'integer' });
+    await postEntity(server, { id: instanceId, value: 42 });
+
+    const response = await server.instance.inject({
+      method: 'POST',
+      url: '/validate-instance',
+      payload: { instance_id: instanceId },
+    });
+    expect(JSON.parse(response.body).ok).toBe(true);
+
+    await server.stop();
+  });
+
+  test('POST /type-schemas is likewise conflict-protected', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const typeId = 'gts.x.unit.srv.updschema.v1~';
+
+    const first = await server.instance.inject({
+      method: 'POST',
+      url: '/type-schemas',
+      payload: { type_id: typeId, type_schema: { $schema: DRAFT7, type: 'object' } },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const changed = await server.instance.inject({
+      method: 'POST',
+      url: '/type-schemas',
+      payload: { type_id: typeId, type_schema: { $schema: DRAFT7, type: 'string' } },
+    });
+    expect(changed.statusCode).toBe(409);
 
     await server.stop();
   });

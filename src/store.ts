@@ -1,9 +1,20 @@
+import { createHash } from 'crypto';
 import Ajv from 'ajv';
 import { applyGtsFormats } from './formats';
-import { GtsConfig, JsonEntity, ValidationResult, GTS_URI_PREFIX, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS } from './types';
+import {
+  GtsConfig,
+  JsonEntity,
+  ValidationResult,
+  EntityConflictError,
+  EntityContentDepthError,
+  GTS_URI_PREFIX,
+  MAX_SCHEMA_DEPTH,
+  MAX_SCHEMA_PATHS,
+  GtsRefValidationMode,
+} from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
-import { XGtsRefValidator } from './x-gts-ref';
+import { visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
 import { GtsCompatibility, findCrossedBound, isEmptySchema } from './compatibility';
 import { GtsModifiers } from './modifiers';
 
@@ -37,6 +48,38 @@ function isPlainSchemaObject(value: unknown): value is Record<string, any> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Canonical JSON serialization with object keys emitted in sorted order,
+ * recursively. `JSON.stringify` preserves insertion order, so two entities
+ * with equal content but differently-ordered keys would serialize
+ * differently - sorting keys makes the serialization stable so equal content
+ * always produces an equal string. Mirrors gts-go's reliance on Go's
+ * `encoding/json` sorting map keys.
+ */
+function canonicalJson(value: any, depth: number = 0): string {
+  if (depth > MAX_SCHEMA_DEPTH) {
+    throw new EntityContentDepthError();
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item, depth + 1)).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key], depth + 1)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * A stable SHA-256 hash of an entity's content, used to distinguish an
+ * idempotent re-submission (identical content) from a conflicting update
+ * (changed content) without a deep structural comparison. Mirrors gts-go's
+ * `contentHash`.
+ */
+function contentHash(content: Record<string, any>): string {
+  return createHash('sha256').update(canonicalJson(content)).digest('hex');
+}
+
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   private config: GtsConfig;
@@ -46,6 +89,7 @@ export class GtsStore {
     this.config = {
       validateRefs: config?.validateRefs ?? false,
       strictMode: config?.strictMode ?? false,
+      allowEntityUpdates: config?.allowEntityUpdates ?? false,
     };
 
     this.ajv = new Ajv({
@@ -81,7 +125,7 @@ export class GtsStore {
     throw new Error(`Unresolvable GTS reference: ${uri}`);
   }
 
-  register(entity: JsonEntity): void {
+  register(entity: JsonEntity): JsonEntity | undefined {
     // A malformed entity id would silently break every ancestor-chain
     // computation downstream (`buildSchemaChain` and friends), which then
     // fail open by treating the entity as if it had no ancestors at all -
@@ -107,6 +151,17 @@ export class GtsStore {
       throw new Error(`Invalid GTS entity id: '${entity.id}'`);
     }
 
+    // Protect registry state: unless entity updates are allowed, re-registering
+    // an id with *different* content is rejected (EntityConflictError, surfaced
+    // as HTTP 409), while an identical re-submission stays idempotent. Stored
+    // content remains mutable through get(), so both hashes must reflect the
+    // values at comparison time rather than relying on a cached snapshot.
+    const previous = this.byId.get(entity.id);
+    const replacing = !!previous && contentHash(previous.content) !== contentHash(entity.content);
+    if (replacing && !this.config.allowEntityUpdates) {
+      throw new EntityConflictError(entity.id);
+    }
+
     if (this.config.validateRefs) {
       for (const ref of entity.references) {
         if (!this.byId.has(ref)) {
@@ -128,10 +183,14 @@ export class GtsStore {
       }
     }
 
+    const schemaUnchanged = !!previous && !replacing && previous.isSchema && entity.isSchema;
+    if (previous?.isSchema && !schemaUnchanged) {
+      this.ajv.removeSchema(entity.id);
+    }
     this.byId.set(entity.id, entity);
 
     // If this is a schema, add it to AJV for reference resolution
-    if (entity.isSchema && entity.content) {
+    if (entity.isSchema && entity.content && !schemaUnchanged) {
       try {
         const normalizedSchema = this.normalizeSchema(entity.content);
         // Set $id to the GTS ID if not already set
@@ -140,9 +199,10 @@ export class GtsStore {
         }
         this.ajv.addSchema(normalizedSchema, entity.id);
       } catch (err) {
-        // Ignore errors adding schema - it might already exist or be invalid
+        // Ignore malformed schemas; unchanged schemas do not reach this path.
       }
     }
+    return previous;
   }
 
   get(id: string): JsonEntity | undefined {
@@ -191,7 +251,88 @@ export class GtsStore {
     return results;
   }
 
-  validateInstance(gtsId: string): ValidationResult {
+  validateInstance(gtsId: string, refValidation: GtsRefValidationMode = GtsRefValidationMode.Full): ValidationResult {
+    return this.validateInstanceTransitive(gtsId, new Set(), new Map(), refValidation);
+  }
+
+  private validateInstanceTransitive(
+    gtsId: string,
+    visiting: Set<string>,
+    completed: Map<string, ValidationResult>,
+    refValidation: GtsRefValidationMode
+  ): ValidationResult {
+    const key = `instance:${gtsId}`;
+    const cached = completed.get(key);
+    if (cached) return cached;
+    if (visiting.has(key)) return { id: gtsId, ok: true, valid: true, error: '' };
+
+    visiting.add(key);
+    const referencedIds = new Set<string>();
+    const wildcardPatterns = new Set<string>();
+    const localResult = this.validateInstanceLocal(gtsId, referencedIds, wildcardPatterns, refValidation);
+    if (!localResult.ok) {
+      visiting.delete(key);
+      completed.set(key, localResult);
+      return localResult;
+    }
+
+    let objId = gtsId;
+    if (Gts.isValidGtsID(gtsId)) objId = Gts.parseGtsID(gtsId).id;
+    const obj = this.get(objId)!;
+    const typeResult = this.validateSchemaTransitive(obj.schemaId!, visiting, completed, refValidation);
+    if (!typeResult.ok) {
+      const result = {
+        id: gtsId,
+        ok: false,
+        valid: false,
+        error: `Instance type '${obj.schemaId}' is invalid: ${typeResult.error}`,
+      };
+      visiting.delete(key);
+      completed.set(key, result);
+      return result;
+    }
+
+    if (refValidation === GtsRefValidationMode.Full) {
+      for (const dependencyId of referencedIds) {
+        const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed, refValidation);
+        if (!dependencyResult.ok) {
+          const result = {
+            id: gtsId,
+            ok: false,
+            valid: false,
+            error: `Referenced entity '${dependencyId}' is invalid: ${dependencyResult.error}`,
+          };
+          visiting.delete(key);
+          completed.set(key, result);
+          return result;
+        }
+      }
+      for (const pattern of wildcardPatterns) {
+        if (!this.hasValidWildcardMatch(pattern, visiting, completed, refValidation)) {
+          const result = {
+            id: gtsId,
+            ok: false,
+            valid: false,
+            error: `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`,
+          };
+          visiting.delete(key);
+          completed.set(key, result);
+          return result;
+        }
+      }
+    }
+
+    visiting.delete(key);
+    completed.set(key, localResult);
+    return localResult;
+  }
+
+  private validateInstanceLocal(
+    gtsId: string,
+    referencedIds: Set<string> | undefined,
+    wildcardPatterns: Set<string> | undefined,
+    refValidation: GtsRefValidationMode
+  ): ValidationResult {
     try {
       let objId: string = gtsId;
       if (Gts.isValidGtsID(gtsId)) {
@@ -265,8 +406,8 @@ export class GtsStore {
       }
 
       // Validate x-gts-ref constraints
-      const xGtsRefValidator = new XGtsRefValidator(this);
-      const xGtsRefErrors = xGtsRefValidator.validateInstance(obj.content, schemaEntity.content);
+      const xGtsRefValidator = new XGtsRefValidator(this, refValidation);
+      const xGtsRefErrors = xGtsRefValidator.validateInstance(obj.content, schemaEntity.content, '', obj.schemaId);
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
         return {
@@ -275,6 +416,12 @@ export class GtsStore {
           valid: false,
           error: `x-gts-ref validation failed: ${errorMsgs}`,
         };
+      }
+      for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
+        referencedIds?.add(dependencyId);
+      }
+      for (const pattern of xGtsRefValidator.getReferencedWildcardPatterns()) {
+        wildcardPatterns?.add(pattern);
       }
 
       return {
@@ -342,7 +489,7 @@ export class GtsStore {
       }
 
       const xGtsRefValidator = new XGtsRefValidator(this);
-      const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content);
+      const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content, '', typeId);
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
         return { id, ok: false, error: `x-gts-ref validation failed: ${errorMsgs}` };
@@ -1103,7 +1250,184 @@ export class GtsStore {
     }
   }
 
-  validateSchemaAgainstParent(schemaId: string): ValidationResult {
+  private validateSchemaReferenceTargets(node: any, path: string = ''): string | null {
+    if (!node || typeof node !== 'object') {
+      return null;
+    }
+
+    if (typeof node.$ref === 'string' && !node.$ref.startsWith('#')) {
+      const refPath = path ? `${path}/$ref` : '$ref';
+      if (!node.$ref.startsWith(GTS_URI_PREFIX)) {
+        return `Invalid $ref at ${refPath}: expected a local pointer or gts:// URI`;
+      }
+      const targetId = node.$ref.substring(GTS_URI_PREFIX.length);
+      if (!Gts.isValidGtsID(targetId)) {
+        return `Invalid $ref at ${refPath}: ${targetId} is not a valid GTS identifier`;
+      }
+      const target = this.get(targetId);
+      if (!target || !target.isSchema) {
+        return `Unresolvable $ref at ${refPath}: ${node.$ref}`;
+      }
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '$ref') continue;
+      const nestedPath = path ? `${path}/${key}` : key;
+      if (Array.isArray(value)) {
+        for (let index = 0; index < value.length; index++) {
+          const error = this.validateSchemaReferenceTargets(value[index], `${nestedPath}[${index}]`);
+          if (error) return error;
+        }
+      } else {
+        const error = this.validateSchemaReferenceTargets(value, nestedPath);
+        if (error) return error;
+      }
+    }
+    return null;
+  }
+
+  validateSchemaAgainstParent(
+    schemaId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.Full
+  ): ValidationResult {
+    return this.validateSchemaTransitive(schemaId, new Set(), new Map(), refValidation);
+  }
+
+  private validateSchemaTransitive(
+    schemaId: string,
+    visiting: Set<string>,
+    completed: Map<string, ValidationResult>,
+    refValidation: GtsRefValidationMode
+  ): ValidationResult {
+    const key = `schema:${schemaId}`;
+    const cached = completed.get(key);
+    if (cached) return cached;
+    if (visiting.has(key)) return { id: schemaId, ok: true, error: '' };
+
+    visiting.add(key);
+    const referencedIds = new Set<string>();
+    const wildcardPatterns = new Set<string>();
+    const localResult = this.validateSchemaAgainstParentLocal(schemaId, referencedIds, wildcardPatterns, refValidation);
+    if (!localResult.ok) {
+      visiting.delete(key);
+      completed.set(key, localResult);
+      return localResult;
+    }
+
+    const entity = this.get(schemaId)!;
+    const chain = this.buildSchemaChain(schemaId);
+    for (const ancestorId of chain.slice(0, -1)) {
+      const ancestorResult = this.validateSchemaTransitive(ancestorId, visiting, completed, refValidation);
+      if (!ancestorResult.ok) {
+        const result = {
+          id: schemaId,
+          ok: false,
+          error: `Ancestor type '${ancestorId}' is invalid: ${ancestorResult.error}`,
+        };
+        visiting.delete(key);
+        completed.set(key, result);
+        return result;
+      }
+    }
+
+    for (const dependencyId of this.collectSchemaDependencies(entity.content)) {
+      const dependencyResult = this.validateSchemaTransitive(dependencyId, visiting, completed, refValidation);
+      if (!dependencyResult.ok) {
+        const result = {
+          id: schemaId,
+          ok: false,
+          error: `Referenced type '${dependencyId}' is invalid: ${dependencyResult.error}`,
+        };
+        visiting.delete(key);
+        completed.set(key, result);
+        return result;
+      }
+    }
+
+    if (refValidation === GtsRefValidationMode.Full) {
+      for (const dependencyId of referencedIds) {
+        const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed, refValidation);
+        if (!dependencyResult.ok) {
+          const result = {
+            id: schemaId,
+            ok: false,
+            error: `Referenced x-gts-ref entity '${dependencyId}' is invalid: ${dependencyResult.error}`,
+          };
+          visiting.delete(key);
+          completed.set(key, result);
+          return result;
+        }
+      }
+      for (const pattern of wildcardPatterns) {
+        if (!this.hasValidWildcardMatch(pattern, visiting, completed, refValidation)) {
+          const result = {
+            id: schemaId,
+            ok: false,
+            error: `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`,
+          };
+          visiting.delete(key);
+          completed.set(key, result);
+          return result;
+        }
+      }
+    }
+
+    visiting.delete(key);
+    completed.set(key, localResult);
+    return localResult;
+  }
+
+  private validateEntityTransitive(
+    entityId: string,
+    visiting: Set<string>,
+    completed: Map<string, ValidationResult>,
+    refValidation: GtsRefValidationMode
+  ): ValidationResult {
+    const entity = this.get(entityId);
+    if (!entity) return { id: entityId, ok: false, error: `Entity not found: ${entityId}` };
+    return entity.isSchema
+      ? this.validateSchemaTransitive(entityId, visiting, completed, refValidation)
+      : this.validateInstanceTransitive(entityId, visiting, completed, refValidation);
+  }
+
+  private hasValidWildcardMatch(
+    pattern: string,
+    visiting: Set<string>,
+    completed: Map<string, ValidationResult>,
+    refValidation: GtsRefValidationMode
+  ): boolean {
+    return this.getAll()
+      .filter((entity) => Gts.matchIDPattern(entity.id, pattern).match)
+      .some((entity) => this.validateEntityTransitive(entity.id, visiting, completed, refValidation).ok);
+  }
+
+  private collectSchemaDependencies(node: any, dependencies: Set<string> = new Set()): Set<string> {
+    if (!node || typeof node !== 'object') return dependencies;
+    if (typeof node.$ref === 'string' && node.$ref.startsWith(GTS_URI_PREFIX)) {
+      dependencies.add(node.$ref.substring(GTS_URI_PREFIX.length));
+    }
+    visitJsonSubschemas(node, '', (subschema) => this.collectSchemaDependencies(subschema, dependencies));
+    return dependencies;
+  }
+
+  private withoutRequired(node: any): any {
+    if (!node || typeof node !== 'object') return node;
+    const result = JSON.parse(JSON.stringify(node));
+    const removeRequired = (schema: any): void => {
+      if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return;
+      delete schema.required;
+      visitJsonSubschemas(schema, '', removeRequired);
+    };
+    removeRequired(result);
+    return result;
+  }
+
+  private validateSchemaAgainstParentLocal(
+    schemaId: string,
+    referencedIds: Set<string> | undefined,
+    wildcardPatterns: Set<string> | undefined,
+    refValidation: GtsRefValidationMode
+  ): ValidationResult {
     const entity = this.get(schemaId);
     if (!entity) {
       return { id: schemaId, ok: false, error: `Entity not found: ${schemaId}` };
@@ -1127,6 +1451,27 @@ export class GtsStore {
         return { id: schemaId, ok: false, error: ruleError };
       }
 
+      const refError = this.validateSchemaReferenceTargets(content);
+      if (refError) {
+        return { id: schemaId, ok: false, error: refError };
+      }
+
+      const schemaRefValidator = new XGtsRefValidator(this, refValidation);
+      const xGtsRefErrors = schemaRefValidator.validateSchemaRefExistence(content, '', schemaId);
+      if (xGtsRefErrors.length > 0) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: `x-gts-ref validation failed: ${xGtsRefErrors.map((error) => error.reason).join('; ')}`,
+        };
+      }
+      for (const dependencyId of schemaRefValidator.getReferencedIds()) {
+        referencedIds?.add(dependencyId);
+      }
+      for (const pattern of schemaRefValidator.getReferencedWildcardPatterns()) {
+        wildcardPatterns?.add(pattern);
+      }
+
       // Per ADR-0001 derivation is established by the chained `$id` alone, so the
       // parent is taken from the chain. A body that references the parent via
       // `allOf` + `$ref` and one that restates the parent's fields are both valid
@@ -1140,7 +1485,7 @@ export class GtsStore {
       const parentId = chain.length > 1 ? chain[chain.length - 2] : null;
       if (!parentId) {
         // Base schema with no parent → still validate traits
-        return this.validateSchemaTraits(schemaId);
+        return this.validateSchemaTraits(schemaId, referencedIds, wildcardPatterns, refValidation);
       }
 
       const parentEntity = this.get(parentId);
@@ -1171,7 +1516,7 @@ export class GtsStore {
       }
 
       // OP#13: Validate schema traits across the inheritance chain
-      const traitsResult = this.validateSchemaTraits(schemaId);
+      const traitsResult = this.validateSchemaTraits(schemaId, referencedIds, wildcardPatterns, refValidation);
       if (!traitsResult.ok) {
         return traitsResult;
       }
@@ -1200,7 +1545,12 @@ export class GtsStore {
    * There is no bespoke immutability rule: a publisher locks a trait value with
    * `const` in the trait-schema, which the standard validation in step 4 enforces.
    */
-  private validateSchemaTraits(schemaId: string): ValidationResult {
+  private validateSchemaTraits(
+    schemaId: string,
+    referencedIds: Set<string> | undefined,
+    wildcardPatterns: Set<string> | undefined,
+    refValidation: GtsRefValidationMode
+  ): ValidationResult {
     let chain: string[];
     try {
       chain = this.buildSchemaChain(schemaId);
@@ -1213,6 +1563,7 @@ export class GtsStore {
     // makes the aggregate unsatisfiable; tracked separately so that a subtree
     // with no traits at all still validates (ADR-0002).
     let traitsProhibited = false;
+    let traitsProhibitedBy: string | null = null;
     // A `true` declaration constrains nothing but still establishes that the
     // chain defines a trait surface, so descendants may carry trait values.
     let hasTraitSchemaDeclaration = false;
@@ -1226,8 +1577,16 @@ export class GtsStore {
       const declaredSchema = content['x-gts-traits-schema'];
       if (declaredSchema !== undefined) {
         hasTraitSchemaDeclaration = true;
+        if (traitsProhibited && declaredSchema !== false) {
+          return {
+            id: schemaId,
+            ok: false,
+            error: `x-gts-traits-schema in '${chainSchemaId}' cannot permit traits because ancestor '${traitsProhibitedBy}' declares false`,
+          };
+        }
         if (declaredSchema === false) {
           traitsProhibited = true;
+          traitsProhibitedBy ??= chainSchemaId;
         } else if (declaredSchema !== true) {
           const isPlainObject =
             typeof declaredSchema === 'object' && declaredSchema !== null && !Array.isArray(declaredSchema);
@@ -1293,21 +1652,23 @@ export class GtsStore {
       };
     }
 
-    // Abstract types are exempt from completeness: descendants close the gaps.
+    // Abstract types are exempt from the *completeness* check (§9.7.5 / ADR-0003):
+    // the standard JSON Schema validation of the materialized effective traits -
+    // which enforces `required`/`const`/`type`/... - is skipped for them, because
+    // a descendant is expected to supply/close the values. The separate x-gts-ref
+    // reference-resolution rule (§9.7.5) does NOT exempt abstract types and still
+    // runs below, so an abstract type's declared references must resolve.
     const self = this.get(schemaId);
-    if (self && GtsModifiers.isAbstract(self.content)) {
-      return { id: schemaId, ok: true, error: '' };
-    }
+    const isAbstract = !!(self && GtsModifiers.isAbstract(self.content));
 
     if (traitSchemas.length === 0) {
       return { id: schemaId, ok: true, error: '' };
     }
 
     try {
-      const validate = this.ajv.compile(this.normalizeSchema(effectiveSchema));
+      const schemaForValidation = isAbstract ? this.withoutRequired(effectiveSchema) : effectiveSchema;
+      const validate = this.ajv.compile(this.normalizeSchema(schemaForValidation));
       if (!validate(materialized)) {
-        // P6-4: shared formatter, for the same reason as `validateCastResult`
-        // above - one Ajv-error-to-string convention, not four.
         const errors =
           validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
         return { id: schemaId, ok: false, error: `trait validation: ${errors}` };
@@ -1340,13 +1701,35 @@ export class GtsStore {
     // references to a never-registered namespace (e.g. the canonical
     // `TestCaseOp13_TraitsValid_AllResolved` et al, which reference
     // `gts.x.core.events.topic.v1~` only as a pattern) are unaffected.
-    const xGtsRefErrors = new XGtsRefValidator(this).validateInstance(materialized, effectiveSchema);
+    const xGtsRefValidator = new XGtsRefValidator(this, refValidation);
+
+    // Beyond checking supplied values, a concrete x-gts-ref declared in the
+    // effective trait schema must itself name a registered constraint type -
+    // even when no value is provided. gts-spec §9.6 leaves existence checking to
+    // the implementation; the reference implementation rejects a dangling
+    // x-gts-ref target (like a dangling $ref); /$id uses the selected schema ID.
+    const refExistenceErrors = xGtsRefValidator.validateSchemaRefExistence(effectiveSchema, '', schemaId);
+    if (refExistenceErrors.length > 0) {
+      return {
+        id: schemaId,
+        ok: false,
+        error: `x-gts-ref validation failed: ${refExistenceErrors.map((err) => err.reason).join('; ')}`,
+      };
+    }
+
+    const xGtsRefErrors = xGtsRefValidator.validateInstance(materialized, effectiveSchema, '', schemaId);
     if (xGtsRefErrors.length > 0) {
       return {
         id: schemaId,
         ok: false,
         error: `x-gts-ref validation failed: ${xGtsRefErrors.map((err) => err.reason).join('; ')}`,
       };
+    }
+    for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
+      referencedIds?.add(dependencyId);
+    }
+    for (const pattern of xGtsRefValidator.getReferencedWildcardPatterns()) {
+      wildcardPatterns?.add(pattern);
     }
 
     return { id: schemaId, ok: true, error: '' };
