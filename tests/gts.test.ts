@@ -10,7 +10,7 @@ import {
   extractID,
 } from '../src';
 import { MAX_SCHEMA_DEPTH } from '../src/types';
-import { XGtsRefValidator } from '../src/x-gts-ref';
+import { X_GTS_REF_SELF, XGtsRefValidator } from '../src/x-gts-ref';
 
 describe('GTS Core Operations', () => {
   describe('OP#1 - ID Validation', () => {
@@ -1664,45 +1664,23 @@ describe('x-gts-ref schema existence traversal', () => {
     expect(errors[0].fieldPath).toBe('properties/x-gts-ref/x-gts-ref');
   });
 
-  test('checks a concrete constraint type resolved through a relative pointer', () => {
-    const constraintType = 'gts.x.unit.xref.relative_target.v1~';
-    const schema = {
-      'x-gts-traits-schema': {
-        constraintType,
-        properties: {
-          link: { type: 'string', 'x-gts-ref': '/x-gts-traits-schema/constraintType' },
-        },
-      },
-    };
+  test('recognizes only the reserved /$id self-reference', () => {
     const validator = new XGtsRefValidator(missingStore);
-    const errors = validator.validateSchemaRefExistence(schema);
-
-    expect(errors).toHaveLength(1);
-    expect(errors[0].refPattern).toBe(constraintType);
+    expect(validator.isSelfReference(X_GTS_REF_SELF)).toBe(true);
+    expect(validator.isSelfReference('/properties/id')).toBe(false);
   });
 
-  test('rejects a relative constraint pointer that resolves nowhere', () => {
-    const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
-      properties: {
-        link: { type: 'string', 'x-gts-ref': '/missing' },
-      },
-    });
+  test.each(['/x-gts-traits-schema/constraintType', '/missing', '/examples'])(
+    'rejects unsupported x-gts-ref pointer %s',
+    (ref) => {
+      const errors = new XGtsRefValidator(missingStore).validateSchema({
+        properties: { link: { type: 'string', 'x-gts-ref': ref } },
+      });
 
-    expect(errors).toHaveLength(1);
-    expect(errors[0].reason).toMatch(/does not resolve to a string/);
-  });
-
-  test('rejects a relative constraint pointer that resolves to a non-string', () => {
-    const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
-      examples: ['not-a-constraint-type'],
-      properties: {
-        link: { type: 'string', 'x-gts-ref': '/examples' },
-      },
-    });
-
-    expect(errors).toHaveLength(1);
-    expect(errors[0].reason).toMatch(/does not resolve to a string/);
-  });
+      expect(errors).toHaveLength(1);
+      expect(errors[0].reason).toContain("must be a GTS identifier, wildcard, or '/$id'");
+    }
+  );
 });
 
 // P5-R2 - `visitInstance` (src/x-gts-ref.ts) must fail closed when a

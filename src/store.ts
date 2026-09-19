@@ -407,7 +407,7 @@ export class GtsStore {
 
       // Validate x-gts-ref constraints
       const xGtsRefValidator = new XGtsRefValidator(this, refValidation);
-      const xGtsRefErrors = xGtsRefValidator.validateInstance(obj.content, schemaEntity.content);
+      const xGtsRefErrors = xGtsRefValidator.validateInstance(obj.content, schemaEntity.content, '', obj.schemaId);
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
         return {
@@ -489,7 +489,7 @@ export class GtsStore {
       }
 
       const xGtsRefValidator = new XGtsRefValidator(this);
-      const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content);
+      const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content, '', typeId);
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
         return { id, ok: false, error: `x-gts-ref validation failed: ${errorMsgs}` };
@@ -1457,7 +1457,7 @@ export class GtsStore {
       }
 
       const schemaRefValidator = new XGtsRefValidator(this, refValidation);
-      const xGtsRefErrors = schemaRefValidator.validateSchemaRefExistence(content);
+      const xGtsRefErrors = schemaRefValidator.validateSchemaRefExistence(content, '', schemaId);
       if (xGtsRefErrors.length > 0) {
         return {
           id: schemaId,
@@ -1707,8 +1707,8 @@ export class GtsStore {
     // effective trait schema must itself name a registered constraint type -
     // even when no value is provided. gts-spec §9.6 leaves existence checking to
     // the implementation; the reference implementation rejects a dangling
-    // x-gts-ref target (like a dangling $ref). Wildcards/pointers are skipped.
-    const refExistenceErrors = xGtsRefValidator.validateSchemaRefExistence(effectiveSchema);
+    // x-gts-ref target (like a dangling $ref); /$id uses the selected schema ID.
+    const refExistenceErrors = xGtsRefValidator.validateSchemaRefExistence(effectiveSchema, '', schemaId);
     if (refExistenceErrors.length > 0) {
       return {
         id: schemaId,
@@ -1717,7 +1717,7 @@ export class GtsStore {
       };
     }
 
-    const xGtsRefErrors = xGtsRefValidator.validateInstance(materialized, effectiveSchema);
+    const xGtsRefErrors = xGtsRefValidator.validateInstance(materialized, effectiveSchema, '', schemaId);
     if (xGtsRefErrors.length > 0) {
       return {
         id: schemaId,

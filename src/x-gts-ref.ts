@@ -6,6 +6,8 @@
 import { Gts } from './gts';
 import { EntityLookup, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS, GtsRefValidationMode } from './types';
 
+export const X_GTS_REF_SELF = '/$id';
+
 const SCHEMA_VALUE_KEYWORDS = new Set([
   'additionalItems',
   'additionalProperties',
@@ -62,6 +64,7 @@ export class XGtsRefValidator {
   private mode: GtsRefValidationMode;
   private referencedIds: Set<string> = new Set();
   private referencedWildcardPatterns: Set<string> = new Set();
+  private selectedTypeId: string | undefined;
 
   constructor(store?: EntityLookup, mode: GtsRefValidationMode | boolean = GtsRefValidationMode.Full) {
     this.store = store;
@@ -76,10 +79,25 @@ export class XGtsRefValidator {
     return new Set(this.referencedWildcardPatterns);
   }
 
+  isSelfReference(value: unknown): boolean {
+    return value === X_GTS_REF_SELF;
+  }
+
+  private getSelectedTypeId(schema: any, selectedTypeId?: string): string | undefined {
+    const candidate = selectedTypeId ?? schema?.$id;
+    return typeof candidate === 'string' ? this.stripGtsURIPrefix(candidate) : undefined;
+  }
+
   /**
    * Validate an instance against x-gts-ref constraints in schema
    */
-  validateInstance(instance: any, schema: any, instancePath: string = ''): XGtsRefValidationError[] {
+  validateInstance(
+    instance: any,
+    schema: any,
+    instancePath: string = '',
+    selectedTypeId?: string
+  ): XGtsRefValidationError[] {
+    this.selectedTypeId = this.getSelectedTypeId(schema, selectedTypeId);
     const errors: XGtsRefValidationError[] = [];
     this.visitInstance(instance, schema, instancePath, schema, errors);
     return errors;
@@ -120,7 +138,10 @@ export class XGtsRefValidator {
     // violation) matches how every other depth guard in this codebase
     // behaves - a schema this deep is per se suspicious, so surfacing it as
     // a validation failure is preferable to hiding it.
-    if (typeof schema.$ref === 'string' && (schema.$ref === '#' || schema.$ref.startsWith('#/'))) {
+    if (
+      typeof schema.$ref === 'string' &&
+      (schema.$ref === '#' || schema.$ref.startsWith('#/') || schema.$ref.startsWith('gts://'))
+    ) {
       if (depth >= MAX_SCHEMA_DEPTH) {
         errors.push({
           fieldPath: path || '/',
@@ -142,7 +163,8 @@ export class XGtsRefValidator {
       }
       const resolved = this.resolveSchemaRef(rootSchema, schema.$ref);
       if (resolved && typeof resolved === 'object' && !Array.isArray(resolved)) {
-        this.visitInstance(instance, resolved, path, rootSchema, errors, depth + 1, pathBudget);
+        const resolvedRoot = schema.$ref.startsWith('gts://') ? resolved : rootSchema;
+        this.visitInstance(instance, resolved, path, resolvedRoot, errors, depth + 1, pathBudget);
       } else {
         // The pointer either resolves nowhere (`resolveSchemaRef` returned
         // `null`/`undefined`) or resolves to something that isn't usable as
@@ -167,7 +189,7 @@ export class XGtsRefValidator {
     // Check for x-gts-ref constraint
     if (schema['x-gts-ref'] !== undefined) {
       if (typeof instance === 'string') {
-        const err = this.validateRefValue(instance, schema['x-gts-ref'], path, rootSchema);
+        const err = this.validateRefValue(instance, schema['x-gts-ref'], path);
         if (err) {
           errors.push(err);
         }
@@ -302,15 +324,12 @@ export class XGtsRefValidator {
     );
   }
 
-  /**
-   * Resolve a local JSON-pointer `$ref` (`#` or `#/...`) against the root
-   * schema. Only local pointers are supported here - `x-gts-ref` traversal
-   * only ever needs to follow refs within the same schema document (e.g. a
-   * `properties` entry pointing into `definitions`, or a recursive
-   * `$ref: "#"` back to the root).
-   */
+  /** Resolve local and GTS `$ref` targets for x-gts-ref traversal. */
   private resolveSchemaRef(rootSchema: any, ref: string): any {
     if (ref === '#') return rootSchema;
+    if (ref.startsWith('gts://')) {
+      return this.store?.get(ref.slice('gts://'.length))?.content ?? null;
+    }
     if (!ref.startsWith('#/')) return null;
 
     const parts = ref
@@ -333,7 +352,7 @@ export class XGtsRefValidator {
     // Check for x-gts-ref field
     if (schema['x-gts-ref'] !== undefined) {
       const refPath = path ? `${path}/x-gts-ref` : 'x-gts-ref';
-      const err = this.validateRefPattern(schema['x-gts-ref'], refPath, rootSchema);
+      const err = this.validateRefPattern(schema['x-gts-ref'], refPath);
       if (err) {
         errors.push(err);
       }
@@ -344,12 +363,7 @@ export class XGtsRefValidator {
     });
   }
 
-  private validateRefValue(
-    value: string,
-    refPattern: any,
-    fieldPath: string,
-    schema: any
-  ): XGtsRefValidationError | null {
+  private validateRefValue(value: string, refPattern: any, fieldPath: string): XGtsRefValidationError | null {
     if (typeof refPattern !== 'string') {
       return {
         fieldPath,
@@ -360,50 +374,23 @@ export class XGtsRefValidator {
     }
 
     let resolvedPattern = refPattern;
-
-    // Resolve pattern if it's a relative reference
-    if (refPattern.startsWith('/')) {
-      const resolved = this.resolvePointer(schema, refPattern);
-      if (!resolved) {
+    if (this.isSelfReference(refPattern)) {
+      if (!this.selectedTypeId) {
         return {
           fieldPath,
           value,
           refPattern,
-          reason: `Cannot resolve reference path '${refPattern}'`,
+          reason: 'Cannot resolve /$id without a selected GTS Type Schema',
         };
       }
-
-      // Check if the resolved value is a pointer that needs further resolution
-      if (resolved.startsWith('/')) {
-        const furtherResolved = this.resolvePointer(schema, resolved);
-        if (!furtherResolved) {
-          return {
-            fieldPath,
-            value,
-            refPattern,
-            reason: `Cannot resolve nested reference '${refPattern}' -> '${resolved}'`,
-          };
-        }
-        resolvedPattern = furtherResolved;
-      } else {
-        resolvedPattern = resolved;
-      }
-
-      if (!resolvedPattern.startsWith('gts.')) {
-        return {
-          fieldPath,
-          value,
-          refPattern,
-          reason: `Resolved reference '${refPattern}' -> '${resolvedPattern}' is not a GTS pattern`,
-        };
-      }
+      resolvedPattern = this.selectedTypeId;
     }
 
     // Validate against GTS pattern
     return this.validateGtsPattern(value, resolvedPattern, fieldPath);
   }
 
-  private validateRefPattern(refPattern: any, fieldPath: string, rootSchema: any): XGtsRefValidationError | null {
+  private validateRefPattern(refPattern: any, fieldPath: string): XGtsRefValidationError | null {
     if (typeof refPattern !== 'string') {
       return {
         fieldPath,
@@ -418,25 +405,7 @@ export class XGtsRefValidator {
       return this.validateGtsIDOrPattern(refPattern, fieldPath);
     }
 
-    // Case 2: Relative reference
-    if (refPattern.startsWith('/')) {
-      const resolved = this.resolvePointer(rootSchema, refPattern);
-      if (!resolved) {
-        return {
-          fieldPath,
-          value: refPattern,
-          refPattern,
-          reason: `Cannot resolve reference path '${refPattern}'`,
-        };
-      }
-      if (!Gts.isValidGtsID(resolved)) {
-        return {
-          fieldPath,
-          value: refPattern,
-          refPattern,
-          reason: `Resolved reference '${refPattern}' -> '${resolved}' is not a valid GTS identifier`,
-        };
-      }
+    if (this.isSelfReference(refPattern)) {
       return null;
     }
 
@@ -444,7 +413,7 @@ export class XGtsRefValidator {
       fieldPath,
       value: refPattern,
       refPattern,
-      reason: `Invalid x-gts-ref value: '${refPattern}' must start with 'gts.' or '/'`,
+      reason: `Invalid x-gts-ref value: '${refPattern}' must be a GTS identifier, wildcard, or '${X_GTS_REF_SELF}'`,
     };
   }
 
@@ -534,41 +503,28 @@ export class XGtsRefValidator {
     return null;
   }
 
-  /**
-   * Walk a schema and verify that every concrete (non-wildcard, non-relative)
-   * x-gts-ref names a constraint type that is registered. This enforces the
-   * reference-implementation rule that an x-gts-ref must point at an existing
-   * constraint type even when no value is supplied: gts-spec §9.6 leaves
-   * reference-existence checking to the implementation, and the reference
-   * implementation treats a dangling x-gts-ref target like a dangling $ref.
-   * Wildcard patterns name a family rather than one concrete dependency.
-   * Relative pointer references are resolved against the root schema before
-   * their target existence is checked. Existence is only checked when a store
-   * is available and enforcement is enabled.
-   */
-  validateSchemaRefExistence(schema: any, schemaPath: string = ''): XGtsRefValidationError[] {
+  /** Check registry existence for concrete, wildcard, and /$id constraints. */
+  validateSchemaRefExistence(schema: any, schemaPath: string = '', selectedTypeId?: string): XGtsRefValidationError[] {
     const errors: XGtsRefValidationError[] = [];
     if (!this.store || this.mode === GtsRefValidationMode.None) {
       return errors;
     }
-    this.visitSchemaRefExistence(schema, schemaPath, schema, errors);
+    this.visitSchemaRefExistence(schema, schemaPath, this.getSelectedTypeId(schema, selectedTypeId), errors);
     return errors;
   }
 
-  private visitSchemaRefExistence(schema: any, path: string, rootSchema: any, errors: XGtsRefValidationError[]): void {
+  private visitSchemaRefExistence(
+    schema: any,
+    path: string,
+    selectedTypeId: string | undefined,
+    errors: XGtsRefValidationError[]
+  ): void {
     if (!schema || typeof schema !== 'object') return;
 
     const ref = schema['x-gts-ref'];
     const refPath = path ? `${path}/x-gts-ref` : 'x-gts-ref';
-    const resolvedRef = typeof ref === 'string' && ref.startsWith('/') ? this.resolvePointer(rootSchema, ref) : ref;
-    if (typeof ref === 'string' && ref.startsWith('/') && !resolvedRef) {
-      errors.push({
-        fieldPath: refPath,
-        value: ref,
-        refPattern: '',
-        reason: `x-gts-ref constraint pointer '${ref}' does not resolve to a string`,
-      });
-    } else if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.')) {
+    const resolvedRef = this.isSelfReference(ref) ? selectedTypeId : ref;
+    if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.')) {
       if (resolvedRef.includes('*')) {
         const matches =
           this.store?.getAll?.().filter((entity) => Gts.matchIDPattern(entity.id, resolvedRef).match) ?? [];
@@ -595,7 +551,7 @@ export class XGtsRefValidator {
     }
 
     visitJsonSubschemas(schema, path, (subschema, subschemaPath) => {
-      this.visitSchemaRefExistence(subschema, subschemaPath, rootSchema, errors);
+      this.visitSchemaRefExistence(subschema, subschemaPath, selectedTypeId, errors);
     });
   }
 
@@ -617,45 +573,5 @@ export class XGtsRefValidator {
    */
   private stripGtsURIPrefix(value: string): string {
     return value.replace(/^gts:\/\//, '');
-  }
-
-  /**
-   * Resolve a JSON Pointer in the schema
-   * Note: For /$id references, the gts:// prefix is stripped from the value
-   */
-  private resolvePointer(schema: any, pointer: string): string {
-    const path = pointer.startsWith('/') ? pointer.slice(1) : pointer;
-    if (!path) return '';
-
-    const parts = path.split('/');
-    let current: any = schema;
-
-    for (const part of parts) {
-      if (!current || typeof current !== 'object') {
-        return '';
-      }
-      current = current[part];
-      if (current === undefined) {
-        return '';
-      }
-    }
-
-    // If current is a string, return it (stripping gts:// prefix if present)
-    if (typeof current === 'string') {
-      return this.stripGtsURIPrefix(current);
-    }
-
-    // If current is a dict with x-gts-ref, resolve it
-    if (current && typeof current === 'object' && current['x-gts-ref']) {
-      const xGtsRef = current['x-gts-ref'];
-      if (typeof xGtsRef === 'string') {
-        if (xGtsRef.startsWith('/')) {
-          return this.resolvePointer(schema, xGtsRef);
-        }
-        return xGtsRef;
-      }
-    }
-
-    return '';
   }
 }
