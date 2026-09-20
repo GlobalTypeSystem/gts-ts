@@ -22,7 +22,7 @@ import * as gts from '../index';
 import { PACKAGE_VERSION } from '../version';
 
 function parseGtsRefValidationMode(value: unknown): GtsRefValidationMode | null {
-  if (value === undefined) return GtsRefValidationMode.Full;
+  if (value === undefined) return GtsRefValidationMode.AnyValid;
   const modes = Object.values(GtsRefValidationMode) as unknown[];
   return modes.includes(value) ? (value as GtsRefValidationMode) : null;
 }
@@ -279,7 +279,7 @@ export class GtsServer {
       const refValidation = parseGtsRefValidationMode(request.query['gts-ref-validation']);
       if (refValidation === null) {
         reply.code(422);
-        return { ok: false, error: 'gts-ref-validation must be one of: none, presence, full' };
+        return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
       }
       // `forceIsSchema` (P6-2/P6-3): `POST /type-schemas` calls through here
       // with the caller's declared intent - the registered entity IS a GTS
@@ -725,7 +725,7 @@ export class GtsServer {
 
     if (refValidation === null) {
       reply.code(422);
-      return { ok: false, error: 'gts-ref-validation must be one of: none, presence, full' };
+      return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
     }
     if (!instance_id) {
       reply.code(400);
@@ -847,7 +847,7 @@ export class GtsServer {
     const refValidation = parseGtsRefValidationMode(request.query['gts-ref-validation']);
     if (refValidation === null) {
       reply.code(422);
-      return { ok: false, error: 'gts-ref-validation must be one of: none, presence, full' };
+      return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
     }
     if (!type_id) {
       return { ok: false, error: 'Missing required field: type_id' };
@@ -871,7 +871,7 @@ export class GtsServer {
     const refValidation = parseGtsRefValidationMode(request.query['gts-ref-validation']);
     if (refValidation === null) {
       reply.code(422);
-      return { ok: false, error: 'gts-ref-validation must be one of: none, presence, full' };
+      return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
     }
     if (!id) {
       return { ok: false, error: 'Missing required field: entity_id or gts_id' };

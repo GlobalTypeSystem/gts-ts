@@ -96,7 +96,7 @@ export class GTS {
     return entity ? entity.isSchema : undefined;
   }
 
-  validateInstance(id: string, refValidation: GtsRefValidationMode = GtsRefValidationMode.Full): ValidationResult {
+  validateInstance(id: string, refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid): ValidationResult {
     return this.store.validateInstance(id, refValidation);
   }
 
@@ -203,7 +203,7 @@ export class GTS {
    */
   validateSchemaAgainstParent(
     schemaId: string,
-    refValidation: GtsRefValidationMode = GtsRefValidationMode.Full
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
   ): ValidationResult {
     return this.store.validateSchemaAgainstParent(schemaId, refValidation);
   }
@@ -227,7 +227,7 @@ export class GTS {
 
   validateEntity(
     id: string,
-    refValidation: GtsRefValidationMode = GtsRefValidationMode.Full
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
   ): ValidationResult & { entity_type: string } {
     const entity = this.store.get(id);
     if (!entity) {

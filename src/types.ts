@@ -185,8 +185,8 @@ export interface GtsConfig {
  */
 export const GtsRefValidationMode = {
   None: 'none',
-  Presence: 'presence',
-  Full: 'full',
+  AnyPresent: 'any-present',
+  AnyValid: 'any-valid',
 } as const;
 
 export type GtsRefValidationMode = (typeof GtsRefValidationMode)[keyof typeof GtsRefValidationMode];

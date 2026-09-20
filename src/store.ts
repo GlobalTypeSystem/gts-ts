@@ -251,7 +251,7 @@ export class GtsStore {
     return results;
   }
 
-  validateInstance(gtsId: string, refValidation: GtsRefValidationMode = GtsRefValidationMode.Full): ValidationResult {
+  validateInstance(gtsId: string, refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid): ValidationResult {
     return this.validateInstanceTransitive(gtsId, new Set(), new Map(), refValidation);
   }
 
@@ -292,7 +292,7 @@ export class GtsStore {
       return result;
     }
 
-    if (refValidation === GtsRefValidationMode.Full) {
+    if (refValidation === GtsRefValidationMode.AnyValid) {
       for (const dependencyId of referencedIds) {
         const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed, refValidation);
         if (!dependencyResult.ok) {
@@ -1288,7 +1288,7 @@ export class GtsStore {
 
   validateSchemaAgainstParent(
     schemaId: string,
-    refValidation: GtsRefValidationMode = GtsRefValidationMode.Full
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
   ): ValidationResult {
     return this.validateSchemaTransitive(schemaId, new Set(), new Map(), refValidation);
   }
@@ -1344,7 +1344,7 @@ export class GtsStore {
       }
     }
 
-    if (refValidation === GtsRefValidationMode.Full) {
+    if (refValidation === GtsRefValidationMode.AnyValid) {
       for (const dependencyId of referencedIds) {
         const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed, refValidation);
         if (!dependencyResult.ok) {

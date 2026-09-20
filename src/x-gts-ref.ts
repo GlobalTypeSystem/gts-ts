@@ -66,9 +66,9 @@ export class XGtsRefValidator {
   private referencedWildcardPatterns: Set<string> = new Set();
   private selectedTypeId: string | undefined;
 
-  constructor(store?: EntityLookup, mode: GtsRefValidationMode | boolean = GtsRefValidationMode.Full) {
+  constructor(store?: EntityLookup, mode: GtsRefValidationMode | boolean = GtsRefValidationMode.AnyValid) {
     this.store = store;
-    this.mode = typeof mode === 'boolean' ? (mode ? GtsRefValidationMode.Presence : GtsRefValidationMode.None) : mode;
+    this.mode = typeof mode === 'boolean' ? (mode ? GtsRefValidationMode.AnyPresent : GtsRefValidationMode.None) : mode;
   }
 
   getReferencedIds(): Set<string> {
