@@ -53,12 +53,65 @@ export interface GtsID {
   segments: GtsIDSegment[];
 }
 
+export interface SourceSpan {
+  offset: number;
+  length: number;
+  line: number;
+  column: number;
+  lineOffset: number;
+}
+
+export interface ValidationIssueSource {
+  value: SourceSpan;
+  key?: SourceSpan;
+}
+
+export interface ValidationIssue {
+  instancePath: string;
+  schemaPath: string;
+  keyword: string;
+  message: string;
+  params: Record<string, unknown>;
+  data?: unknown;
+  entityIndex?: number;
+  source?: ValidationIssueSource;
+}
+
 export interface ValidationResult {
   id: string;
   ok: boolean;
   valid?: boolean;
   error: string;
   is_wildcard?: boolean;
+  errors?: ValidationIssue[];
+}
+
+/**
+ * Serialization format of a GTS text payload. The client is responsible for
+ * mapping its own file extensions (or content type) to one of these values;
+ * the library never receives a file path or name so it cannot leak one.
+ */
+export type GtsTextFormat = 'json' | 'jsonc' | 'yaml';
+
+export interface GtsTextParseResult {
+  ok: boolean;
+  content?: unknown;
+  entities: JsonEntity[];
+  error?: string;
+  errors?: ValidationIssue[];
+}
+
+export interface GtsEntityValidationResult {
+  entityIndex: number;
+  id: string;
+  isSchema: boolean;
+  result: ValidationResult;
+}
+
+export interface GtsTextValidationResult {
+  ok: boolean;
+  entities: GtsEntityValidationResult[];
+  errors: ValidationIssue[];
 }
 
 export interface ParseResult {

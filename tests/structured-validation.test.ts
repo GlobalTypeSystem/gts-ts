@@ -1,0 +1,154 @@
+import { GTS, parseGtsText, parseGtsTextContent } from '../src';
+
+describe('structured validation results', () => {
+  test('adds Ajv issues without changing the legacy error string', () => {
+    const gts = new GTS();
+    const typeId = 'gts.x.unit.structured.instance.v1~';
+    const instanceId = `${typeId}x.unit._.invalid.v1`;
+    gts.register({
+      $id: `gts://${typeId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      required: ['name'],
+      properties: { name: { type: 'string' } },
+    });
+    gts.register({ id: instanceId, type: typeId, name: 42 });
+
+    const result = gts.validateInstance(instanceId);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("is not of type 'string'");
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ instancePath: '/name', keyword: 'type', params: { type: 'string' } }),
+      ])
+    );
+  });
+
+  test('meta-validates a registered schema with structured issues', () => {
+    const gts = new GTS();
+    const typeId = 'gts.x.unit.structured.meta.v1~';
+    gts.register({
+      $id: `gts://${typeId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { name: { type: 42 } },
+    });
+
+    const result = gts.validateSchema(typeId);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('JSON Schema validation failed');
+    expect(result.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ instancePath: '/properties/name/type' })])
+    );
+  });
+
+  test.each(['https://json-schema.org/draft/2019-09/schema', 'https://json-schema.org/draft/2020-12/schema'])(
+    'meta-validates the %s dialect',
+    (dialect) => {
+      const gts = new GTS();
+      const suffix = dialect.includes('2020-12') ? 'draft2020' : 'draft2019';
+      const typeId = `gts.x.unit.structured.${suffix}.v1~`;
+      gts.register({
+        $id: `gts://${typeId}`,
+        $schema: dialect,
+        type: 'array',
+        prefixItems: [{ type: 'string' }],
+      });
+
+      expect(gts.validateSchema(typeId).ok).toBe(true);
+    }
+  );
+
+  test('uses Draft 2020-12 assertions for instance validation', () => {
+    const gts = new GTS();
+    const typeId = 'gts.x.unit.structured.prefixitems.v1~';
+    const instanceId = `${typeId}x.unit._.invalid.v1`;
+    gts.register({
+      $id: `gts://${typeId}`,
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: {
+        values: { type: 'array', prefixItems: [{ type: 'string' }] },
+      },
+    });
+    gts.register({ id: instanceId, type: typeId, values: [42] });
+
+    const result = gts.validateInstance(instanceId);
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([expect.objectContaining({ instancePath: '/values/0' })]));
+  });
+
+  test('returns structured x-gts-ref declaration errors', () => {
+    const gts = new GTS();
+    const typeId = 'gts.x.unit.structured.xref.v1~';
+    gts.register({
+      $id: `gts://${typeId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { link: { type: 'string', 'x-gts-ref': '/unsupported' } },
+    });
+
+    const result = gts.validateSchema(typeId);
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ instancePath: '/properties/link/x-gts-ref', keyword: 'x-gts-ref' }),
+      ])
+    );
+  });
+
+  test('reports derivation issues at the derived property path', () => {
+    const gts = new GTS();
+    const baseId = 'gts.x.unit.structured.derivation.v1~';
+    const derivedId = `${baseId}x.unit._.child.v1~`;
+    gts.register({
+      $id: `gts://${baseId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { level: { type: 'integer', maximum: 10 } },
+    });
+    gts.register({
+      $id: `gts://${derivedId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      allOf: [{ $ref: `gts://${baseId}` }, { type: 'object', properties: { level: { type: 'integer', maximum: 20 } } }],
+    });
+
+    const result = gts.validateSchema(derivedId);
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ instancePath: '/allOf/1/properties/level', keyword: 'x-gts-schema' }),
+      ])
+    );
+  });
+});
+
+describe('GTS file parsing', () => {
+  test('parses JSONC with comments and trailing commas', () => {
+    const result = parseGtsText('{ // comment\n "id": "gts.x.unit.parse.type.v1~x.unit._.item.v1",\n}', 'jsonc');
+
+    expect(result.ok).toBe(true);
+    expect(result.entities).toHaveLength(1);
+    expect(result.entities[0].id).toBe('gts.x.unit.parse.type.v1~x.unit._.item.v1');
+  });
+
+  test('parses YAML by explicit format', () => {
+    expect(parseGtsTextContent('id: gts.x.unit.parse.type.v1~x.unit._.yaml.v1', 'yaml')).toEqual({
+      id: 'gts.x.unit.parse.type.v1~x.unit._.yaml.v1',
+    });
+  });
+
+  test('returns a parse error without throwing from parseGtsText', () => {
+    const result = parseGtsText('{ nope', 'jsonc');
+
+    expect(result.ok).toBe(false);
+    expect(result.entities).toEqual([]);
+    expect(result.error).toContain('JSONC parse error');
+  });
+});

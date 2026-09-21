@@ -141,6 +141,39 @@ if (attr.resolved) {
 }
 ```
 
+### Source-aware diagnostics
+
+Use `registerAndValidateText()` when a client needs editor locations. The
+library never receives a file path or name — the caller passes only the raw
+text and its `format` (`'json' | 'jsonc' | 'yaml'`, derived on the client from
+its own file extension or content type) — so no filesystem information can
+appear in diagnostics. `instancePath` identifies the value semantically, while
+`source.value` and optional `source.key` contain absolute UTF-16 offsets and
+zero-based line/column coordinates. `entityIndex` identifies an entry in a
+top-level array.
+
+```typescript
+const result = gts.registerAndValidateText(sourceText, 'jsonc');
+for (const issue of result.errors) {
+  const { entityIndex, instancePath, source } = issue;
+  console.log(entityIndex, instancePath, source?.value.line, source?.value.column);
+}
+```
+
+For a missing required property, no key token exists, so the source span points
+to the containing object. Clients should use `source.key` when they want to
+underline an existing key and `source.value` otherwise.
+
+> **Privacy:** `ValidationIssue.data` and `ValidationIssue.params` may echo the
+> raw failing value from the instance being validated. Prefer `instancePath`
+> and `source` for display, and do not forward `data`/`params` to logs or
+> telemetry unless you have confirmed the payload contains no sensitive data.
+
+> **Side effect:** `registerAndValidateText()` registers every parseable entity
+> into the store even when the payload is invalid, and registration is not
+> rolled back. For all-or-nothing semantics, validate against a throwaway `GTS`
+> instance first and only register into your real store on success.
+
 ### Advanced Query Language
 
 The query language supports complex expressions with AND, OR, and NOT operators:

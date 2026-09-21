@@ -1,10 +1,14 @@
 import { createHash } from 'crypto';
 import Ajv from 'ajv';
+import AjvCore from 'ajv/dist/core';
+import Ajv2019 from 'ajv/dist/2019';
+import Ajv2020 from 'ajv/dist/2020';
 import { applyGtsFormats } from './formats';
 import {
   GtsConfig,
   JsonEntity,
   ValidationResult,
+  ValidationIssue,
   EntityConflictError,
   EntityContentDepthError,
   GTS_URI_PREFIX,
@@ -84,6 +88,8 @@ export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   private config: GtsConfig;
   private ajv: Ajv;
+  private ajv2019: Ajv2019;
+  private ajv2020: Ajv2020;
 
   constructor(config?: Partial<GtsConfig>) {
     this.config = {
@@ -92,25 +98,29 @@ export class GtsStore {
       allowEntityUpdates: config?.allowEntityUpdates ?? false,
     };
 
-    this.ajv = new Ajv({
+    const options = {
       strict: false,
       validateSchema: false,
       addUsedSchema: false,
       loadSchema: this.loadSchema.bind(this),
-      validateFormats: true, // ADR-0005: uuid/email/date-time/... are assertions, not annotations.
-      // P6-7: without this, `validate.errors` only ever has one entry, even
-      // when several keywords fail, making every caller's `.join('; ')`
-      // framing (`formatValidationError`'s call sites) dead code that
-      // silently drops every failure but the first. Multiple simultaneous
-      // failures are common (e.g. two properties of the wrong type at
-      // once), so a caller only ever seeing the first is a real gap, not a
-      // documented limitation worth keeping.
+      validateFormats: true,
       allErrors: true,
-    });
-    // ADR-0005 format assertions (uuid, email, date-time, date, time, uri,
-    // hostname, ipv4, ipv6, regex), shared by OP#6 (validateInstance) and
-    // OP#13 (validateSchemaTraits) since both compile against this.ajv.
+    };
+    this.ajv = new Ajv(options);
+    this.ajv2019 = new Ajv2019(options);
+    this.ajv2020 = new Ajv2020(options);
     applyGtsFormats(this.ajv);
+    applyGtsFormats(this.ajv2019);
+    applyGtsFormats(this.ajv2020);
+  }
+
+  // All three registries extend AjvCore, so the common base type lets callers
+  // use compile/addSchema/removeSchema/validateSchema without a cast.
+  private ajvForSchema(schema: any): AjvCore {
+    const dialect = typeof schema?.$schema === 'string' ? schema.$schema : '';
+    if (dialect.includes('2020-12')) return this.ajv2020;
+    if (dialect.includes('2019-09')) return this.ajv2019;
+    return this.ajv;
   }
 
   private async loadSchema(uri: string): Promise<any> {
@@ -185,7 +195,9 @@ export class GtsStore {
 
     const schemaUnchanged = !!previous && !replacing && previous.isSchema && entity.isSchema;
     if (previous?.isSchema && !schemaUnchanged) {
-      this.ajv.removeSchema(entity.id);
+      for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) {
+        ajv.removeSchema(entity.id);
+      }
     }
     this.byId.set(entity.id, entity);
 
@@ -197,7 +209,7 @@ export class GtsStore {
         if (!normalizedSchema.$id) {
           normalizedSchema.$id = entity.id;
         }
-        this.ajv.addSchema(normalizedSchema, entity.id);
+        this.ajvForSchema(normalizedSchema).addSchema(normalizedSchema, entity.id);
       } catch (err) {
         // Ignore malformed schemas; unchanged schemas do not reach this path.
       }
@@ -224,7 +236,9 @@ export class GtsStore {
     this.byId.delete(id);
     if (entity.isSchema) {
       try {
-        this.ajv.removeSchema(id);
+        for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) {
+          ajv.removeSchema(id);
+        }
       } catch (err) {
         // Ignore errors removing schema - mirrors the best-effort addSchema above.
       }
@@ -256,6 +270,13 @@ export class GtsStore {
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
   ): ValidationResult {
     return this.validateInstanceTransitive(gtsId, new Set(), new Map(), refValidation);
+  }
+
+  async validateInstanceAsync(
+    gtsId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): Promise<ValidationResult> {
+    return this.validateInstance(gtsId, refValidation);
   }
 
   private validateInstanceTransitive(
@@ -383,15 +404,17 @@ export class GtsStore {
 
       // §9.11.3 item 2 - the rightmost type in the chain must be instantiable
       if (GtsModifiers.isAbstract(schemaEntity.content)) {
+        const message = `Type '${obj.schemaId}' is abstract and cannot be directly instantiated`;
         return {
           id: gtsId,
           ok: false,
           valid: false,
-          error: `Type '${obj.schemaId}' is abstract and cannot be directly instantiated`,
+          error: message,
+          errors: [this.validationIssue(message, '/type', 'x-gts-abstract', { schemaId: obj.schemaId })],
         };
       }
 
-      const validate = this.ajv.compile(this.normalizeSchema(schemaEntity.content));
+      const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
       const isValid = validate(obj.content);
 
       if (!isValid) {
@@ -405,6 +428,7 @@ export class GtsStore {
           ok: false,
           valid: false,
           error: errors,
+          errors: this.validationIssuesFromAjv(validate.errors),
         };
       }
 
@@ -418,6 +442,7 @@ export class GtsStore {
           ok: false,
           valid: false,
           error: `x-gts-ref validation failed: ${errorMsgs}`,
+          errors: xGtsRefErrors.map((error) => this.xGtsRefIssue(error)),
         };
       }
       for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
@@ -476,32 +501,136 @@ export class GtsStore {
 
       // §9.11.3 item 2 - the rightmost type in the chain must be instantiable.
       if (GtsModifiers.isAbstract(schemaEntity.content)) {
+        const message = `Type '${typeId}' is abstract and cannot be directly instantiated`;
         return {
           id,
           ok: false,
-          error: `Type '${typeId}' is abstract and cannot be directly instantiated`,
+          error: message,
+          errors: [this.validationIssue(message, '/type', 'x-gts-abstract', { schemaId: typeId })],
         };
       }
 
-      const validate = this.ajv.compile(this.normalizeSchema(schemaEntity.content));
+      const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
       const isValid = validate(content);
 
       if (!isValid) {
         const errors = validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
-        return { id, ok: false, error: errors };
+        return { id, ok: false, error: errors, errors: this.validationIssuesFromAjv(validate.errors) };
       }
 
       const xGtsRefValidator = new XGtsRefValidator(this);
       const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content, '', typeId);
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
-        return { id, ok: false, error: `x-gts-ref validation failed: ${errorMsgs}` };
+        return {
+          id,
+          ok: false,
+          error: `x-gts-ref validation failed: ${errorMsgs}`,
+          errors: xGtsRefErrors.map((error) => this.xGtsRefIssue(error)),
+        };
       }
 
       return { id, ok: true, error: '' };
     } catch (error) {
       return { id, ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  private validationIssueFromAjv(error: import('ajv').ErrorObject, instancePathPrefix: string = ''): ValidationIssue {
+    const instancePath = `${instancePathPrefix}${error.instancePath}` || '/';
+    return {
+      instancePath,
+      schemaPath: error.schemaPath || '#',
+      keyword: error.keyword,
+      message: error.message || 'Validation failed',
+      params: error.params as Record<string, unknown>,
+      data: error.data,
+    };
+  }
+
+  private validationIssuesFromAjv(
+    errors: import('ajv').ErrorObject[] | null | undefined,
+    instancePathPrefix: string = ''
+  ): ValidationIssue[] {
+    return (errors || []).map((error) => this.validationIssueFromAjv(error, instancePathPrefix));
+  }
+
+  private validationIssue(
+    message: string,
+    instancePath: string,
+    keyword: string,
+    params: Record<string, unknown> = {}
+  ): ValidationIssue {
+    return { instancePath, schemaPath: '#', keyword, message, params };
+  }
+
+  private xGtsRefIssue(error: {
+    fieldPath: string;
+    reason: string;
+    value: unknown;
+    refPattern: string;
+  }): ValidationIssue {
+    const normalized = error.fieldPath
+      .replace(/\[(\d+)\]/g, '/$1')
+      .replace(/\./g, '/')
+      .replace(/^\/?/, '/');
+    return this.validationIssue(error.reason, normalized === '//' ? '/' : normalized, 'x-gts-ref', {
+      value: error.value,
+      refPattern: error.refPattern,
+    });
+  }
+
+  // Best-effort mapping of a derivation message's property name to a JSON
+  // Pointer into the schema document. It only walks `properties`/`items`/`allOf`
+  // and cannot resolve `oneOf`/`anyOf`/`$ref` composition; callers fall back to
+  // `/$id` when it returns null. The property name is recovered from the
+  // human-readable message, so it is tied to `compareOverlayToBase` wording.
+  private findSchemaPropertyPath(content: any, propertyPath: string): string | null {
+    const parts = propertyPath.split('.');
+    const walk = (node: any, currentPath: string): string | null => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.properties && typeof node.properties === 'object') {
+        let current = node.properties;
+        let path = currentPath ? `${currentPath}/properties` : '/properties';
+        let found = true;
+        for (const part of parts) {
+          if (current?.[part] !== undefined) {
+            path += `/${part}`;
+            current = current[part];
+          } else if (current?.properties?.[part] !== undefined) {
+            path += `/properties/${part}`;
+            current = current.properties[part];
+          } else if (current?.items && part === 'items') {
+            path += '/items';
+            current = current.items;
+          } else {
+            found = false;
+            break;
+          }
+        }
+        if (found) return path;
+      }
+      if (Array.isArray(node.allOf)) {
+        for (let index = 0; index < node.allOf.length; index++) {
+          const result = walk(node.allOf[index], `${currentPath}/allOf/${index}`);
+          if (result) return result;
+        }
+      }
+      return null;
+    };
+    return walk(content, '');
+  }
+
+  private derivationIssues(content: any, messages: string[]): ValidationIssue[] {
+    return messages.map((message) => {
+      const property = message.match(/^Property '([^']+)'/)?.[1];
+      return this.validationIssue(
+        message,
+        property ? this.findSchemaPropertyPath(content, property) || '/$id' : '/$id',
+        'x-gts-schema',
+        property ? { property } : {}
+      );
+    });
   }
 
   /**
@@ -551,6 +680,15 @@ export class GtsStore {
 
       const newKey = key;
       let newValue = value;
+      if (key === '$schema' && typeof value === 'string') {
+        if (value.includes('json-schema.org/draft-07/schema')) {
+          newValue = 'http://json-schema.org/draft-07/schema#';
+        } else if (value.includes('json-schema.org/draft/2019-09/schema')) {
+          newValue = 'https://json-schema.org/draft/2019-09/schema';
+        } else if (value.includes('json-schema.org/draft/2020-12/schema')) {
+          newValue = 'https://json-schema.org/draft/2020-12/schema';
+        }
+      }
 
       // Recursively normalize nested objects
       if (value && typeof value === 'object') {
@@ -1096,7 +1234,7 @@ export class GtsStore {
   validateCastResult(toSchema: any, casted: any): string | null {
     try {
       const modifiedSchema = this.removeGtsConstConstraints(toSchema);
-      const validate = this.ajv.compile(this.normalizeSchema(modifiedSchema));
+      const validate = this.ajvForSchema(toSchema).compile(this.normalizeSchema(modifiedSchema));
       if (!validate(casted)) {
         // P6-4: shared formatter, so a cast-result failure reads the same
         // way as every other validation path instead of raw Ajv wording.
@@ -1176,6 +1314,56 @@ export class GtsStore {
     return unique.sort();
   }
 
+  private validateSchemaDocument(content: any, schemaId: string): ValidationResult {
+    try {
+      const normalized = this.normalizeSchema(content);
+      const ajv = this.ajvForSchema(normalized);
+      const metaOk = ajv.validateSchema(normalized);
+      if (metaOk) return { id: schemaId, ok: true, error: '' };
+      const issues = this.validationIssuesFromAjv(ajv.errors);
+      const error = (ajv.errors || []).map((item) => this.formatValidationError(item)).join('; ');
+      return {
+        id: schemaId,
+        ok: false,
+        error: `JSON Schema validation failed: ${error}`,
+        errors: issues,
+      };
+    } catch (error) {
+      const message = `JSON Schema validation failed: ${error instanceof Error ? error.message : String(error)}`;
+      return {
+        id: schemaId,
+        ok: false,
+        error: message,
+        errors: [this.validationIssue(message, '/$schema', 'schema')],
+      };
+    }
+  }
+
+  validateSchema(
+    schemaId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult {
+    const entity = this.get(schemaId);
+    if (!entity) {
+      const message = `Entity not found: ${schemaId}`;
+      return { id: schemaId, ok: false, error: message, errors: [this.validationIssue(message, '/$id', 'schema')] };
+    }
+    if (!entity.isSchema) {
+      const message = `Entity is not a schema: ${schemaId}`;
+      return { id: schemaId, ok: false, error: message, errors: [this.validationIssue(message, '/$id', 'schema')] };
+    }
+    const documentResult = this.validateSchemaDocument(entity.content, schemaId);
+    if (!documentResult.ok) return documentResult;
+    return this.validateSchemaAgainstParent(schemaId, refValidation);
+  }
+
+  async validateSchemaAsync(
+    schemaId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): Promise<ValidationResult> {
+    return this.validateSchema(schemaId, refValidation);
+  }
+
   /**
    * OP#6 `POST /validate-json` (transient JSON validation, spec commit
    * ab1287e) - validates a candidate type schema document WITHOUT
@@ -1197,12 +1385,8 @@ export class GtsStore {
    */
   validateTransientSchema(content: any, schemaId: string): ValidationResult {
     try {
-      const normalized = this.normalizeSchema(content);
-      const metaOk = this.ajv.validateSchema(normalized);
-      if (!metaOk) {
-        const errors = (this.ajv.errors || []).map((e) => this.formatValidationError(e)).join('; ');
-        return { id: schemaId, ok: false, error: `JSON Schema validation failed: ${errors}` };
-      }
+      const documentResult = this.validateSchemaDocument(content, schemaId);
+      if (!documentResult.ok) return documentResult;
 
       // §9.11.5 - the explicit validation endpoints always enforce the guards.
       const ruleError = this.checkTypeSchemaRules(content, schemaId, { enforceGuards: true });
@@ -1240,7 +1424,12 @@ export class GtsStore {
       const inheritsViaRef = this.inheritsParentViaRef(content, parentId);
       const errors = this.compareOverlayToBase(overlay, resolvedParent, '', inheritsViaRef);
       if (errors.length > 0) {
-        return { id: schemaId, ok: false, error: `Derived schema is not compatible with base: ${errors.join('; ')}` };
+        return {
+          id: schemaId,
+          ok: false,
+          error: `Derived schema is not compatible with base: ${errors.join('; ')}`,
+          errors: this.derivationIssues(content, errors),
+        };
       }
 
       return { id: schemaId, ok: true, error: '' };
@@ -1460,12 +1649,22 @@ export class GtsStore {
       }
 
       const schemaRefValidator = new XGtsRefValidator(this, refValidation);
+      const declarationErrors = schemaRefValidator.validateSchema(content);
+      if (declarationErrors.length > 0) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: `x-gts-ref validation failed: ${declarationErrors.map((error) => error.reason).join('; ')}`,
+          errors: declarationErrors.map((error) => this.xGtsRefIssue(error)),
+        };
+      }
       const xGtsRefErrors = schemaRefValidator.validateSchemaRefExistence(content, '', schemaId);
       if (xGtsRefErrors.length > 0) {
         return {
           id: schemaId,
           ok: false,
           error: `x-gts-ref validation failed: ${xGtsRefErrors.map((error) => error.reason).join('; ')}`,
+          errors: xGtsRefErrors.map((error) => this.xGtsRefIssue(error)),
         };
       }
       for (const dependencyId of schemaRefValidator.getReferencedIds()) {
@@ -1515,7 +1714,12 @@ export class GtsStore {
       const inheritsViaRef = this.inheritsParentViaRef(content, parentId);
       const errors = this.compareOverlayToBase(overlay, resolvedParent, '', inheritsViaRef);
       if (errors.length > 0) {
-        return { id: schemaId, ok: false, error: errors.join('; ') };
+        return {
+          id: schemaId,
+          ok: false,
+          error: errors.join('; '),
+          errors: this.derivationIssues(content, errors),
+        };
       }
 
       // OP#13: Validate schema traits across the inheritance chain
@@ -1674,7 +1878,12 @@ export class GtsStore {
       if (!validate(materialized)) {
         const errors =
           validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
-        return { id: schemaId, ok: false, error: `trait validation: ${errors}` };
+        return {
+          id: schemaId,
+          ok: false,
+          error: `trait validation: ${errors}`,
+          errors: this.validationIssuesFromAjv(validate.errors, '/x-gts-traits'),
+        };
       }
     } catch (e) {
       return {
@@ -1726,6 +1935,7 @@ export class GtsStore {
         id: schemaId,
         ok: false,
         error: `x-gts-ref validation failed: ${xGtsRefErrors.map((err) => err.reason).join('; ')}`,
+        errors: xGtsRefErrors.map((error) => this.xGtsRefIssue(error)),
       };
     }
     for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
