@@ -26,9 +26,13 @@ function jsoncParseIssue(text: string, error: ParseError): ValidationIssue {
   };
 }
 
-export function parseJSONC(text: string): unknown {
+export function parseJSONC(text: string, strict: boolean = false): unknown {
   const errors: ParseError[] = [];
-  const content = parseJsonc(text, errors, { allowTrailingComma: true, allowEmptyContent: false });
+  const content = parseJsonc(text, errors, {
+    allowTrailingComma: !strict,
+    allowEmptyContent: false,
+    disallowComments: strict,
+  });
   if (errors.length > 0) {
     const issues = errors.map((error) => jsoncParseIssue(text, error));
     throw new GtsTextParseError(`JSONC parse error: ${issues.map((issue) => issue.message).join(', ')}`, issues);
@@ -36,9 +40,9 @@ export function parseJSONC(text: string): unknown {
   return content;
 }
 
-export function tryParseJSONC(text: string): unknown | null {
+export function tryParseJSONC(text: string, strict: boolean = false): unknown | null {
   try {
-    return parseJSONC(text);
+    return parseJSONC(text, strict);
   } catch {
     return null;
   }
@@ -75,7 +79,7 @@ export function tryParseYAML(text: string): unknown | null {
 }
 
 export function parseGtsTextContent(text: string, format: GtsTextFormat = 'jsonc'): unknown {
-  return format === 'yaml' ? parseYAML(text) : parseJSONC(text);
+  return format === 'yaml' ? parseYAML(text) : parseJSONC(text, format === 'json');
 }
 
 export function parseGtsText(text: string, format: GtsTextFormat = 'jsonc'): GtsTextParseResult {

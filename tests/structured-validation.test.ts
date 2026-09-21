@@ -154,6 +154,13 @@ describe('GTS file parsing', () => {
     expect(result.entities[0].id).toBe('gts.x.unit.parse.type.v1~x.unit._.item.v1');
   });
 
+  test('rejects JSONC extensions in strict JSON mode', () => {
+    const text = '{ // comment\n "id": "gts.x.unit.parse.type.v1~x.unit._.strict.v1",\n}';
+
+    expect(parseGtsText(text, 'json').ok).toBe(false);
+    expect(parseGtsText(text, 'jsonc').ok).toBe(true);
+  });
+
   test('parses YAML by explicit format', () => {
     expect(parseGtsTextContent('id: gts.x.unit.parse.type.v1~x.unit._.yaml.v1', 'yaml')).toEqual({
       id: 'gts.x.unit.parse.type.v1~x.unit._.yaml.v1',
