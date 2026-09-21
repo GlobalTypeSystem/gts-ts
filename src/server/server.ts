@@ -366,12 +366,9 @@ export class GtsServer {
         }
       }
 
-      // Register the entity
-      const previous = this.store.register(content, options?.forceIsSchema);
-
       // Validate instance if requested
       if (validate && !entity.isSchema) {
-        const result = this.store.validateInstance(entity.id, refValidation);
+        const result = this.store.validateTransientInstance(content, entity.schemaId!, entity.id, refValidation);
         if (!result.ok) {
           reply.code(422);
           return {
@@ -381,6 +378,9 @@ export class GtsServer {
           };
         }
       }
+
+      // Register the entity
+      const previous = this.store.register(content, options?.forceIsSchema);
 
       // A derived schema (chained `$id`) must be compatible with its GTS
       // chain parent - e.g. it cannot drop a `required` field the parent

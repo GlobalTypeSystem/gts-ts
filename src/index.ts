@@ -326,8 +326,13 @@ export class GTS {
    * validates candidate instance JSON against an already-registered type,
    * without requiring the candidate itself to be registered.
    */
-  validateTransientInstance(content: any, typeId: string, resultId: string | null): ValidationResult {
-    return this.store.validateTransientInstance(content, typeId, resultId);
+  validateTransientInstance(
+    content: any,
+    typeId: string,
+    resultId: string | null,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult {
+    return this.store.validateTransientInstance(content, typeId, resultId, refValidation);
   }
 
   validateEntity(

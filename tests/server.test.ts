@@ -197,6 +197,67 @@ describe('POST /entities?validate=true rolls back a parent-incompatibility rejec
   });
 });
 
+describe('POST /entities?validate=true validates instances before registration', () => {
+  const typeId = 'gts.x.unit.srv.instancegate.v1~';
+  const instanceId = `${typeId}x.unit._.item.v1`;
+  const schema = {
+    $id: `gts://${typeId}`,
+    $schema: DRAFT7,
+    type: 'object',
+    required: ['value'],
+    properties: { value: { type: 'string' } },
+  };
+
+  test('a rejected new instance is not retrievable afterwards', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    expect((await server.instance.inject({ method: 'POST', url: '/entities', payload: schema })).statusCode).toBe(200);
+    const register = jest.spyOn(server['store'], 'register');
+
+    const rejected = await server.instance.inject({
+      method: 'POST',
+      url: '/entities?validate=true',
+      payload: { id: instanceId, type: typeId, value: 42 },
+    });
+    expect(rejected.statusCode).toBe(422);
+    expect(register).not.toHaveBeenCalled();
+
+    const stored = await server.instance.inject({ method: 'GET', url: `/entities/${encodeURIComponent(instanceId)}` });
+    expect(stored.statusCode).toBe(200);
+    expect(JSON.parse(stored.body).ok).toBe(false);
+
+    await server.stop();
+  });
+
+  test('a rejected replacement leaves the previous valid instance untouched', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0, allowEntityUpdates: true });
+    expect((await server.instance.inject({ method: 'POST', url: '/entities', payload: schema })).statusCode).toBe(200);
+    expect(
+      (
+        await server.instance.inject({
+          method: 'POST',
+          url: '/entities',
+          payload: { id: instanceId, type: typeId, value: 'original' },
+        })
+      ).statusCode
+    ).toBe(200);
+    const register = jest.spyOn(server['store'], 'register');
+
+    const rejected = await server.instance.inject({
+      method: 'POST',
+      url: '/entities?validate=true',
+      payload: { id: instanceId, type: typeId, value: 42 },
+    });
+    expect(rejected.statusCode).toBe(422);
+    expect(register).not.toHaveBeenCalled();
+
+    const stored = await server.instance.inject({ method: 'GET', url: `/entities/${encodeURIComponent(instanceId)}` });
+    expect(stored.statusCode).toBe(200);
+    expect(JSON.parse(stored.body)).toMatchObject({ ok: true, content: { value: 'original' } });
+
+    await server.stop();
+  });
+});
+
 describe('POST /cast reports three-valued compatibility verdicts (spec 0.13 §9.2)', () => {
   // Phase 1 - this is the httprunner canonical case
   // `TestCaseTestOp9Cast_DistinctDialects` (test_op9_version_casting.py:566)

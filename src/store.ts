@@ -279,11 +279,21 @@ export class GtsStore {
     return this.validateInstance(gtsId, refValidation);
   }
 
+  validateTransientInstance(
+    content: any,
+    typeId: string,
+    resultId: string | null,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult {
+    return this.validateInstanceTransitive(resultId ?? '', new Set(), new Map(), refValidation, { content, typeId });
+  }
+
   private validateInstanceTransitive(
     gtsId: string,
     visiting: Set<string>,
     completed: Map<string, ValidationResult>,
-    refValidation: GtsRefValidationMode
+    refValidation: GtsRefValidationMode,
+    candidate?: { content: any; typeId: string }
   ): ValidationResult {
     const key = `instance:${gtsId}`;
     const cached = completed.get(key);
@@ -293,23 +303,35 @@ export class GtsStore {
     visiting.add(key);
     const referencedIds = new Set<string>();
     const wildcardPatterns = new Set<string>();
-    const localResult = this.validateInstanceLocal(gtsId, referencedIds, wildcardPatterns, refValidation);
+    const localResult = candidate
+      ? this.validateTransientInstanceLocal(
+          candidate.content,
+          candidate.typeId,
+          gtsId,
+          referencedIds,
+          wildcardPatterns,
+          refValidation
+        )
+      : this.validateInstanceLocal(gtsId, referencedIds, wildcardPatterns, refValidation);
     if (!localResult.ok) {
       visiting.delete(key);
       completed.set(key, localResult);
       return localResult;
     }
 
-    let objId = gtsId;
-    if (Gts.isValidGtsID(gtsId)) objId = Gts.parseGtsID(gtsId).id;
-    const obj = this.get(objId)!;
-    const typeResult = this.validateSchemaTransitive(obj.schemaId!, visiting, completed, refValidation);
+    let typeId = candidate?.typeId;
+    if (!typeId) {
+      let objId = gtsId;
+      if (Gts.isValidGtsID(gtsId)) objId = Gts.parseGtsID(gtsId).id;
+      typeId = this.get(objId)!.schemaId!;
+    }
+    const typeResult = this.validateSchemaTransitive(typeId, visiting, completed, refValidation);
     if (!typeResult.ok) {
       const result = {
         id: gtsId,
         ok: false,
         valid: false,
-        error: `Instance type '${obj.schemaId}' is invalid: ${typeResult.error}`,
+        error: `Instance type '${typeId}' is invalid: ${typeResult.error}`,
       };
       visiting.delete(key);
       completed.set(key, result);
@@ -488,8 +510,14 @@ export class GtsStore {
    * too - closing the same junk-document-compiles-as-schema hole for the
    * auto-detect route that P6-2/P6-3 closed for the explicit-type route.
    */
-  validateTransientInstance(content: any, typeId: string, resultId: string | null): ValidationResult {
-    const id = resultId ?? '';
+  private validateTransientInstanceLocal(
+    content: any,
+    typeId: string,
+    id: string,
+    referencedIds: Set<string>,
+    wildcardPatterns: Set<string>,
+    refValidation: GtsRefValidationMode
+  ): ValidationResult {
     try {
       const schemaEntity = this.get(typeId);
       if (!schemaEntity) {
@@ -518,7 +546,7 @@ export class GtsStore {
         return { id, ok: false, error: errors, errors: this.validationIssuesFromAjv(validate.errors) };
       }
 
-      const xGtsRefValidator = new XGtsRefValidator(this);
+      const xGtsRefValidator = new XGtsRefValidator(this, refValidation);
       const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content, '', typeId);
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
@@ -528,6 +556,12 @@ export class GtsStore {
           error: `x-gts-ref validation failed: ${errorMsgs}`,
           errors: xGtsRefErrors.map((error) => this.xGtsRefIssue(error)),
         };
+      }
+      for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
+        referencedIds.add(dependencyId);
+      }
+      for (const pattern of xGtsRefValidator.getReferencedWildcardPatterns()) {
+        wildcardPatterns.add(pattern);
       }
 
       return { id, ok: true, error: '' };
