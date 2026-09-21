@@ -695,7 +695,27 @@ export class GtsStore {
         newValue = this.normalizeSchemaRecursive(value);
       }
 
-      normalized[newKey] = newValue;
+      Object.defineProperty(normalized, newKey, {
+        value: newValue,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+
+    const protoSchema = Object.getOwnPropertyDescriptor(normalized.properties || {}, '__proto__')?.value;
+    if (protoSchema !== undefined) {
+      delete normalized.properties.__proto__;
+      const patternProperties = normalized.patternProperties || {};
+      const exactProtoPattern = '^__proto__$';
+      const existing = Object.getOwnPropertyDescriptor(patternProperties, exactProtoPattern)?.value;
+      Object.defineProperty(patternProperties, exactProtoPattern, {
+        value: existing === undefined ? protoSchema : { allOf: [existing, protoSchema] },
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+      normalized.patternProperties = patternProperties;
     }
 
     // Clean up combinator arrays: remove subschemas that were x-gts-ref-only (now empty after stripping)

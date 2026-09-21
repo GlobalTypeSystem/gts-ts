@@ -25,6 +25,22 @@ describe('structured validation results', () => {
     );
   });
 
+  test('preserves __proto__ property constraints while normalizing schemas', () => {
+    const gts = new GTS();
+    const typeId = 'gts.x.unit.structured.proto.v1~';
+    gts.register({
+      $id: `gts://${typeId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: JSON.parse('{"__proto__":{"type":"string"}}'),
+    });
+
+    const result = gts.validateTransientInstance(JSON.parse('{"__proto__":42}'), typeId, null);
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([expect.objectContaining({ instancePath: '/__proto__' })]));
+  });
+
   test('meta-validates a registered schema with structured issues', () => {
     const gts = new GTS();
     const typeId = 'gts.x.unit.structured.meta.v1~';
