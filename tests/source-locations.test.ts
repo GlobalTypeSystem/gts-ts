@@ -1,4 +1,4 @@
-import { GTS, ValidationIssue } from '../src';
+import { GTS, GtsRefValidationMode, ValidationIssue } from '../src';
 
 function issueAt(result: { errors: ValidationIssue[] }, entityIndex: number, instancePath: string): ValidationIssue {
   const issue = result.errors.find(
@@ -109,6 +109,54 @@ name: 42
     expect(result.ok).toBe(false);
     expectSource(text, issue, '42', 'name');
     expect(issue.message).not.toContain('private-name.yaml');
+  });
+
+  test('preserves escaped property segments in x-gts-ref locations', () => {
+    const gts = new GTS();
+    const typeId = 'gts.x.unit.location.pointer.v1~';
+    const property = 'a.b/c~d';
+    gts.register({
+      $id: `gts://${typeId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { [property]: { type: 'string', 'x-gts-ref': 'gts.x.unit.expected.type.v1~' } },
+    });
+    const text = `{
+  "id": "${typeId}x.unit._.one.v1",
+  "type": "${typeId}",
+  "${property}": "gts.x.unit.actual.type.v1~"
+}`;
+
+    const result = gts.registerAndValidateText(text, 'json', GtsRefValidationMode.None);
+    const issue = issueAt(result, 0, '/a.b~1c~0d');
+
+    expect(result.ok).toBe(false);
+    expectSource(text, issue, '"gts.x.unit.actual.type.v1~"', `"${property}"`);
+  });
+
+  test('preserves escaped property segments in derivation locations', () => {
+    const gts = new GTS();
+    const baseId = 'gts.x.unit.location.pointerbase.v1~';
+    const derivedId = `${baseId}x.unit._.pointerchild.v1~`;
+    const property = 'a.b/c~d';
+    gts.register({
+      $id: `gts://${baseId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { [property]: { type: 'string' } },
+    });
+    const text = `{
+  "$id": "gts://${derivedId}",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": { "${property}": { "type": "number" } }
+}`;
+
+    const result = gts.registerAndValidateText(text, 'json');
+    const issue = issueAt(result, 0, '/properties/a.b~1c~0d');
+
+    expect(result.ok).toBe(false);
+    expectSource(text, issue, '{ "type": "number" }', `"${property}"`);
   });
 
   test('reports parse positions without putting the filename in the message', () => {

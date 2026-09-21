@@ -1661,7 +1661,7 @@ describe('x-gts-ref schema existence traversal', () => {
     const errors = validator.validateSchemaRefExistence(schema);
 
     expect(errors).toHaveLength(1);
-    expect(errors[0].fieldPath).toBe('properties/x-gts-ref/x-gts-ref');
+    expect(errors[0].fieldPath).toBe('/properties/x-gts-ref/x-gts-ref');
   });
 
   test('recognizes only the reserved /$id self-reference', () => {
@@ -1763,7 +1763,7 @@ describe('x-gts-ref array tuple traversal', () => {
     });
 
     expect(errors).toHaveLength(1);
-    expect(errors[0].fieldPath).toBe('[1]');
+    expect(errors[0].fieldPath).toBe('/1');
   });
 
   test('uses items only after Draft 2020-12 prefixItems', () => {
@@ -1774,7 +1774,7 @@ describe('x-gts-ref array tuple traversal', () => {
     });
 
     expect(errors).toHaveLength(1);
-    expect(errors[0].fieldPath).toBe('[1]');
+    expect(errors[0].fieldPath).toBe('/1');
   });
 });
 

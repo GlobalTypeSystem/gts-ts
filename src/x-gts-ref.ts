@@ -25,27 +25,35 @@ const SCHEMA_VALUE_KEYWORDS = new Set([
 const SCHEMA_ARRAY_KEYWORDS = new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems']);
 const SCHEMA_MAP_KEYWORDS = new Set(['$defs', 'definitions', 'dependentSchemas', 'properties', 'patternProperties']);
 
+export function escapeJsonPointerSegment(segment: string | number): string {
+  return String(segment).replace(/~/g, '~0').replace(/\//g, '~1');
+}
+
+function appendJsonPointer(path: string, segment: string | number): string {
+  return `${path}/${escapeJsonPointerSegment(segment)}`;
+}
+
 export function visitJsonSubschemas(schema: any, path: string, visit: (subschema: any, path: string) => void): void {
   for (const [key, value] of Object.entries(schema)) {
-    const nestedPath = path ? `${path}/${key}` : key;
+    const nestedPath = appendJsonPointer(path, key);
     if (SCHEMA_VALUE_KEYWORDS.has(key)) {
       visit(value, nestedPath);
     } else if (SCHEMA_ARRAY_KEYWORDS.has(key) && Array.isArray(value)) {
-      value.forEach((item, index) => visit(item, `${nestedPath}[${index}]`));
+      value.forEach((item, index) => visit(item, appendJsonPointer(nestedPath, index)));
     } else if (SCHEMA_MAP_KEYWORDS.has(key) && value && typeof value === 'object' && !Array.isArray(value)) {
       for (const [name, childSchema] of Object.entries(value)) {
-        visit(childSchema, `${nestedPath}/${name}`);
+        visit(childSchema, appendJsonPointer(nestedPath, name));
       }
     } else if (key === 'items') {
       if (Array.isArray(value)) {
-        value.forEach((item, index) => visit(item, `${nestedPath}[${index}]`));
+        value.forEach((item, index) => visit(item, appendJsonPointer(nestedPath, index)));
       } else {
         visit(value, nestedPath);
       }
     } else if (key === 'dependencies' && value && typeof value === 'object' && !Array.isArray(value)) {
       for (const [name, dependency] of Object.entries(value)) {
         if (!Array.isArray(dependency)) {
-          visit(dependency, `${nestedPath}/${name}`);
+          visit(dependency, appendJsonPointer(nestedPath, name));
         }
       }
     }
@@ -205,7 +213,7 @@ export class XGtsRefValidator {
       if (instance && typeof instance === 'object') {
         for (const propName in schema.properties) {
           if (propName in instance) {
-            const propPath = path ? `${path}.${propName}` : propName;
+            const propPath = appendJsonPointer(path, propName);
             this.visitInstance(
               instance[propName],
               schema.properties[propName],
@@ -225,34 +233,34 @@ export class XGtsRefValidator {
       if (Array.isArray(schema.prefixItems)) {
         schema.prefixItems.forEach((itemSchema: any, idx: number) => {
           if (idx < instance.length) {
-            const itemPath = `${path}[${idx}]`;
+            const itemPath = appendJsonPointer(path, idx);
             this.visitInstance(instance[idx], itemSchema, itemPath, rootSchema, errors, depth, pathBudget);
           }
         });
         if (schema.items && !Array.isArray(schema.items)) {
           instance.slice(schema.prefixItems.length).forEach((item, offset) => {
             const idx = schema.prefixItems.length + offset;
-            const itemPath = `${path}[${idx}]`;
+            const itemPath = appendJsonPointer(path, idx);
             this.visitInstance(item, schema.items, itemPath, rootSchema, errors, depth, pathBudget);
           });
         }
       } else if (Array.isArray(schema.items)) {
         schema.items.forEach((itemSchema: any, idx: number) => {
           if (idx < instance.length) {
-            const itemPath = `${path}[${idx}]`;
+            const itemPath = appendJsonPointer(path, idx);
             this.visitInstance(instance[idx], itemSchema, itemPath, rootSchema, errors, depth, pathBudget);
           }
         });
         if (schema.additionalItems && !Array.isArray(schema.additionalItems)) {
           instance.slice(schema.items.length).forEach((item, offset) => {
             const idx = schema.items.length + offset;
-            const itemPath = `${path}[${idx}]`;
+            const itemPath = appendJsonPointer(path, idx);
             this.visitInstance(item, schema.additionalItems, itemPath, rootSchema, errors, depth, pathBudget);
           });
         }
       } else if (schema.items) {
         instance.forEach((item, idx) => {
-          const itemPath = `${path}[${idx}]`;
+          const itemPath = appendJsonPointer(path, idx);
           this.visitInstance(item, schema.items, itemPath, rootSchema, errors, depth, pathBudget);
         });
       }
@@ -351,7 +359,7 @@ export class XGtsRefValidator {
 
     // Check for x-gts-ref field
     if (schema['x-gts-ref'] !== undefined) {
-      const refPath = path ? `${path}/x-gts-ref` : 'x-gts-ref';
+      const refPath = appendJsonPointer(path, 'x-gts-ref');
       const err = this.validateRefPattern(schema['x-gts-ref'], refPath);
       if (err) {
         errors.push(err);
@@ -522,7 +530,7 @@ export class XGtsRefValidator {
     if (!schema || typeof schema !== 'object') return;
 
     const ref = schema['x-gts-ref'];
-    const refPath = path ? `${path}/x-gts-ref` : 'x-gts-ref';
+    const refPath = appendJsonPointer(path, 'x-gts-ref');
     const resolvedRef = this.isSelfReference(ref) ? selectedTypeId : ref;
     if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.')) {
       if (resolvedRef.includes('*')) {

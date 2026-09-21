@@ -18,7 +18,7 @@ import {
 } from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
-import { visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
+import { escapeJsonPointerSegment, visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
 import { GtsCompatibility, findCrossedBound, isEmptySchema } from './compatibility';
 import { GtsModifiers } from './modifiers';
 
@@ -604,11 +604,7 @@ export class GtsStore {
     value: unknown;
     refPattern: string;
   }): ValidationIssue {
-    const normalized = error.fieldPath
-      .replace(/\[(\d+)\]/g, '/$1')
-      .replace(/\./g, '/')
-      .replace(/^\/?/, '/');
-    return this.validationIssue(error.reason, normalized === '//' ? '/' : normalized, 'x-gts-ref', {
+    return this.validationIssue(error.reason, error.fieldPath || '/', 'x-gts-ref', {
       value: error.value,
       refPattern: error.refPattern,
     });
@@ -619,8 +615,22 @@ export class GtsStore {
   // and cannot resolve `oneOf`/`anyOf`/`$ref` composition; callers fall back to
   // `/$id` when it returns null. The property name is recovered from the
   // human-readable message, so it is tied to `compareOverlayToBase` wording.
-  private findSchemaPropertyPath(content: any, propertyPath: string): string | null {
-    const parts = propertyPath.split('.');
+  private formatDiagnosticPropertyPath(parts: string[]): string {
+    return parts.some((part) => /[./~]/.test(part))
+      ? `/${parts.map(escapeJsonPointerSegment).join('/')}`
+      : parts.join('.');
+  }
+
+  private parseDiagnosticPropertyPath(path: string): string[] {
+    return path.startsWith('/')
+      ? path
+          .slice(1)
+          .split('/')
+          .map((part) => part.replace(/~1/g, '/').replace(/~0/g, '~'))
+      : path.split('.');
+  }
+
+  private findSchemaPropertyPath(content: any, parts: string[]): string | null {
     const walk = (node: any, currentPath: string): string | null => {
       if (!node || typeof node !== 'object') return null;
       if (node.properties && typeof node.properties === 'object') {
@@ -628,11 +638,12 @@ export class GtsStore {
         let path = currentPath ? `${currentPath}/properties` : '/properties';
         let found = true;
         for (const part of parts) {
+          const escapedPart = escapeJsonPointerSegment(part);
           if (current?.[part] !== undefined) {
-            path += `/${part}`;
+            path += `/${escapedPart}`;
             current = current[part];
           } else if (current?.properties?.[part] !== undefined) {
-            path += `/properties/${part}`;
+            path += `/properties/${escapedPart}`;
             current = current.properties[part];
           } else if (current?.items && part === 'items') {
             path += '/items';
@@ -660,7 +671,7 @@ export class GtsStore {
       const property = message.match(/^Property '([^']+)'/)?.[1];
       return this.validationIssue(
         message,
-        property ? this.findSchemaPropertyPath(content, property) || '/$id' : '/$id',
+        property ? this.findSchemaPropertyPath(content, this.parseDiagnosticPropertyPath(property)) || '/$id' : '/$id',
         'x-gts-schema',
         property ? { property } : {}
       );
@@ -1476,7 +1487,7 @@ export class GtsStore {
       const resolvedParent = this.resolveSchemaFully(parentEntity.content);
       const overlay = this.extractOverlay(content);
       const inheritsViaRef = this.inheritsParentViaRef(content, parentId);
-      const errors = this.compareOverlayToBase(overlay, resolvedParent, '', inheritsViaRef);
+      const errors = this.compareOverlayToBase(overlay, resolvedParent, [], inheritsViaRef);
       if (errors.length > 0) {
         return {
           id: schemaId,
@@ -1766,7 +1777,7 @@ export class GtsStore {
 
       // Compare overlay against resolved parent
       const inheritsViaRef = this.inheritsParentViaRef(content, parentId);
-      const errors = this.compareOverlayToBase(overlay, resolvedParent, '', inheritsViaRef);
+      const errors = this.compareOverlayToBase(overlay, resolvedParent, [], inheritsViaRef);
       if (errors.length > 0) {
         return {
           id: schemaId,
@@ -3101,7 +3112,7 @@ export class GtsStore {
   private compareOverlayToBase(
     overlay: ResolvedSchema,
     baseResolved: ResolvedSchema,
-    path: string,
+    path: string[],
     inheritsViaRef: boolean = true
   ): string[] {
     const errors: string[] = [];
@@ -3109,12 +3120,13 @@ export class GtsStore {
     const baseProps = baseResolved.properties || {};
 
     for (const [propName, propSchema] of Object.entries(overlayProps)) {
-      const propPath = path ? `${path}.${propName}` : propName;
+      const propPath = [...path, propName];
+      const displayPath = this.formatDiagnosticPropertyPath(propPath);
 
       // Property schema set to false
       if (propSchema === false) {
         if (baseProps[propName] !== undefined) {
-          errors.push(`Property '${propPath}' is set to false but exists in base`);
+          errors.push(`Property '${displayPath}' is set to false but exists in base`);
         }
         continue;
       }
@@ -3124,14 +3136,14 @@ export class GtsStore {
       if (baseProp === undefined || baseProp === null) {
         // New property not in base
         if (baseResolved.additionalProperties === false) {
-          errors.push(`Property '${propPath}' not in base and base has additionalProperties: false`);
+          errors.push(`Property '${displayPath}' not in base and base has additionalProperties: false`);
         }
         continue;
       }
 
       if (baseProp === false) {
         // Base already set property to false, overlay can't use it
-        errors.push(`Property '${propPath}' is forbidden in base`);
+        errors.push(`Property '${displayPath}' is forbidden in base`);
         continue;
       }
 
@@ -3148,8 +3160,9 @@ export class GtsStore {
       for (const propName of Object.keys(baseProps)) {
         if (baseProps[propName] === false) continue;
         if (!(propName in overlayProps)) {
-          const propPath = path ? `${path}.${propName}` : propName;
-          errors.push(`Property '${propPath}' is declared in base but excluded by additionalProperties: false`);
+          const propPath = [...path, propName];
+          const displayPath = this.formatDiagnosticPropertyPath(propPath);
+          errors.push(`Property '${displayPath}' is declared in base but excluded by additionalProperties: false`);
         }
       }
     }
@@ -3164,8 +3177,9 @@ export class GtsStore {
       const overlayRequired = new Set(overlay.required || []);
       for (const requiredProp of baseResolved.required || []) {
         if (!overlayRequired.has(requiredProp)) {
-          const propPath = path ? `${path}.${requiredProp}` : requiredProp;
-          errors.push(`Property '${propPath}' is required in base but not in derived`);
+          const propPath = [...path, requiredProp];
+          const displayPath = this.formatDiagnosticPropertyPath(propPath);
+          errors.push(`Property '${displayPath}' is required in base but not in derived`);
         }
       }
     }
@@ -3176,10 +3190,11 @@ export class GtsStore {
   private comparePropertyConstraints(
     derived: any,
     base: any,
-    propPath: string,
+    propPath: string[],
     inheritsViaRef: boolean = true
   ): string[] {
     const errors: string[] = [];
+    const displayPath = this.formatDiagnosticPropertyPath(propPath);
 
     if (typeof base !== 'object' || base === null) {
       return errors;
@@ -3196,7 +3211,7 @@ export class GtsStore {
     // intersection, which is exactly this question.
     const crossKeywordConflict = this.findValueConflict([derived, base]) || findCrossedBound([derived, base]);
     if (crossKeywordConflict) {
-      errors.push(`Property '${propPath}' cannot be satisfied: ${crossKeywordConflict}`);
+      errors.push(`Property '${displayPath}' cannot be satisfied: ${crossKeywordConflict}`);
     }
 
     // Type check
@@ -3206,7 +3221,7 @@ export class GtsStore {
       if (Array.isArray(derivedType)) {
         // Derived has array type — widening (fail)
         if (!Array.isArray(baseType)) {
-          errors.push(`Property '${propPath}' widens type from '${baseType}' to array`);
+          errors.push(`Property '${displayPath}' widens type from '${baseType}' to array`);
           return errors;
         }
       }
@@ -3214,14 +3229,14 @@ export class GtsStore {
         if (!Array.isArray(derivedType)) {
           // Could be narrowing from array type
           if (!baseType.includes(derivedType)) {
-            errors.push(`Property '${propPath}' type '${derivedType}' not in base types [${baseType}]`);
+            errors.push(`Property '${displayPath}' type '${derivedType}' not in base types [${baseType}]`);
             return errors;
           }
         }
       } else if (!Array.isArray(derivedType)) {
         // Both scalar types
         if (baseType !== derivedType) {
-          errors.push(`Property '${propPath}' type changed from '${baseType}' to '${derivedType}'`);
+          errors.push(`Property '${displayPath}' type changed from '${baseType}' to '${derivedType}'`);
           return errors;
         }
       }
@@ -3251,10 +3266,10 @@ export class GtsStore {
       if (base[kw] !== undefined) {
         if (derived[kw] === undefined) {
           if (!hasNewConstraints) {
-            errors.push(`Property '${propPath}' drops constraint '${kw}'`);
+            errors.push(`Property '${displayPath}' drops constraint '${kw}'`);
           }
         } else if (derived[kw] > base[kw]) {
-          errors.push(`Property '${propPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
+          errors.push(`Property '${displayPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
         }
       }
     }
@@ -3264,10 +3279,10 @@ export class GtsStore {
       if (base[kw] !== undefined) {
         if (derived[kw] === undefined) {
           if (!hasNewConstraints) {
-            errors.push(`Property '${propPath}' drops constraint '${kw}'`);
+            errors.push(`Property '${displayPath}' drops constraint '${kw}'`);
           }
         } else if (derived[kw] < base[kw]) {
-          errors.push(`Property '${propPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
+          errors.push(`Property '${displayPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
         }
       }
     }
@@ -3276,13 +3291,13 @@ export class GtsStore {
     if (base.enum !== undefined) {
       if (derived.enum === undefined) {
         if (!hasNewConstraints) {
-          errors.push(`Property '${propPath}' drops constraint 'enum'`);
+          errors.push(`Property '${displayPath}' drops constraint 'enum'`);
         }
       } else {
         const baseSet = new Set(base.enum.map((v: any) => JSON.stringify(v)));
         for (const val of derived.enum) {
           if (!baseSet.has(JSON.stringify(val))) {
-            errors.push(`Property '${propPath}' enum value '${val}' not in base enum`);
+            errors.push(`Property '${displayPath}' enum value '${val}' not in base enum`);
           }
         }
       }
@@ -3292,21 +3307,21 @@ export class GtsStore {
     if (base.const !== undefined) {
       if (derived.const === undefined) {
         if (!hasNewConstraints) {
-          errors.push(`Property '${propPath}' drops constraint 'const'`);
+          errors.push(`Property '${displayPath}' drops constraint 'const'`);
         }
       } else if (JSON.stringify(base.const) !== JSON.stringify(derived.const)) {
         errors.push(
-          `Property '${propPath}' const conflict: ${JSON.stringify(derived.const)} vs base ${JSON.stringify(base.const)}`
+          `Property '${displayPath}' const conflict: ${JSON.stringify(derived.const)} vs base ${JSON.stringify(base.const)}`
         );
       }
     }
     // Check const in derived against base numeric constraints
     if (derived.const !== undefined && typeof derived.const === 'number') {
       if (base.minimum !== undefined && derived.const < base.minimum) {
-        errors.push(`Property '${propPath}' const ${derived.const} violates base minimum ${base.minimum}`);
+        errors.push(`Property '${displayPath}' const ${derived.const} violates base minimum ${base.minimum}`);
       }
       if (base.maximum !== undefined && derived.const > base.maximum) {
-        errors.push(`Property '${propPath}' const ${derived.const} violates base maximum ${base.maximum}`);
+        errors.push(`Property '${displayPath}' const ${derived.const} violates base maximum ${base.maximum}`);
       }
     }
 
@@ -3314,10 +3329,10 @@ export class GtsStore {
     if (base.pattern !== undefined) {
       if (derived.pattern === undefined) {
         if (!hasNewConstraints) {
-          errors.push(`Property '${propPath}' drops constraint 'pattern'`);
+          errors.push(`Property '${displayPath}' drops constraint 'pattern'`);
         }
       } else if (base.pattern !== derived.pattern) {
-        errors.push(`Property '${propPath}' pattern changed from '${base.pattern}' to '${derived.pattern}'`);
+        errors.push(`Property '${displayPath}' pattern changed from '${base.pattern}' to '${derived.pattern}'`);
       }
     }
 
@@ -3325,10 +3340,12 @@ export class GtsStore {
     if (base.items !== undefined) {
       if (derived.items === undefined) {
         if (!hasNewConstraints) {
-          errors.push(`Property '${propPath}' drops constraint 'items'`);
+          errors.push(`Property '${displayPath}' drops constraint 'items'`);
         }
       } else if (typeof base.items === 'object' && typeof derived.items === 'object') {
-        errors.push(...this.comparePropertyConstraints(derived.items, base.items, `${propPath}.items`, inheritsViaRef));
+        errors.push(
+          ...this.comparePropertyConstraints(derived.items, base.items, [...propPath, 'items'], inheritsViaRef)
+        );
       }
     }
 
