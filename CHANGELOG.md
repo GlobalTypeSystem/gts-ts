@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Optional structured `ValidationIssue[]` details on `ValidationResult`, while preserving the existing joined `error` string.
-- Source-aware text validation through `registerAndValidateText(text, format)`, with array entity indexes and key/value spans containing absolute offsets and zero-based line/column coordinates. The library never accepts a file path or name, so none can appear in diagnostics; the caller supplies only the serialization `format` (`'json' | 'jsonc' | 'yaml'`).
+- Source-aware text validation through `registerAndValidateText(text, format)`, with array entity indexes and key/value spans containing absolute offsets and zero-based line/column coordinates for `json`, `jsonc`, `yaml`.
 - Full registered Type Schema validation through `validateSchema()` / `validateSchemaAsync()` and Promise-based `validateInstanceAsync()`.
 - Draft 2019-09 and Draft 2020-12 schema registries alongside Draft 7 validation.
 - JSONC/YAML text parsing APIs, including `parseGtsText(text, format)` entity extraction.
