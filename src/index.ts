@@ -89,19 +89,29 @@ export class GTS {
     const locator = new SourceLocator(format, text);
     const results: GtsEntityValidationResult[] = [];
     const registrationErrors = new Map<number, ValidationResult>();
+    const idCounts = new Map<string, number>();
+    for (const entity of parsed.entities) {
+      if (entity.id) idCounts.set(entity.id, (idCounts.get(entity.id) || 0) + 1);
+    }
+    const setRegistrationError = (entityIndex: number, id: string, message: string): void => {
+      const issue: ValidationIssue = {
+        instancePath: '/$id',
+        schemaPath: '#',
+        keyword: 'registration',
+        message,
+        params: {},
+      };
+      registrationErrors.set(entityIndex, { id, ok: false, error: message, errors: [issue] });
+    };
     parsed.entities.forEach((entity, entityIndex) => {
+      if ((idCounts.get(entity.id) || 0) > 1) {
+        setRegistrationError(entityIndex, entity.id, `Duplicate entity id in text payload: '${entity.id}'`);
+        return;
+      }
       try {
         this.store.register(entity);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const issue: ValidationIssue = {
-          instancePath: '/$id',
-          schemaPath: '#',
-          keyword: 'registration',
-          message,
-          params: {},
-        };
-        registrationErrors.set(entityIndex, { id: entity.id, ok: false, error: message, errors: [issue] });
+        setRegistrationError(entityIndex, entity.id, error instanceof Error ? error.message : String(error));
       }
     });
 

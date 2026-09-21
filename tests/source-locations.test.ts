@@ -171,6 +171,27 @@ name: 42
     expect(result.errors.every((issue) => !issue.message.includes('schemas.jsonc'))).toBe(true);
   });
 
+  test('rejects repeated entity IDs before registering a text batch', () => {
+    const gts = new GTS({ allowEntityUpdates: true });
+    const id = 'gts.x.unit.location.duplicate.v1~';
+    const text = `[
+  { "$id": "gts://${id}", "$schema": "http://json-schema.org/draft-07/schema#", "type": "string" },
+  { "$id": "gts://${id}", "$schema": "http://json-schema.org/draft-07/schema#", "type": "number" }
+]`;
+
+    const result = gts.registerAndValidateText(text, 'json');
+    const first = issueAt(result, 0, '/$id');
+    const second = issueAt(result, 1, '/$id');
+
+    expect(result.ok).toBe(false);
+    expect(result.entities.map((entry) => entry.result.ok)).toEqual([false, false]);
+    expect(first).toMatchObject({ keyword: 'registration', message: `Duplicate entity id in text payload: '${id}'` });
+    expect(second).toMatchObject({ keyword: 'registration', message: `Duplicate entity id in text payload: '${id}'` });
+    expect(gts.get(id)).toBeUndefined();
+    expectSource(text, first, `"gts://${id}"`, '"$id"');
+    expectSource(text, second, `"gts://${id}"`, '"$id"');
+  });
+
   test('distinguishes same-path and different-path errors in instance entries two and three', () => {
     const gts = new GTS();
     const typeId = 'gts.x.unit.location.instance_array.v1~';
