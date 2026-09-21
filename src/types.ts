@@ -164,6 +164,14 @@ export interface CastResult {
 export interface GtsConfig {
   validateRefs: boolean;
   strictMode: boolean;
+  /**
+   * Permits re-registering an entity with different content. When `false`
+   * (default), changing the content of an already-registered entity is
+   * rejected with an {@link EntityConflictError} while identical
+   * re-submissions stay idempotent. Mirrors gts-go's
+   * `RegistryConfig.AllowEntityUpdates` (`--allow-entity-updates`).
+   */
+  allowEntityUpdates: boolean;
 }
 
 /**
@@ -175,8 +183,17 @@ export interface GtsConfig {
  * look entities up. `GtsStore` satisfies this structurally, so no call site
  * changes and no import cycle.
  */
+export const GtsRefValidationMode = {
+  None: 'none',
+  AnyPresent: 'any-present',
+  AnyValid: 'any-valid',
+} as const;
+
+export type GtsRefValidationMode = (typeof GtsRefValidationMode)[keyof typeof GtsRefValidationMode];
+
 export interface EntityLookup {
   get(id: string): JsonEntity | undefined;
+  getAll?(): JsonEntity[];
 }
 
 export interface JsonEntity {
@@ -185,6 +202,26 @@ export interface JsonEntity {
   content: Record<string, any>;
   isSchema: boolean;
   references: Set<string>;
+}
+
+/**
+ * Thrown when an entity is already registered under the same id with
+ * different content and entity updates are not allowed
+ * ({@link GtsConfig.allowEntityUpdates} is `false`). Callers can surface this
+ * as an HTTP `409 Conflict`. Mirrors gts-go's `EntityConflictError`.
+ */
+export class EntityConflictError extends Error {
+  constructor(public entityId: string) {
+    super(`Entity '${entityId}' is already registered with different content`);
+    this.name = 'EntityConflictError';
+  }
+}
+
+export class EntityContentDepthError extends Error {
+  constructor() {
+    super(`Entity content nests deeper than ${MAX_SCHEMA_DEPTH} levels and cannot be compared safely`);
+    this.name = 'EntityContentDepthError';
+  }
 }
 
 export class InvalidGtsIDError extends Error {

@@ -3,6 +3,13 @@ export interface ServerConfig {
   port: number;
   verbose: number;
   path?: string;
+  /**
+   * Permits re-registering an entity with different content. When `false`
+   * (default), a changed re-registration is rejected with HTTP `409 Conflict`
+   * while identical re-submissions stay idempotent. Wired from the
+   * `--allow-entity-updates` CLI flag.
+   */
+  allowEntityUpdates?: boolean;
 }
 
 export interface EntityResponse {

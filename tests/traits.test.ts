@@ -201,6 +201,42 @@ describe('OP#13 - completeness is keyed on x-gts-abstract (ADR-0003)', () => {
     expect(gts.validateEntity(baseId).ok).toBe(true);
   });
 
+  test('abstract completeness preserves a required key inside const data', () => {
+    const gts = new GTS({ validateRefs: false });
+    const baseId = 'gts.x.unit.tr.abstractconst.v1~';
+    gts.register(
+      baseType(baseId, {
+        'x-gts-abstract': true,
+        'x-gts-traits-schema': {
+          type: 'object',
+          properties: { config: { const: { required: ['a'] } } },
+          required: ['unresolved'],
+        },
+        'x-gts-traits': { config: { required: ['a'] } },
+      })
+    );
+
+    expect(gts.validateEntity(baseId).ok).toBe(true);
+  });
+
+  test('abstract completeness preserves the schema of a property named required', () => {
+    const gts = new GTS({ validateRefs: false });
+    const baseId = 'gts.x.unit.tr.abstractrequired.v1~';
+    gts.register(
+      baseType(baseId, {
+        'x-gts-abstract': true,
+        'x-gts-traits-schema': {
+          type: 'object',
+          properties: { required: { type: 'string' } },
+          required: ['unresolved'],
+        },
+        'x-gts-traits': { required: 42 },
+      })
+    );
+
+    expect(gts.validateEntity(baseId).ok).toBe(false);
+  });
+
   test('a concrete descendant of an abstract base must close the gap', () => {
     const gts = new GTS({ validateRefs: false });
     const baseId = 'gts.x.unit.tr.closegap.v1~';
@@ -242,6 +278,21 @@ describe('OP#13 - boolean trait schemas (ADR-0002)', () => {
     gts.register(derivedType(kidId, baseId));
 
     expect(gts.validateEntity(kidId).ok).toBe(true);
+  });
+
+  test('`false` rejects a descendant that declares an object trait schema', () => {
+    const gts = new GTS({ validateRefs: false });
+    const baseId = 'gts.x.unit.tr.falseschema.v1~';
+    const kidId = `${baseId}x.unit._.kid.v1~`;
+
+    gts.register(baseType(baseId, { 'x-gts-traits-schema': false }));
+    gts.register(
+      derivedType(kidId, baseId, {
+        'x-gts-traits-schema': { type: 'object', properties: { retention: { type: 'string' } } },
+      })
+    );
+
+    expect(gts.validateEntity(kidId).ok).toBe(false);
   });
 
   test('`false` rejects any descendant that declares traits', () => {

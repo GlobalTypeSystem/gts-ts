@@ -26,6 +26,8 @@ import {
   CastResult,
   GtsConfig,
   EntityLookup,
+  JsonEntity,
+  GtsRefValidationMode,
 } from './types';
 
 export const isValidGtsID = (id: string): boolean => Gts.isValidGtsID(id);
@@ -52,9 +54,16 @@ export class GTS {
    * `GtsExtractor`'s document-shape heuristic, which cannot detect a schema
    * that embeds no `$schema`/root-type keyword at all.
    */
-  register(content: any, forceIsSchema?: boolean): void {
+  register(content: any, forceIsSchema?: boolean): JsonEntity | undefined {
     const entity = createJsonEntity(content, undefined, forceIsSchema);
-    this.store.register(entity);
+    return this.store.register(entity);
+  }
+
+  rollbackRegistration(id: string, previous?: JsonEntity): void {
+    this.store.unregister(id);
+    if (previous) {
+      this.store.register(previous);
+    }
   }
 
   /**
@@ -87,8 +96,8 @@ export class GTS {
     return entity ? entity.isSchema : undefined;
   }
 
-  validateInstance(id: string): ValidationResult {
-    return this.store.validateInstance(id);
+  validateInstance(id: string, refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid): ValidationResult {
+    return this.store.validateInstance(id, refValidation);
   }
 
   getAttribute(path: string): AttributeResult {
@@ -192,8 +201,11 @@ export class GTS {
    * Exposed directly because `validateEntity()` below applies it only after
    * first resolving `id` to an entity.
    */
-  validateSchemaAgainstParent(schemaId: string): ValidationResult {
-    return this.store.validateSchemaAgainstParent(schemaId);
+  validateSchemaAgainstParent(
+    schemaId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult {
+    return this.store.validateSchemaAgainstParent(schemaId, refValidation);
   }
 
   /**
@@ -213,7 +225,10 @@ export class GTS {
     return this.store.validateTransientInstance(content, typeId, resultId);
   }
 
-  validateEntity(id: string): ValidationResult & { entity_type: string } {
+  validateEntity(
+    id: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult & { entity_type: string } {
     const entity = this.store.get(id);
     if (!entity) {
       return { id, ok: false, error: `Entity not found: ${id}`, entity_type: 'unknown' };
@@ -222,10 +237,10 @@ export class GTS {
     if (entity.isSchema) {
       // Derivation and trait completeness are both type-level properties, so
       // /validate-entity applies exactly the same checks as OP#12 (§9.7.5).
-      const result = this.store.validateSchemaAgainstParent(id);
+      const result = this.store.validateSchemaAgainstParent(id, refValidation);
       return { ...result, entity_type: 'schema' };
     } else {
-      const result = this.store.validateInstance(id);
+      const result = this.store.validateInstance(id, refValidation);
       return { ...result, entity_type: 'instance' };
     }
   }

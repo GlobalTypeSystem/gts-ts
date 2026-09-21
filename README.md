@@ -6,7 +6,7 @@ A complete TypeScript implementation of the Global Type System (GTS)
 
 GTS [Global Type System](https://github.com/globaltypesystem/gts-spec) is a simple, human-readable, globally unique identifier and referencing system for data type definitions (e.g., JSON Schemas) and data instances (e.g., JSON objects). This TypeScript implementation provides type-safe operations for working with GTS identifiers.
 
-**Targets gts-spec [v0.13.3](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.3)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for the breaking changes in the v0.13.1 → v0.13.3 upgrade.
+**Targets gts-spec [v0.14.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.14.0)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for the breaking changes in the v0.13.3 → v0.14.0 upgrade.
 
 ## Roadmap
 
@@ -210,7 +210,16 @@ gts --path ./examples server --port 8001
 
 # Using the dedicated server command
 npx gts-server --host 127.0.0.1 --port 8000 --verbose 2
+
+# Allow re-registering an entity with different content (default: reject with 409)
+gts server --allow-entity-updates
+npx gts-server --allow-entity-updates
 ```
+
+By default the registry protects its state: re-`POST`ing an id that is already
+stored with **different** content is rejected with `409 Conflict`, while an
+identical re-submission is idempotent (`200`). Pass `--allow-entity-updates` to
+opt into replacement semantics.
 
 ### API Endpoints
 

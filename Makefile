@@ -1,6 +1,10 @@
 CI := 1
 
-.PHONY: help build dev-fmt all check fmt lint typecheck test security update-spec update-spec-latest e2e-deps e2e coverage
+.PHONY: help build dev-fmt all check fmt lint typecheck test security update-spec update-spec-latest e2e-deps e2e coverage gts-server
+
+# Host and port for the GTS server; override with `HOST=0.0.0.0 PORT=8001`.
+HOST ?= 127.0.0.1
+PORT ?= 8000
 
 # Virtualenv used by the gts-spec conformance suite
 VENV := .venv
@@ -80,6 +84,10 @@ $(VENV)/.stamp: .gts-spec/tests/requirements.txt
 	$(VENV)/bin/pip install --quiet -r .gts-spec/tests/requirements.txt
 	$(VENV)/bin/pip install --quiet --no-deps 'httprunner>=4,<5'
 	@touch $@
+
+# Run the GTS server in the foreground
+gts-server: build
+	node dist/server/index.js --host $(HOST) --port $(PORT)
 
 # Run end-to-end tests against gts-spec
 e2e: build e2e-deps

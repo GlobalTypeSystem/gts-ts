@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.3](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.3)**, reaching full canonical conformance (`make e2e`: 485/485).
+## [0.6.0] - 2026-09-16
+
+Upgrades the implementation from GTS spec **v0.13.3** to **[v0.14.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.14.0)**.
+
+### Breaking
+
+- Registering an entity under an existing id with different content now returns `409 Conflict` (`EntityConflictError`) by default instead of replacing it. Preserve replacement behavior by opting in with `new GTS({ allowEntityUpdates: true })` or `--allow-entity-updates`.
+- The exported `GtsConfig` interface now requires `allowEntityUpdates`; consumers constructing a complete `GtsConfig` value must set it explicitly. Constructors continue to accept `Partial<GtsConfig>`.
+- `x-gts-ref` existence is now enforced uniformly for referenced values across concrete references and wildcard patterns, including `gts.*`. Values that previously validated without a corresponding registered entity now fail validation.
+- Explicit Type Schema validation now rejects a concrete `x-gts-ref` constraint whose target is not a registered entity, including when that constraint is reached through a local JSON Schema `$ref`.
+- `validateInstance()` and `validateSchemaAgainstParent()` now validate dependencies transitively, so a locally valid entity fails when its type, an ancestor, or a referenced entity is invalid.
+
+### Added
+
+- `allowEntityUpdates` registry configuration, the `EntityConflictError` export, and `--allow-entity-updates` support for both server commands.
+- `x-gts-ref` support for any valid GTS wildcard pattern, including `~`-terminated patterns that match the named identifier and its derived identifiers.
+
+### Fixed
+
+- Explicit Type Schema validation now rejects unresolved GTS `$ref` targets, including missing derived segments.
+- Trait validation now applies `x-gts-ref` integrity checks to abstract schemas and prevents descendants from reopening a trait surface prohibited by an ancestor's `x-gts-traits-schema: false` declaration.
+- The HTTP server closes idle connections promptly to prevent file-descriptor exhaustion during long-running request sequences.
+- TypeScript now uses Node16 module resolution, ensuring emitted CLI imports resolve correctly in Node.
+
+## [0.5.0] - 2026-09-15
+
+Upgrades the implementation from GTS spec **v0.13.1** to **[v0.13.3](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.13.3)**.
 
 ### Breaking
 
