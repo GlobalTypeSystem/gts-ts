@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSONC/YAML text parsing APIs, including `parseGtsText(text, format)` entity extraction.
 - Root exports for `XGtsRefValidator` and its public types.
 
+### Fixed
+
+- Preserve and enforce JSON Schema constraints for a property named `__proto__` instead of dropping them during normalization.
+- Validate instance candidates before registration so a `422` response never exposes rejected registry state.
+- Update `fast-uri` to patched runtime versions and make production dependency audits CI-blocking.
+
 ## [0.6.0] - 2026-09-16
 
 Upgrades the implementation from GTS spec **v0.13.3** to **[v0.14.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.14.0)**.
