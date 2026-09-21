@@ -251,7 +251,10 @@ export class GtsStore {
     return results;
   }
 
-  validateInstance(gtsId: string, refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid): ValidationResult {
+  validateInstance(
+    gtsId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult {
     return this.validateInstanceTransitive(gtsId, new Set(), new Map(), refValidation);
   }
 
