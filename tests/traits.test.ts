@@ -2026,3 +2026,41 @@ describe('OP#13 - x-gts-ref trait values require a registered referent (canonica
     expect(result.ok).toBe(false);
   });
 });
+
+describe('OP#13 - the effective trait schema is validated under the host type dialect', () => {
+  const DRAFT2020 = 'https://json-schema.org/draft/2020-12/schema';
+
+  // The synthesized effective trait schema carries no `$schema`, so it must be
+  // compiled under the host type's dialect. A 2020-12 trait schema using
+  // `prefixItems` compiled under draft-07 would silently ignore the keyword.
+  const traitType = (id: string, pair: unknown[]) => ({
+    $id: id,
+    $schema: DRAFT2020,
+    type: 'object',
+    required: ['id'],
+    properties: { id: { type: 'string' } },
+    'x-gts-traits-schema': {
+      type: 'object',
+      properties: { pair: { type: 'array', prefixItems: [{ type: 'string' }] } },
+    },
+    'x-gts-traits': { pair },
+  });
+
+  test('a 2020-12 prefixItems trait constraint rejects a non-conforming value', () => {
+    const gts = new GTS({ validateRefs: false });
+    const id = 'gts.x.unit.tr.dialectbad.v1~';
+    gts.register(traitType(id, [42]));
+
+    const result = gts.validateEntity(id);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('trait validation');
+  });
+
+  test('a 2020-12 prefixItems trait constraint accepts a conforming value', () => {
+    const gts = new GTS({ validateRefs: false });
+    const id = 'gts.x.unit.tr.dialectok.v1~';
+    gts.register(traitType(id, ['ok']));
+
+    expect(gts.validateEntity(id).ok).toBe(true);
+  });
+});

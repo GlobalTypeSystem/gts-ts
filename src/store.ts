@@ -2032,7 +2032,15 @@ export class GtsStore {
 
     try {
       const schemaForValidation = isAbstract ? this.withoutRequired(effectiveSchema) : effectiveSchema;
-      const validate = this.ajv.compile(this.normalizeSchema(schemaForValidation));
+      // The synthesized effective trait schema carries no `$schema` of its own,
+      // so route the compile through the host type's dialect (like every other
+      // compile site) instead of the draft-07 `this.ajv`: a 2020-12 type whose
+      // trait schema uses e.g. `prefixItems` would otherwise be compiled under
+      // draft-07, which silently ignores the keyword and accepts values the
+      // trait schema forbids.
+      const validate = this.ajvForSchema(self?.content ?? schemaForValidation).compile(
+        this.normalizeSchema(schemaForValidation)
+      );
       if (!validate(materialized)) {
         const errors =
           validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
