@@ -143,6 +143,82 @@ describe('structured validation results', () => {
       ])
     );
   });
+
+  test("propagates a transitively invalid type's structured issues to instance validation", () => {
+    const gts = new GTS({ validateRefs: false });
+    const baseId = 'gts.x.unit.structured.txbase.v1~';
+    const kidId = `${baseId}x.unit._.kid.v1~`;
+    const instanceId = `${kidId}x.unit._.item.v1`;
+    gts.register({
+      $id: `gts://${baseId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      required: ['a', 'b'],
+      properties: { a: { type: 'string' }, b: { type: 'string' } },
+      additionalProperties: false,
+    });
+    // A derivation-incompatible type: drops the required `b` and reopens the
+    // closed content model. `validateSchema(kidId)` fails with structured
+    // derivation issues; those must not be dropped when an instance of the type
+    // is validated and its transitive type check fails.
+    gts.register({
+      $id: `gts://${kidId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      required: ['a'],
+      properties: { a: { type: 'string' } },
+      additionalProperties: true,
+    });
+    gts.register({ id: instanceId, type: kidId, a: 'x' });
+
+    const result = gts.validateInstance(instanceId);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("Instance type 'gts.x.unit.structured.txbase.v1~x.unit._.kid.v1~' is invalid");
+    // The derived type's own structured issues are carried through, not dropped.
+    expect(result.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ keyword: 'x-gts-schema', params: { property: 'b' } })])
+    );
+  });
+
+  test("propagates an invalid schema $ref dependency's structured issues", () => {
+    const gts = new GTS({ validateRefs: false });
+    const depBaseId = 'gts.x.unit.structured.depbase.v1~';
+    const depId = `${depBaseId}x.unit._.dep.v1~`;
+    const hostId = 'gts.x.unit.structured.host.v1~';
+    gts.register({
+      $id: `gts://${depBaseId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      required: ['a', 'b'],
+      properties: { a: { type: 'string' }, b: { type: 'string' } },
+      additionalProperties: false,
+    });
+    // Derivation-incompatible dependency schema (drops required `b`).
+    gts.register({
+      $id: `gts://${depId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      required: ['a'],
+      properties: { a: { type: 'string' } },
+      additionalProperties: true,
+    });
+    // A host schema whose body $refs the invalid dependency.
+    gts.register({
+      $id: `gts://${hostId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { link: { $ref: `gts://${depId}` } },
+    });
+
+    const result = gts.validateSchema(hostId);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain(`Referenced type '${depId}' is invalid`);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ keyword: 'x-gts-schema', params: { property: 'b' } })])
+    );
+  });
 });
 
 describe('GTS file parsing', () => {

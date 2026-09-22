@@ -378,11 +378,13 @@ export class GtsStore {
     }
     const typeResult = this.validateSchemaTransitive(typeId, visiting, completed, refValidation);
     if (!typeResult.ok) {
+      const message = `Instance type '${typeId}' is invalid: ${typeResult.error}`;
       const result = {
         id: gtsId,
         ok: false,
         valid: false,
-        error: `Instance type '${typeId}' is invalid: ${typeResult.error}`,
+        error: message,
+        errors: this.transitiveIssues(message, typeResult, '/type', 'type'),
       };
       visiting.delete(key);
       completed.set(key, result);
@@ -393,11 +395,13 @@ export class GtsStore {
       for (const dependencyId of referencedIds) {
         const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed, refValidation);
         if (!dependencyResult.ok) {
+          const message = `Referenced entity '${dependencyId}' is invalid: ${dependencyResult.error}`;
           const result = {
             id: gtsId,
             ok: false,
             valid: false,
-            error: `Referenced entity '${dependencyId}' is invalid: ${dependencyResult.error}`,
+            error: message,
+            errors: this.transitiveIssues(message, dependencyResult, '/$id', 'x-gts-ref'),
           };
           visiting.delete(key);
           completed.set(key, result);
@@ -406,11 +410,13 @@ export class GtsStore {
       }
       for (const pattern of wildcardPatterns) {
         if (!this.hasValidWildcardMatch(pattern, visiting, completed, refValidation)) {
+          const message = `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`;
           const result = {
             id: gtsId,
             ok: false,
             valid: false,
-            error: `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`,
+            error: message,
+            errors: [this.validationIssue(message, '/$id', 'x-gts-ref')],
           };
           visiting.delete(key);
           completed.set(key, result);
@@ -674,6 +680,25 @@ export class GtsStore {
     params: Record<string, unknown> = {}
   ): ValidationIssue {
     return { instancePath, schemaPath: '#', keyword, message, params };
+  }
+
+  // A transitive dependency failure (an invalid type, referenced entity,
+  // ancestor, schema `$ref`, or x-gts-ref target) must not drop the
+  // dependency's structured issues: direct `validateInstance()` /
+  // `validateSchema()` callers otherwise get a human-readable `error` but an
+  // empty `errors` array on these paths (text mode papers over it with an
+  // entity-level fallback issue). Carry the child's issues through when it has
+  // them, otherwise synthesize one from the wrapper message so a failed
+  // transitive result always carries at least one structured issue.
+  private transitiveIssues(
+    message: string,
+    child: ValidationResult,
+    instancePath: string,
+    keyword: string
+  ): ValidationIssue[] {
+    return child.errors && child.errors.length > 0
+      ? child.errors
+      : [this.validationIssue(message, instancePath, keyword)];
   }
 
   private xGtsRefIssue(error: {
@@ -1659,10 +1684,12 @@ export class GtsStore {
     for (const ancestorId of chain.slice(0, -1)) {
       const ancestorResult = this.validateSchemaTransitive(ancestorId, visiting, completed, refValidation);
       if (!ancestorResult.ok) {
+        const message = `Ancestor type '${ancestorId}' is invalid: ${ancestorResult.error}`;
         const result = {
           id: schemaId,
           ok: false,
-          error: `Ancestor type '${ancestorId}' is invalid: ${ancestorResult.error}`,
+          error: message,
+          errors: this.transitiveIssues(message, ancestorResult, '/$id', 'ancestor'),
         };
         visiting.delete(key);
         completed.set(key, result);
@@ -1673,10 +1700,12 @@ export class GtsStore {
     for (const dependencyId of this.collectSchemaDependencies(entity.content)) {
       const dependencyResult = this.validateSchemaTransitive(dependencyId, visiting, completed, refValidation);
       if (!dependencyResult.ok) {
+        const message = `Referenced type '${dependencyId}' is invalid: ${dependencyResult.error}`;
         const result = {
           id: schemaId,
           ok: false,
-          error: `Referenced type '${dependencyId}' is invalid: ${dependencyResult.error}`,
+          error: message,
+          errors: this.transitiveIssues(message, dependencyResult, '/$ref', 'reference'),
         };
         visiting.delete(key);
         completed.set(key, result);
@@ -1688,10 +1717,12 @@ export class GtsStore {
       for (const dependencyId of referencedIds) {
         const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed, refValidation);
         if (!dependencyResult.ok) {
+          const message = `Referenced x-gts-ref entity '${dependencyId}' is invalid: ${dependencyResult.error}`;
           const result = {
             id: schemaId,
             ok: false,
-            error: `Referenced x-gts-ref entity '${dependencyId}' is invalid: ${dependencyResult.error}`,
+            error: message,
+            errors: this.transitiveIssues(message, dependencyResult, '/$id', 'x-gts-ref'),
           };
           visiting.delete(key);
           completed.set(key, result);
@@ -1700,10 +1731,12 @@ export class GtsStore {
       }
       for (const pattern of wildcardPatterns) {
         if (!this.hasValidWildcardMatch(pattern, visiting, completed, refValidation)) {
+          const message = `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`;
           const result = {
             id: schemaId,
             ok: false,
-            error: `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`,
+            error: message,
+            errors: [this.validationIssue(message, '/$id', 'x-gts-ref')],
           };
           visiting.delete(key);
           completed.set(key, result);
