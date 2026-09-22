@@ -518,7 +518,13 @@ export class GtsStore {
 
       // Validate x-gts-ref constraints
       const xGtsRefValidator = new XGtsRefValidator(this, refValidation);
-      const xGtsRefErrors = xGtsRefValidator.validateInstance(obj.content, schemaEntity.content, '', obj.schemaId);
+      const xGtsRefErrors = xGtsRefValidator.validateInstance(
+        obj.content,
+        schemaEntity.content,
+        '',
+        obj.schemaId,
+        gtsId
+      );
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
         return {
@@ -619,7 +625,7 @@ export class GtsStore {
       }
 
       const xGtsRefValidator = new XGtsRefValidator(this, refValidation);
-      const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content, '', typeId);
+      const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content, '', typeId, id);
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
         return {

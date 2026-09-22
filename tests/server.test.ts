@@ -258,6 +258,69 @@ describe('POST /entities?validate=true validates instances before registration',
   });
 });
 
+describe('POST /entities?validate=true accepts a self-referencing new instance (review finding #2)', () => {
+  const typeId = 'gts.x.unit.srv.selfref.v1~';
+  const instanceId = `${typeId}x.unit._.node.v1`;
+  const schema = {
+    $id: `gts://${typeId}`,
+    $schema: DRAFT7,
+    type: 'object',
+    required: ['self'],
+    properties: { self: { type: 'string', 'x-gts-ref': 'gts.*' } },
+  };
+
+  test("an x-gts-ref value equal to the instance's own id validates before registration", async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    expect((await server.instance.inject({ method: 'POST', url: '/entities', payload: schema })).statusCode).toBe(200);
+
+    // The instance's `self` value is its own id. Under validate-before-register
+    // the instance is not in the registry yet, so an unconditional existence
+    // check would reject it with "Referenced entity not found in registry"; a
+    // self-reference must instead be treated as satisfied by the entity itself.
+    const accepted = await server.instance.inject({
+      method: 'POST',
+      url: '/entities?validate=true&gts-ref-validation=any-valid',
+      payload: { id: instanceId, type: typeId, self: instanceId },
+    });
+    expect(accepted.statusCode).toBe(200);
+
+    // A reference to a genuinely absent entity must still be rejected.
+    const rejected = await server.instance.inject({
+      method: 'POST',
+      url: '/entities?validate=true&gts-ref-validation=any-valid',
+      payload: { id: `${typeId}x.unit._.other.v1`, type: typeId, self: `${typeId}x.unit._.missing.v1` },
+    });
+    expect(rejected.statusCode).toBe(422);
+    expect(JSON.parse(rejected.body).error).toContain('not found in registry');
+
+    await server.stop();
+  });
+});
+
+describe('POST /entities?validate=true rejects an instance with no resolvable GTS Type (review finding #2)', () => {
+  test('a base-type-shaped instance id without a type yields a clear error, not "not found: null"', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+
+    // `gts.x.unit.srv.notype.v1~` is a valid GTS id but a base-type shape, so
+    // it carries no chained type; with no explicit type field either, the
+    // instance has no resolvable GTS Type. `schemaId` is null - the endpoint
+    // must reject clearly instead of asserting non-null and surfacing the
+    // opaque "GTS Type Schema not found: null".
+    const rejected = await server.instance.inject({
+      method: 'POST',
+      url: '/entities?validate=true',
+      payload: { id: 'gts.x.unit.srv.notype.v1~' },
+    });
+    expect(rejected.statusCode).toBe(422);
+    const body = JSON.parse(rejected.body);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('Unable to determine GTS Type');
+    expect(body.error).not.toContain('null');
+
+    await server.stop();
+  });
+});
+
 describe('POST /cast reports three-valued compatibility verdicts (spec 0.13 §9.2)', () => {
   // Phase 1 - this is the httprunner canonical case
   // `TestCaseTestOp9Cast_DistinctDialects` (test_op9_version_casting.py:566)

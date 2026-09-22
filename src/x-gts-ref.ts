@@ -73,6 +73,7 @@ export class XGtsRefValidator {
   private referencedIds: Set<string> = new Set();
   private referencedWildcardPatterns: Set<string> = new Set();
   private selectedTypeId: string | undefined;
+  private selfId: string | undefined;
 
   constructor(store?: EntityLookup, mode: GtsRefValidationMode | boolean = GtsRefValidationMode.AnyValid) {
     this.store = store;
@@ -103,9 +104,14 @@ export class XGtsRefValidator {
     instance: any,
     schema: any,
     instancePath: string = '',
-    selectedTypeId?: string
+    selectedTypeId?: string,
+    selfId?: string
   ): XGtsRefValidationError[] {
     this.selectedTypeId = this.getSelectedTypeId(schema, selectedTypeId);
+    // The id of the entity being validated. A reference to it is satisfied by
+    // that entity itself, so it must bypass the registry-existence check (the
+    // entity may not be registered yet under validate-before-register).
+    this.selfId = typeof selfId === 'string' ? this.stripGtsURIPrefix(selfId) : undefined;
     const errors: XGtsRefValidationError[] = [];
     this.visitInstance(instance, schema, instancePath, schema, errors);
     return errors;
@@ -496,6 +502,18 @@ export class XGtsRefValidator {
     // to be a well-formed GTS id that matches the pattern, so it only remains
     // to confirm at least one registered type/instance resolves it.
     if (this.store && this.mode !== GtsRefValidationMode.None) {
+      // A reference to the entity currently being validated (e.g. an instance
+      // whose x-gts-ref value is its own id) is satisfied by that entity
+      // itself. Under validate-before-register the entity is not yet in the
+      // registry, so a plain lookup would spuriously fail; and its validity is
+      // already being decided by this very call, so there is nothing further
+      // to check. This mirrors the transitive cycle guard that handled an
+      // already-registered self-reference, without enqueueing the unregistered
+      // self as a dependency (which `validateEntityTransitive` would reject as
+      // "Entity not found" before its own visiting-guard could apply).
+      if (this.selfId !== undefined && value === this.selfId) {
+        return null;
+      }
       const entity = this.store.get(value);
       if (!entity) {
         return {

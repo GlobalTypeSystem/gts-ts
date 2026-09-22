@@ -368,7 +368,21 @@ export class GtsServer {
 
       // Validate instance if requested
       if (validate && !entity.isSchema) {
-        const result = this.store.validateTransientInstance(content, entity.schemaId!, entity.id, refValidation);
+        // A valid GTS instance id does not guarantee a resolvable type: a
+        // base-type-shaped id (e.g. `gts.a.b.c.type.v1~`) used as an instance
+        // is a valid GTS id yet carries no chained type, and no explicit type
+        // field was found either. `schemaId` is `string | null`, so assert
+        // nothing here - reject with a clear error instead of passing `null`
+        // down to surface as the opaque "GTS Type Schema not found: null".
+        if (!entity.schemaId) {
+          reply.code(422);
+          return {
+            ok: false,
+            is_type_schema: false,
+            error: `Unable to determine GTS Type for instance '${entity.id}'`,
+          };
+        }
+        const result = this.store.validateTransientInstance(content, entity.schemaId, entity.id, refValidation);
         if (!result.ok) {
           reply.code(422);
           return {
