@@ -123,6 +123,57 @@ export class GtsStore {
     return this.ajv;
   }
 
+  // The Ajv registries are dialect-specific (each holds only its own dialect's
+  // vocabulary), and instance validation compiles synchronously, so a `$ref`
+  // target must live in the SAME Ajv instance as the schema that references
+  // it: `$ref` composes the referenced schema INTO the referrer's single
+  // compiled validation, evaluated under the referrer's one dialect. JSON
+  // Schema itself assumes one dialect per validation and defines no semantics
+  // for composing subschemas of different dialects, so a cross-dialect `$ref`
+  // is not merely an Ajv limitation - it is underspecified. This returns the
+  // canonical dialect bucket (matching `ajvForSchema`'s routing) so a mismatch
+  // across a `$ref` can be rejected with a clear error instead of surfacing as
+  // a compile throw that the surrounding catch turns into a bogus "invalid".
+  private dialectOf(schema: any): string {
+    const dialect = typeof schema?.$schema === 'string' ? schema.$schema : '';
+    if (dialect.includes('2020-12')) return '2020-12';
+    if (dialect.includes('2019-09')) return '2019-09';
+    return 'draft-07';
+  }
+
+  // Reject a schema whose transitive `gts://` `$ref` targets use a different
+  // JSON Schema dialect than the schema itself. The check follows `$ref`s
+  // ONLY, not the `$id` derivation chain: per §11.0/ADR-0001 a derived schema
+  // that re-declares its parent's fields (no `$ref`) is dialect-agnostic and
+  // compiles independently in its own dialect, so it must NOT be rejected.
+  // Only a schema actually pulled into the referrer's single compiled
+  // validation via `$ref` (directly or transitively - a grandparent reached
+  // through the parent's own `$ref` is composed in just the same) has to share
+  // the dialect. Operates on raw `content` + `schemaId` so it works for both
+  // registered entities and transient candidates (whose id is not yet in the
+  // registry). Returns a human-readable error, or `null` when every referenced
+  // schema shares the schema's dialect.
+  private detectChainDialectMismatch(content: any, schemaId: string): string | null {
+    const baseDialect = this.dialectOf(content);
+    const visited = new Set<string>();
+    const queue = Array.from(this.collectSchemaDependencies(content));
+    while (queue.length > 0) {
+      const refId = queue.shift() as string;
+      if (refId === schemaId || visited.has(refId)) continue;
+      visited.add(refId);
+      const target = this.get(refId);
+      if (!target?.isSchema || !target.content) continue;
+      const targetDialect = this.dialectOf(target.content);
+      if (targetDialect !== baseDialect) {
+        return `GTS derivation mixes JSON Schema dialects: '${schemaId}' uses ${baseDialect} but its $ref target '${refId}' uses ${targetDialect}; a schema and its transitive gts:// $ref targets must all use the same dialect`;
+      }
+      for (const nestedId of this.collectSchemaDependencies(target.content)) {
+        if (!visited.has(nestedId)) queue.push(nestedId);
+      }
+    }
+    return null;
+  }
+
   private async loadSchema(uri: string): Promise<any> {
     const normalizedUri = uri.startsWith(GTS_URI_PREFIX) ? uri.substring(GTS_URI_PREFIX.length) : uri;
 
@@ -436,6 +487,17 @@ export class GtsStore {
         };
       }
 
+      const dialectError = this.detectChainDialectMismatch(schemaEntity.content, obj.schemaId);
+      if (dialectError) {
+        return {
+          id: gtsId,
+          ok: false,
+          valid: false,
+          error: dialectError,
+          errors: [this.validationIssue(dialectError, '/$schema', 'dialect', { schemaId: obj.schemaId })],
+        };
+      }
+
       const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
       const isValid = validate(obj.content);
 
@@ -535,6 +597,16 @@ export class GtsStore {
           ok: false,
           error: message,
           errors: [this.validationIssue(message, '/type', 'x-gts-abstract', { schemaId: typeId })],
+        };
+      }
+
+      const dialectError = this.detectChainDialectMismatch(schemaEntity.content, typeId);
+      if (dialectError) {
+        return {
+          id,
+          ok: false,
+          error: dialectError,
+          errors: [this.validationIssue(dialectError, '/$schema', 'dialect', { schemaId: typeId })],
         };
       }
 
@@ -1459,6 +1531,11 @@ export class GtsStore {
         return { id: schemaId, ok: false, error: ruleError };
       }
 
+      const dialectError = this.detectChainDialectMismatch(content, schemaId);
+      if (dialectError) {
+        return { id: schemaId, ok: false, error: dialectError };
+      }
+
       let chain: string[];
       try {
         chain = this.buildSchemaChain(schemaId);
@@ -1711,6 +1788,16 @@ export class GtsStore {
       const refError = this.validateSchemaReferenceTargets(content);
       if (refError) {
         return { id: schemaId, ok: false, error: refError };
+      }
+
+      const dialectError = this.detectChainDialectMismatch(content, schemaId);
+      if (dialectError) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: dialectError,
+          errors: [this.validationIssue(dialectError, '/$schema', 'dialect', { schemaId })],
+        };
       }
 
       const schemaRefValidator = new XGtsRefValidator(this, refValidation);

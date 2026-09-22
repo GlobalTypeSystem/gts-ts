@@ -406,6 +406,160 @@ describe('GTS Store Operations', () => {
     });
   });
 
+  describe('OP#12 - cross-dialect $ref derivation is rejected', () => {
+    // `$ref` composes the referenced schema into the referrer's single compiled
+    // validation, evaluated under the referrer's one dialect; JSON Schema does
+    // not define composing subschemas across dialects. So a `$ref` that crosses
+    // dialects must be rejected with a clear error rather than silently reported
+    // invalid (a false negative). The check follows `$ref`s only - a derived
+    // schema that re-declares its parent's fields without `$ref` stays valid
+    // regardless of dialect (see the redeclaration test below).
+    test('a draft-07 child deriving via allOf+$ref from a 2020-12 parent is rejected clearly', () => {
+      gts.register({
+        $id: 'gts.test.pkg.ns.mdparent.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.mdparent.v1~test.pkg._.mdchild.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+        allOf: [{ $ref: 'gts://gts.test.pkg.ns.mdparent.v1~' }],
+      });
+
+      const schemaResult = gts.validateEntity('gts.test.pkg.ns.mdparent.v1~test.pkg._.mdchild.v1~');
+      expect(schemaResult.ok).toBe(false);
+      expect(schemaResult.error).toContain('mixes JSON Schema dialects');
+    });
+
+    test('an instance of a mixed-dialect child is rejected clearly, not silently invalid', () => {
+      gts.register({
+        $id: 'gts.test.pkg.ns.mdparent2.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.mdparent2.v1~test.pkg._.mdchild2.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+        allOf: [{ $ref: 'gts://gts.test.pkg.ns.mdparent2.v1~' }],
+      });
+      // An instance that is valid against the child on its own - pre-fix the
+      // unresolvable cross-dialect `$ref` made the compile throw and reported
+      // this valid instance as invalid with an opaque message.
+      gts.register({
+        gtsId: 'gts.test.pkg.ns.mdparent2.v1~test.pkg._.mdchild2.v1~test.pkg._.item.v1.0',
+        $schema: 'gts.test.pkg.ns.mdparent2.v1~test.pkg._.mdchild2.v1~',
+        a: 'ok',
+      });
+
+      const result = gts.validateInstance('gts.test.pkg.ns.mdparent2.v1~test.pkg._.mdchild2.v1~test.pkg._.item.v1.0');
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('mixes JSON Schema dialects');
+    });
+
+    test('a single-dialect chain still validates normally', () => {
+      gts.register({
+        $id: 'gts.test.pkg.ns.sdparent.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.sdparent.v1~test.pkg._.sdchild.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+        allOf: [{ $ref: 'gts://gts.test.pkg.ns.sdparent.v1~' }],
+      });
+      gts.register({
+        gtsId: 'gts.test.pkg.ns.sdparent.v1~test.pkg._.sdchild.v1~test.pkg._.item.v1.0',
+        $schema: 'gts.test.pkg.ns.sdparent.v1~test.pkg._.sdchild.v1~',
+        a: 'ok',
+      });
+
+      expect(gts.validateInstance('gts.test.pkg.ns.sdparent.v1~test.pkg._.sdchild.v1~test.pkg._.item.v1.0').ok).toBe(
+        true
+      );
+    });
+
+    test('a redeclaration-form child in a different dialect than its parent is allowed', () => {
+      // Per ADR-0001 / spec §11.0 derivation is by chained `$id` alone;
+      // `allOf`+`$ref` is not required. A child that re-declares the parent's
+      // fields has no cross-dialect `$ref` to compose, compiles independently
+      // in its own dialect, and MUST NOT be rejected on dialect grounds.
+      gts.register({
+        $id: 'gts.test.pkg.ns.rdparent.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.rdparent.v1~test.pkg._.rdchild.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+      });
+      gts.register({
+        gtsId: 'gts.test.pkg.ns.rdparent.v1~test.pkg._.rdchild.v1~test.pkg._.item.v1.0',
+        $schema: 'gts.test.pkg.ns.rdparent.v1~test.pkg._.rdchild.v1~',
+        a: 'ok',
+      });
+
+      expect(gts.validateEntity('gts.test.pkg.ns.rdparent.v1~test.pkg._.rdchild.v1~').ok).toBe(true);
+      expect(gts.validateInstance('gts.test.pkg.ns.rdparent.v1~test.pkg._.rdchild.v1~test.pkg._.item.v1.0').ok).toBe(
+        true
+      );
+    });
+
+    test('a dialect mismatch reached transitively through a parent $ref is rejected', () => {
+      // Grandparent (draft-07) <- parent (2020-12, allOf+$ref grandparent) <-
+      // child (2020-12, allOf+$ref parent). The child's direct `$ref` matches
+      // its own dialect, but following the parent's `$ref` composes the
+      // draft-07 grandparent into the child's 2020-12 validation, so the
+      // mismatch must still be caught.
+      gts.register({
+        $id: 'gts.test.pkg.ns.tgp.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.tgp.v1~test.pkg._.tparent.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+        allOf: [{ $ref: 'gts://gts.test.pkg.ns.tgp.v1~' }],
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.tgp.v1~test.pkg._.tparent.v1~test.pkg._.tchild.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        required: ['a'],
+        properties: { a: { type: 'string' } },
+        allOf: [{ $ref: 'gts://gts.test.pkg.ns.tgp.v1~test.pkg._.tparent.v1~' }],
+      });
+
+      const result = gts.validateEntity('gts.test.pkg.ns.tgp.v1~test.pkg._.tparent.v1~test.pkg._.tchild.v1~');
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('mixes JSON Schema dialects');
+    });
+  });
+
   describe('OP#9 - a cast succeeds only if its result fits the target', () => {
     beforeEach(() => {
       gts.register({
