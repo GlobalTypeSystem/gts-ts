@@ -411,6 +411,18 @@ describe('GTS Store Operations', () => {
     // chained `$id` hierarchy and every transitive `gts://` `$ref` target.
     // Mismatches are rejected explicitly instead of being silently interpreted
     // under whichever Ajv instance happens to compile the effective schema.
+    test.each([
+      ['unknown', 'https://example.invalid/not-a-json-schema-dialect'],
+      ['mistyped', 'https://json-schema.org/draft/2020-21/schema'],
+    ])('a schema declaring an %s dialect is rejected', (_label, dialect) => {
+      const id = `gts.test.pkg.ns.invalid_dialect_${_label}.v1~`;
+      gts.register({ $id: id, $schema: dialect, type: 'object' });
+
+      const result = gts.validateEntity(id);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Unsupported JSON Schema dialect');
+    });
+
     test('a draft-07 child deriving via allOf+$ref from a 2020-12 parent is rejected clearly', () => {
       gts.register({
         $id: 'gts.test.pkg.ns.mdparent.v1~',
