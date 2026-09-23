@@ -2027,12 +2027,12 @@ describe('OP#13 - x-gts-ref trait values require a registered referent (canonica
   });
 });
 
-describe('OP#13 - the effective trait schema is validated under the host type dialect', () => {
+describe("OP#13 - trait schemas use their root type's dialect", () => {
   const DRAFT2020 = 'https://json-schema.org/draft/2020-12/schema';
 
-  // The synthesized effective trait schema carries no `$schema`, so it must be
-  // compiled under the host type's dialect. A 2020-12 trait schema using
-  // `prefixItems` compiled under draft-07 would silently ignore the keyword.
+  // A trait subschema carries no `$schema` of its own, so it inherits the
+  // dialect of the Type Schema that declares it. Compiling a 2020-12 trait
+  // schema using `prefixItems` under draft-07 would silently ignore the keyword.
   const traitType = (id: string, pair: unknown[]) => ({
     $id: id,
     $schema: DRAFT2020,
@@ -2062,5 +2062,53 @@ describe('OP#13 - the effective trait schema is validated under the host type di
     gts.register(traitType(id, ['ok']));
 
     expect(gts.validateEntity(id).ok).toBe(true);
+  });
+
+  test('a draft-07 child cannot inherit a 2020-12 trait schema through a mixed-dialect chain', () => {
+    const gts = new GTS({ validateRefs: false });
+    const parentId = 'gts.x.unit.tr.inheriteddialect.v1~';
+    const childId = `${parentId}x.unit._.child.v1~`;
+    gts.register(traitType(parentId, []));
+    gts.register({
+      $id: childId,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      required: ['id'],
+      properties: { id: { type: 'string' } },
+      'x-gts-traits': { pair: [42] },
+    });
+
+    const result = gts.validateEntity(childId);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('derivation chain mixes JSON Schema dialects');
+  });
+
+  test('a 2020-12 child cannot inherit a draft-07 tuple trait schema through a mixed-dialect chain', () => {
+    const gts = new GTS({ validateRefs: false });
+    const parentId = 'gts.x.unit.tr.inheritedtuple.v1~';
+    const childId = `${parentId}x.unit._.child.v1~`;
+    gts.register({
+      $id: parentId,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      required: ['id'],
+      properties: { id: { type: 'string' } },
+      'x-gts-traits-schema': {
+        type: 'object',
+        properties: { pair: { type: 'array', items: [{ type: 'string' }] } },
+      },
+    });
+    gts.register({
+      $id: childId,
+      $schema: DRAFT2020,
+      type: 'object',
+      required: ['id'],
+      properties: { id: { type: 'string' } },
+      'x-gts-traits': { pair: ['ok'] },
+    });
+
+    const result = gts.validateEntity(childId);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('derivation chain mixes JSON Schema dialects');
   });
 });

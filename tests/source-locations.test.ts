@@ -294,4 +294,103 @@ name: 42
     expect(secondSameProperty.source!.value.offset).not.toBe(thirdSameProperty.source!.value.offset);
     expect(result.errors.every((issue) => !issue.message.includes('instances.json'))).toBe(true);
   });
+
+  test('keeps dependency issues on the dependency and adds a host reference issue', () => {
+    const baseId = 'gts.x.unit.location.dependencybase.v1~';
+    const dependencyId = `${baseId}x.unit._.dependency.v1~`;
+    const hostId = 'gts.x.unit.location.dependencyhost.v1~';
+    const text = `[
+  {
+    "$id": "gts://${baseId}",
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": { "shared": { "type": "string" } }
+  },
+  {
+    "$id": "gts://${dependencyId}",
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": { "shared": { "type": "number" } }
+  },
+  {
+    "$id": "gts://${hostId}",
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$ref": "gts://${dependencyId}",
+    "type": "object",
+    "properties": { "shared": { "type": "boolean" } }
+  }
+]`;
+
+    const result = new GTS({ validateRefs: false }).registerAndValidateText(text, 'json');
+    const hostReference = issueAt(result, 2, '/$ref');
+    const dependencyIssue = result.entities[2].result.errors?.find(
+      (issue) => issue.entityId === dependencyId && issue.instancePath === '/properties/shared'
+    );
+
+    expect(result.ok).toBe(false);
+    expect(hostReference.keyword).toBe('reference');
+    expectSource(text, hostReference, `"gts://${dependencyId}"`, '"$ref"');
+    expect(dependencyIssue).toMatchObject({ keyword: 'x-gts-schema', entityIndex: 1, entityId: dependencyId });
+    expectSource(text, dependencyIssue!, '{ "type": "number" }', '"shared"');
+  });
+
+  test('does not fabricate a source span for a dependency absent from the submitted text', () => {
+    const gts = new GTS({ validateRefs: false });
+    const baseId = 'gts.x.unit.location.externalbase.v1~';
+    const dependencyId = `${baseId}x.unit._.dependency.v1~`;
+    const hostId = 'gts.x.unit.location.externalhost.v1~';
+    gts.register({
+      $id: `gts://${baseId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { shared: { type: 'string' } },
+    });
+    gts.register({
+      $id: `gts://${dependencyId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { shared: { type: 'number' } },
+    });
+    const text = `{
+  "$id": "gts://${hostId}",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$ref": "gts://${dependencyId}"
+}`;
+
+    const result = gts.registerAndValidateText(text, 'json');
+    const dependencyIssue = result.entities[0].result.errors?.find((issue) => issue.entityId === dependencyId);
+
+    expect(issueAt(result, 0, '/$ref').keyword).toBe('reference');
+    expect(dependencyIssue).toMatchObject({ entityId: dependencyId, keyword: 'x-gts-schema' });
+    expect(dependencyIssue?.entityIndex).toBeUndefined();
+    expect(dependencyIssue?.source).toBeUndefined();
+  });
+
+  test('anchors an instance type dialect failure at its type field', () => {
+    const gts = new GTS({ validateRefs: false });
+    const parentId = 'gts.x.unit.location.dialectparent.v1~';
+    const childId = `${parentId}x.unit._.child.v1~`;
+    gts.register({
+      $id: `gts://${parentId}`,
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+    });
+    gts.register({
+      $id: `gts://${childId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      allOf: [{ $ref: `gts://${parentId}` }],
+    });
+    const text = `{
+  "id": "${childId}x.unit._.item.v1",
+  "type": "${childId}"
+}`;
+
+    const result = gts.registerAndValidateText(text, 'json');
+    const issue = issueAt(result, 0, '/type');
+
+    expect(result.ok).toBe(false);
+    expect(issue.keyword).toBe('dialect');
+    expectSource(text, issue, `"${childId}"`, '"type"');
+  });
 });

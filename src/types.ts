@@ -73,6 +73,7 @@ export interface ValidationIssue {
   message: string;
   params: Record<string, unknown>;
   data?: unknown;
+  entityId?: string;
   entityIndex?: number;
   source?: ValidationIssueSource;
 }

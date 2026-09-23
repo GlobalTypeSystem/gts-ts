@@ -128,10 +128,12 @@ export class GTS {
         message: rawResult.error,
         params: {},
       };
-      const localizedErrors = locator.attach(
-        entityIndex,
-        rawResult.errors?.length ? rawResult.errors : rawResult.ok ? [] : [fallbackIssue]
-      );
+      const issues = rawResult.errors?.length ? rawResult.errors : rawResult.ok ? [] : [fallbackIssue];
+      const localizedErrors = issues.map((issue) => {
+        if (!issue.entityId) return locator.attach(entityIndex, [issue])[0];
+        const dependencyIndex = parsed.entities.findIndex((candidate) => candidate.id === issue.entityId);
+        return dependencyIndex >= 0 ? locator.attach(dependencyIndex, [issue])[0] : issue;
+      });
       const result = localizedErrors.length > 0 ? { ...rawResult, errors: localizedErrors } : rawResult;
       results.push({ entityIndex, id: entity.id, isSchema: entity.isSchema, result });
     });

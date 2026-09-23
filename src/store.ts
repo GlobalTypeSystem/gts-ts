@@ -141,20 +141,26 @@ export class GtsStore {
     return 'draft-07';
   }
 
-  // Reject a schema whose transitive `gts://` `$ref` targets use a different
-  // JSON Schema dialect than the schema itself. The check follows `$ref`s
-  // ONLY, not the `$id` derivation chain: per §11.0/ADR-0001 a derived schema
-  // that re-declares its parent's fields (no `$ref`) is dialect-agnostic and
-  // compiles independently in its own dialect, so it must NOT be rejected.
-  // Only a schema actually pulled into the referrer's single compiled
-  // validation via `$ref` (directly or transitively - a grandparent reached
-  // through the parent's own `$ref` is composed in just the same) has to share
-  // the dialect. Operates on raw `content` + `schemaId` so it works for both
-  // registered entities and transient candidates (whose id is not yet in the
-  // registry). Returns a human-readable error, or `null` when every referenced
-  // schema shares the schema's dialect.
+  // A derivation hierarchy has one dialect, selected by its root Type Schema.
+  // Every descendant in the chained `$id` and every transitive `gts://` `$ref`
+  // target must use that dialect, regardless of whether a descendant composes
+  // its parent with `$ref` or re-declares the inherited fields. Operates on raw
+  // `content` + `schemaId` so it also covers transient candidates.
   private detectChainDialectMismatch(content: any, schemaId: string): string | null {
-    const baseDialect = this.dialectOf(content);
+    const chain = this.buildSchemaChain(schemaId);
+    const rootId = chain[0];
+    const rootContent = rootId === schemaId ? content : this.get(rootId)?.content;
+    const rootDialect = this.dialectOf(rootContent ?? content);
+
+    for (const chainId of chain) {
+      const chainContent = chainId === schemaId ? content : this.get(chainId)?.content;
+      if (!chainContent) continue;
+      const chainDialect = this.dialectOf(chainContent);
+      if (chainDialect !== rootDialect) {
+        return `GTS derivation chain mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but '${chainId}' uses ${chainDialect}; every type in a chained $id hierarchy must use the root type's dialect`;
+      }
+    }
+
     const visited = new Set<string>();
     const queue = Array.from(this.collectSchemaDependencies(content));
     while (queue.length > 0) {
@@ -164,8 +170,8 @@ export class GtsStore {
       const target = this.get(refId);
       if (!target?.isSchema || !target.content) continue;
       const targetDialect = this.dialectOf(target.content);
-      if (targetDialect !== baseDialect) {
-        return `GTS derivation mixes JSON Schema dialects: '${schemaId}' uses ${baseDialect} but its $ref target '${refId}' uses ${targetDialect}; a schema and its transitive gts:// $ref targets must all use the same dialect`;
+      if (targetDialect !== rootDialect) {
+        return `GTS derivation mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but $ref target '${refId}' uses ${targetDialect}; every type in the chain and its transitive gts:// $ref targets must use the root type's dialect`;
       }
       for (const nestedId of this.collectSchemaDependencies(target.content)) {
         if (!visited.has(nestedId)) queue.push(nestedId);
@@ -500,7 +506,7 @@ export class GtsStore {
           ok: false,
           valid: false,
           error: dialectError,
-          errors: [this.validationIssue(dialectError, '/$schema', 'dialect', { schemaId: obj.schemaId })],
+          errors: [this.validationIssue(dialectError, '/type', 'dialect', { schemaId: obj.schemaId })],
         };
       }
 
@@ -618,7 +624,7 @@ export class GtsStore {
           id,
           ok: false,
           error: dialectError,
-          errors: [this.validationIssue(dialectError, '/$schema', 'dialect', { schemaId: typeId })],
+          errors: [this.validationIssue(dialectError, '/type', 'dialect', { schemaId: typeId })],
         };
       }
 
@@ -683,22 +689,19 @@ export class GtsStore {
   }
 
   // A transitive dependency failure (an invalid type, referenced entity,
-  // ancestor, schema `$ref`, or x-gts-ref target) must not drop the
-  // dependency's structured issues: direct `validateInstance()` /
-  // `validateSchema()` callers otherwise get a human-readable `error` but an
-  // empty `errors` array on these paths (text mode papers over it with an
-  // entity-level fallback issue). Carry the child's issues through when it has
-  // them, otherwise synthesize one from the wrapper message so a failed
-  // transitive result always carries at least one structured issue.
+  // ancestor, schema `$ref`, or x-gts-ref target) must retain both sides of the
+  // failure: a wrapper issue located on the referring entity and the child's
+  // structured issues tagged with their own entity identity. Text validation
+  // can then attach each issue only to the document entity it actually describes.
   private transitiveIssues(
     message: string,
     child: ValidationResult,
     instancePath: string,
     keyword: string
   ): ValidationIssue[] {
-    return child.errors && child.errors.length > 0
-      ? child.errors
-      : [this.validationIssue(message, instancePath, keyword)];
+    const wrapper = this.validationIssue(message, instancePath, keyword);
+    if (!child.errors || child.errors.length === 0) return [wrapper];
+    return [wrapper, ...child.errors.map((issue) => (issue.entityId ? issue : { ...issue, entityId: child.id }))];
   }
 
   private xGtsRefIssue(error: {
@@ -1564,7 +1567,12 @@ export class GtsStore {
 
       const dialectError = this.detectChainDialectMismatch(content, schemaId);
       if (dialectError) {
-        return { id: schemaId, ok: false, error: dialectError };
+        return {
+          id: schemaId,
+          ok: false,
+          error: dialectError,
+          errors: [this.validationIssue(dialectError, '/$schema', 'dialect', { schemaId })],
+        };
       }
 
       let chain: string[];
@@ -2065,12 +2073,6 @@ export class GtsStore {
 
     try {
       const schemaForValidation = isAbstract ? this.withoutRequired(effectiveSchema) : effectiveSchema;
-      // The synthesized effective trait schema carries no `$schema` of its own,
-      // so route the compile through the host type's dialect (like every other
-      // compile site) instead of the draft-07 `this.ajv`: a 2020-12 type whose
-      // trait schema uses e.g. `prefixItems` would otherwise be compiled under
-      // draft-07, which silently ignores the keyword and accepts values the
-      // trait schema forbids.
       const validate = this.ajvForSchema(self?.content ?? schemaForValidation).compile(
         this.normalizeSchema(schemaForValidation)
       );

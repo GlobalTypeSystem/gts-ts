@@ -216,7 +216,41 @@ describe('structured validation results', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain(`Referenced type '${depId}' is invalid`);
     expect(result.errors).toEqual(
-      expect.arrayContaining([expect.objectContaining({ keyword: 'x-gts-schema', params: { property: 'b' } })])
+      expect.arrayContaining([
+        expect.objectContaining({ instancePath: '/$ref', keyword: 'reference' }),
+        expect.objectContaining({
+          keyword: 'x-gts-schema',
+          params: { property: 'b' },
+          entityId: depId,
+        }),
+      ])
+    );
+  });
+
+  test('returns a structured issue for a transient cross-dialect schema', () => {
+    const gts = new GTS({ validateRefs: false });
+    const parentId = 'gts.x.unit.structured.transientdialect.v1~';
+    const childId = `${parentId}x.unit._.child.v1~`;
+    gts.register({
+      $id: `gts://${parentId}`,
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: { value: { type: 'string' } },
+    });
+
+    const result = gts.validateTransientSchema(
+      {
+        $id: `gts://${childId}`,
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { value: { type: 'string' } },
+      },
+      childId
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ instancePath: '/$schema', keyword: 'dialect' })])
     );
   });
 });

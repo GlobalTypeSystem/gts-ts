@@ -406,14 +406,11 @@ describe('GTS Store Operations', () => {
     });
   });
 
-  describe('OP#12 - cross-dialect $ref derivation is rejected', () => {
-    // `$ref` composes the referenced schema into the referrer's single compiled
-    // validation, evaluated under the referrer's one dialect; JSON Schema does
-    // not define composing subschemas across dialects. So a `$ref` that crosses
-    // dialects must be rejected with a clear error rather than silently reported
-    // invalid (a false negative). The check follows `$ref`s only - a derived
-    // schema that re-declares its parent's fields without `$ref` stays valid
-    // regardless of dialect (see the redeclaration test below).
+  describe('OP#12 - one JSON Schema dialect per derivation hierarchy', () => {
+    // The root Type Schema selects the dialect for every descendant in its
+    // chained `$id` hierarchy and every transitive `gts://` `$ref` target.
+    // Mismatches are rejected explicitly instead of being silently interpreted
+    // under whichever Ajv instance happens to compile the effective schema.
     test('a draft-07 child deriving via allOf+$ref from a 2020-12 parent is rejected clearly', () => {
       gts.register({
         $id: 'gts.test.pkg.ns.mdparent.v1~',
@@ -493,11 +490,10 @@ describe('GTS Store Operations', () => {
       );
     });
 
-    test('a redeclaration-form child in a different dialect than its parent is allowed', () => {
-      // Per ADR-0001 / spec §11.0 derivation is by chained `$id` alone;
-      // `allOf`+`$ref` is not required. A child that re-declares the parent's
-      // fields has no cross-dialect `$ref` to compose, compiles independently
-      // in its own dialect, and MUST NOT be rejected on dialect grounds.
+    test('a redeclaration-form child in a different dialect than its root is rejected', () => {
+      // The root Type Schema selects one dialect for the complete chained `$id`
+      // hierarchy. Re-declaring inherited fields instead of using `$ref` does
+      // not permit a descendant to change that dialect.
       gts.register({
         $id: 'gts.test.pkg.ns.rdparent.v1~',
         $schema: 'http://json-schema.org/draft-07/schema#',
@@ -518,10 +514,14 @@ describe('GTS Store Operations', () => {
         a: 'ok',
       });
 
-      expect(gts.validateEntity('gts.test.pkg.ns.rdparent.v1~test.pkg._.rdchild.v1~').ok).toBe(true);
-      expect(gts.validateInstance('gts.test.pkg.ns.rdparent.v1~test.pkg._.rdchild.v1~test.pkg._.item.v1.0').ok).toBe(
-        true
+      const schemaResult = gts.validateEntity('gts.test.pkg.ns.rdparent.v1~test.pkg._.rdchild.v1~');
+      const instanceResult = gts.validateInstance(
+        'gts.test.pkg.ns.rdparent.v1~test.pkg._.rdchild.v1~test.pkg._.item.v1.0'
       );
+      expect(schemaResult.ok).toBe(false);
+      expect(schemaResult.error).toContain('derivation chain mixes JSON Schema dialects');
+      expect(instanceResult.ok).toBe(false);
+      expect(instanceResult.error).toContain('derivation chain mixes JSON Schema dialects');
     });
 
     test('a dialect mismatch reached transitively through a parent $ref is rejected', () => {
