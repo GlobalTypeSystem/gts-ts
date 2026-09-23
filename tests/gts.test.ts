@@ -423,6 +423,27 @@ describe('GTS Store Operations', () => {
       expect(result.error).toContain('Unsupported JSON Schema dialect');
     });
 
+    test('a local ref to an embedded resource in another dialect is rejected', () => {
+      const id = 'gts.test.pkg.ns.embedded_dialect.v1~';
+      gts.register({
+        $id: id,
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: { legacy: { $ref: '#/$defs/legacy' } },
+        $defs: {
+          legacy: {
+            $id: 'legacy',
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'string',
+          },
+        },
+      });
+
+      const result = gts.validateEntity(id);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('local $ref target');
+    });
+
     test('a draft-07 child deriving via allOf+$ref from a 2020-12 parent is rejected clearly', () => {
       gts.register({
         $id: 'gts.test.pkg.ns.mdparent.v1~',

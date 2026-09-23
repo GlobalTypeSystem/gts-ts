@@ -175,6 +175,54 @@ export class GtsStore {
     return 'http://json-schema.org/draft-07/schema#';
   }
 
+  private resolveLocalSchemaRef(root: any, ref: string): any {
+    if (ref === '#') return root;
+    if (!ref.startsWith('#/')) return undefined;
+    let current = root;
+    for (const encoded of ref.substring(2).split('/')) {
+      let segment: string;
+      try {
+        segment = decodeURIComponent(encoded).replace(/~1/g, '/').replace(/~0/g, '~');
+      } catch {
+        return undefined;
+      }
+      if (Array.isArray(current)) {
+        if (!/^\d+$/.test(segment)) return undefined;
+        current = current[Number(segment)];
+      } else if (current && typeof current === 'object') {
+        current = current[segment];
+      } else {
+        return undefined;
+      }
+      if (current === undefined) return undefined;
+    }
+    return current;
+  }
+
+  private detectLocalRefDialectMismatch(
+    content: any,
+    rootId: string,
+    rootDialect: string
+  ): string | null {
+    let mismatch: string | null = null;
+    const scan = (schema: any): void => {
+      if (mismatch || !schema || typeof schema !== 'object' || Array.isArray(schema)) return;
+      if (typeof schema.$ref === 'string' && schema.$ref.startsWith('#')) {
+        const target = this.resolveLocalSchemaRef(content, schema.$ref);
+        if (target && typeof target === 'object' && !Array.isArray(target) && '$schema' in target) {
+          const targetDialect = this.dialectOf(target);
+          if (targetDialect !== rootDialect) {
+            mismatch = `GTS schema reference graph mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but local $ref target '${schema.$ref}' uses ${targetDialect}`;
+            return;
+          }
+        }
+      }
+      visitJsonSubschemas(schema, '', (subschema) => scan(subschema));
+    };
+    scan(content);
+    return mismatch;
+  }
+
   // A derivation hierarchy has one dialect, selected by its root Type Schema.
   // Every descendant in the chained `$id` and every transitive `gts://` `$ref`
   // target must use that dialect, regardless of whether a descendant composes
@@ -185,6 +233,8 @@ export class GtsStore {
     const rootId = chain[0];
     const rootContent = rootId === schemaId ? content : this.get(rootId)?.content;
     const rootDialect = this.dialectOf(rootContent ?? content);
+    const localDialectError = this.detectLocalRefDialectMismatch(content, rootId, rootDialect);
+    if (localDialectError) return localDialectError;
 
     for (const chainId of chain) {
       const chainContent = chainId === schemaId ? content : this.get(chainId)?.content;
@@ -207,6 +257,8 @@ export class GtsStore {
       if (targetDialect !== rootDialect) {
         return `GTS derivation mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but $ref target '${refId}' uses ${targetDialect}; every type in the chain and its transitive gts:// $ref targets must use the root type's dialect`;
       }
+      const targetLocalDialectError = this.detectLocalRefDialectMismatch(target.content, rootId, rootDialect);
+      if (targetLocalDialectError) return targetLocalDialectError;
       for (const nestedId of this.collectSchemaDependencies(target.content)) {
         if (!visited.has(nestedId)) queue.push(nestedId);
       }
