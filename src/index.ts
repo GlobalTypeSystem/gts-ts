@@ -6,6 +6,18 @@ export { GtsRelationships } from './relationships';
 export { GtsCompatibility } from './compatibility';
 export { GtsQuery } from './query';
 export { GtsModifiers, DOCUMENT_LEVEL_KEYWORDS } from './modifiers';
+export { XGtsRefValidator, X_GTS_REF_SELF } from './x-gts-ref';
+export type { XGtsRefValidationError } from './x-gts-ref';
+export {
+  parseJSONC,
+  tryParseJSONC,
+  parseYAML,
+  tryParseYAML,
+  parseGtsTextContent,
+  parseGtsText,
+  GtsTextParseError,
+} from './text-parser';
+export { attachSourceLocations, sourceSpanAt } from './source-location';
 
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
@@ -28,7 +40,13 @@ import {
   EntityLookup,
   JsonEntity,
   GtsRefValidationMode,
+  GtsTextFormat,
+  GtsTextValidationResult,
+  GtsEntityValidationResult,
+  ValidationIssue,
 } from './types';
+import { parseGtsText } from './text-parser';
+import { SourceLocator } from './source-location';
 
 export const isValidGtsID = (id: string): boolean => Gts.isValidGtsID(id);
 export const validateGtsID = (id: string): ValidationResult => Gts.validateGtsID(id);
@@ -44,6 +62,84 @@ export class GTS {
 
   constructor(config?: Partial<GtsConfig>) {
     this.store = new GtsStore(config);
+  }
+
+  /**
+   * Source-aware validation of a raw text payload. The caller passes the
+   * serialization `format` (derived from its own file extension or content
+   * type); the library never receives a file path or name, so none can appear
+   * in diagnostics. Diagnostics carry only in-text spans (offset/line/column).
+   *
+   * Side effect: every successfully-parsed entity is registered into this
+   * store, even when other entities in the payload are invalid or when the
+   * overall result is `ok: false`. Registration is not rolled back. Callers
+   * that need all-or-nothing semantics should validate against a throwaway
+   * `GTS` instance and only register into their real store on success.
+   */
+  registerAndValidateText(
+    text: string,
+    format: GtsTextFormat = 'jsonc',
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): GtsTextValidationResult {
+    const parsed = parseGtsText(text, format);
+    if (!parsed.ok) {
+      return { ok: false, entities: [], errors: parsed.errors || [] };
+    }
+
+    const locator = new SourceLocator(format, text);
+    const results: GtsEntityValidationResult[] = [];
+    const registrationErrors = new Map<number, ValidationResult>();
+    const idCounts = new Map<string, number>();
+    for (const entity of parsed.entities) {
+      if (entity.id) idCounts.set(entity.id, (idCounts.get(entity.id) || 0) + 1);
+    }
+    const setRegistrationError = (entityIndex: number, id: string, message: string): void => {
+      const issue: ValidationIssue = {
+        instancePath: '/$id',
+        schemaPath: '#',
+        keyword: 'registration',
+        message,
+        params: {},
+      };
+      registrationErrors.set(entityIndex, { id, ok: false, error: message, errors: [issue] });
+    };
+    parsed.entities.forEach((entity, entityIndex) => {
+      if ((idCounts.get(entity.id) || 0) > 1) {
+        setRegistrationError(entityIndex, entity.id, `Duplicate entity id in text payload: '${entity.id}'`);
+        return;
+      }
+      try {
+        this.store.register(entity);
+      } catch (error) {
+        setRegistrationError(entityIndex, entity.id, error instanceof Error ? error.message : String(error));
+      }
+    });
+
+    parsed.entities.forEach((entity, entityIndex) => {
+      const rawResult =
+        registrationErrors.get(entityIndex) ||
+        (entity.isSchema
+          ? this.store.validateSchema(entity.id, refValidation)
+          : this.store.validateInstance(entity.id, refValidation));
+      const fallbackIssue: ValidationIssue = {
+        instancePath: entity.isSchema ? '/$id' : '/',
+        schemaPath: '#',
+        keyword: entity.isSchema ? 'schema' : 'instance',
+        message: rawResult.error,
+        params: {},
+      };
+      const issues = rawResult.errors?.length ? rawResult.errors : rawResult.ok ? [] : [fallbackIssue];
+      const localizedErrors = issues.map((issue) => {
+        if (!issue.entityId) return locator.attach(entityIndex, [issue])[0];
+        const dependencyIndex = parsed.entities.findIndex((candidate) => candidate.id === issue.entityId);
+        return dependencyIndex >= 0 ? locator.attach(dependencyIndex, [issue])[0] : issue;
+      });
+      const result = localizedErrors.length > 0 ? { ...rawResult, errors: localizedErrors } : rawResult;
+      results.push({ entityIndex, id: entity.id, isSchema: entity.isSchema, result });
+    });
+
+    const errors = results.flatMap((entry) => entry.result.errors || []);
+    return { ok: results.every((entry) => entry.result.ok), entities: results, errors };
   }
 
   /**
@@ -98,6 +194,13 @@ export class GTS {
 
   validateInstance(id: string, refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid): ValidationResult {
     return this.store.validateInstance(id, refValidation);
+  }
+
+  validateInstanceAsync(
+    id: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): Promise<ValidationResult> {
+    return this.store.validateInstanceAsync(id, refValidation);
   }
 
   getAttribute(path: string): AttributeResult {
@@ -208,6 +311,20 @@ export class GTS {
     return this.store.validateSchemaAgainstParent(schemaId, refValidation);
   }
 
+  validateSchema(
+    schemaId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult {
+    return this.store.validateSchema(schemaId, refValidation);
+  }
+
+  validateSchemaAsync(
+    schemaId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): Promise<ValidationResult> {
+    return this.store.validateSchemaAsync(schemaId, refValidation);
+  }
+
   /**
    * OP#6 `POST /validate-json` (transient validation, spec commit ab1287e) -
    * validates a candidate type schema document without registering it.
@@ -221,8 +338,13 @@ export class GTS {
    * validates candidate instance JSON against an already-registered type,
    * without requiring the candidate itself to be registered.
    */
-  validateTransientInstance(content: any, typeId: string, resultId: string | null): ValidationResult {
-    return this.store.validateTransientInstance(content, typeId, resultId);
+  validateTransientInstance(
+    content: any,
+    typeId: string,
+    resultId: string | null,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult {
+    return this.store.validateTransientInstance(content, typeId, resultId, refValidation);
   }
 
   validateEntity(

@@ -1,10 +1,14 @@
 import { createHash } from 'crypto';
 import Ajv from 'ajv';
+import AjvCore from 'ajv/dist/core';
+import Ajv2019 from 'ajv/dist/2019';
+import Ajv2020 from 'ajv/dist/2020';
 import { applyGtsFormats } from './formats';
 import {
   GtsConfig,
   JsonEntity,
   ValidationResult,
+  ValidationIssue,
   EntityConflictError,
   EntityContentDepthError,
   GTS_URI_PREFIX,
@@ -14,7 +18,7 @@ import {
 } from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
-import { visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
+import { escapeJsonPointerSegment, visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
 import { GtsCompatibility, findCrossedBound, isEmptySchema } from './compatibility';
 import { GtsModifiers } from './modifiers';
 
@@ -84,6 +88,8 @@ export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   private config: GtsConfig;
   private ajv: Ajv;
+  private ajv2019: Ajv2019;
+  private ajv2020: Ajv2020;
 
   constructor(config?: Partial<GtsConfig>) {
     this.config = {
@@ -92,25 +98,168 @@ export class GtsStore {
       allowEntityUpdates: config?.allowEntityUpdates ?? false,
     };
 
-    this.ajv = new Ajv({
+    const options = {
       strict: false,
       validateSchema: false,
       addUsedSchema: false,
       loadSchema: this.loadSchema.bind(this),
-      validateFormats: true, // ADR-0005: uuid/email/date-time/... are assertions, not annotations.
-      // P6-7: without this, `validate.errors` only ever has one entry, even
-      // when several keywords fail, making every caller's `.join('; ')`
-      // framing (`formatValidationError`'s call sites) dead code that
-      // silently drops every failure but the first. Multiple simultaneous
-      // failures are common (e.g. two properties of the wrong type at
-      // once), so a caller only ever seeing the first is a real gap, not a
-      // documented limitation worth keeping.
+      validateFormats: true,
       allErrors: true,
-    });
-    // ADR-0005 format assertions (uuid, email, date-time, date, time, uri,
-    // hostname, ipv4, ipv6, regex), shared by OP#6 (validateInstance) and
-    // OP#13 (validateSchemaTraits) since both compile against this.ajv.
+    };
+    this.ajv = new Ajv(options);
+    this.ajv2019 = new Ajv2019(options);
+    this.ajv2020 = new Ajv2020(options);
     applyGtsFormats(this.ajv);
+    applyGtsFormats(this.ajv2019);
+    applyGtsFormats(this.ajv2020);
+  }
+
+  // All three registries extend AjvCore, so the common base type lets callers
+  // use compile/addSchema/removeSchema/validateSchema without a cast.
+  private ajvForSchema(schema: any): AjvCore {
+    const dialect = this.dialectOf(schema);
+    if (dialect === '2020-12') return this.ajv2020;
+    if (dialect === '2019-09') return this.ajv2019;
+    return this.ajv;
+  }
+
+  // The Ajv registries are dialect-specific (each holds only its own dialect's
+  // vocabulary), and instance validation compiles synchronously, so a `$ref`
+  // target must live in the SAME Ajv instance as the schema that references
+  // it: `$ref` composes the referenced schema INTO the referrer's single
+  // compiled validation, evaluated under the referrer's one dialect. JSON
+  // Schema itself assumes one dialect per validation and defines no semantics
+  // for composing subschemas of different dialects, so a cross-dialect `$ref`
+  // is not merely an Ajv limitation - it is underspecified. This returns the
+  // canonical dialect bucket (matching `ajvForSchema`'s routing) so a mismatch
+  // across a `$ref` can be rejected with a clear error instead of surfacing as
+  // a compile throw that the surrounding catch turns into a bogus "invalid".
+  private dialectOf(schema: any): string {
+    const dialect = schema?.$schema;
+    if (dialect === undefined) return 'draft-07';
+    if (typeof dialect !== 'string' || dialect.length === 0) {
+      throw new Error('$schema must declare a supported JSON Schema dialect');
+    }
+    let uri: URL;
+    try {
+      uri = new URL(dialect);
+    } catch {
+      throw new Error(`Unsupported JSON Schema dialect: ${String(dialect)}`);
+    }
+    if (
+      (uri.protocol !== 'http:' && uri.protocol !== 'https:') ||
+      uri.hostname.toLowerCase() !== 'json-schema.org' ||
+      uri.username !== '' ||
+      uri.password !== '' ||
+      uri.port !== '' ||
+      uri.search !== '' ||
+      uri.hash !== ''
+    ) {
+      throw new Error(`Unsupported JSON Schema dialect: ${dialect}`);
+    }
+    switch (uri.pathname) {
+      case '/draft-07/schema':
+        return 'draft-07';
+      case '/draft/2019-09/schema':
+        return '2019-09';
+      case '/draft/2020-12/schema':
+        return '2020-12';
+      default:
+        throw new Error(`Unsupported JSON Schema dialect: ${dialect}`);
+    }
+  }
+
+  private canonicalDialectUri(dialect: string): string {
+    if (dialect === '2019-09') return 'https://json-schema.org/draft/2019-09/schema';
+    if (dialect === '2020-12') return 'https://json-schema.org/draft/2020-12/schema';
+    return 'http://json-schema.org/draft-07/schema#';
+  }
+
+  private resolveLocalSchemaRef(root: any, ref: string): any {
+    if (ref === '#') return root;
+    if (!ref.startsWith('#/')) return undefined;
+    let current = root;
+    for (const encoded of ref.substring(2).split('/')) {
+      let segment: string;
+      try {
+        segment = decodeURIComponent(encoded).replace(/~1/g, '/').replace(/~0/g, '~');
+      } catch {
+        return undefined;
+      }
+      if (Array.isArray(current)) {
+        if (!/^\d+$/.test(segment)) return undefined;
+        current = current[Number(segment)];
+      } else if (current && typeof current === 'object') {
+        current = current[segment];
+      } else {
+        return undefined;
+      }
+      if (current === undefined) return undefined;
+    }
+    return current;
+  }
+
+  private detectLocalRefDialectMismatch(content: any, rootId: string, rootDialect: string): string | null {
+    let mismatch: string | null = null;
+    const scan = (schema: any): void => {
+      if (mismatch || !schema || typeof schema !== 'object' || Array.isArray(schema)) return;
+      if (typeof schema.$ref === 'string' && schema.$ref.startsWith('#')) {
+        const target = this.resolveLocalSchemaRef(content, schema.$ref);
+        if (target && typeof target === 'object' && !Array.isArray(target) && '$schema' in target) {
+          const targetDialect = this.dialectOf(target);
+          if (targetDialect !== rootDialect) {
+            mismatch = `GTS schema reference graph mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but local $ref target '${schema.$ref}' uses ${targetDialect}`;
+            return;
+          }
+        }
+      }
+      visitJsonSubschemas(schema, '', (subschema) => scan(subschema));
+    };
+    scan(content);
+    return mismatch;
+  }
+
+  // A derivation hierarchy has one dialect, selected by its root Type Schema.
+  // Every descendant in the chained `$id` and every transitive `gts://` `$ref`
+  // target must use that dialect, regardless of whether a descendant composes
+  // its parent with `$ref` or re-declares the inherited fields. Operates on raw
+  // `content` + `schemaId` so it also covers transient candidates.
+  private detectChainDialectMismatch(content: any, schemaId: string): string | null {
+    const chain = this.buildSchemaChain(schemaId);
+    const rootId = chain[0];
+    const rootContent = rootId === schemaId ? content : this.get(rootId)?.content;
+    const rootDialect = this.dialectOf(rootContent ?? content);
+    const localDialectError = this.detectLocalRefDialectMismatch(content, rootId, rootDialect);
+    if (localDialectError) return localDialectError;
+
+    for (const chainId of chain) {
+      const chainContent = chainId === schemaId ? content : this.get(chainId)?.content;
+      if (!chainContent) continue;
+      const chainDialect = this.dialectOf(chainContent);
+      if (chainDialect !== rootDialect) {
+        return `GTS derivation chain mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but '${chainId}' uses ${chainDialect}; every type in a chained $id hierarchy must use the root type's dialect`;
+      }
+    }
+
+    const visited = new Set<string>();
+    const queue = Array.from(this.collectSchemaDependencies(content));
+    while (queue.length > 0) {
+      const refId = queue.shift() as string;
+      if (refId === schemaId || visited.has(refId)) continue;
+      visited.add(refId);
+      const target = this.get(refId);
+      if (!target?.isSchema || !target.content) continue;
+      const targetDialect = this.dialectOf(target.content);
+      if (targetDialect !== rootDialect) {
+        return `GTS derivation mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but $ref target '${refId}' uses ${targetDialect}; every type in the chain and its transitive gts:// $ref targets must use the root type's dialect`;
+      }
+      const targetLocalDialectError = this.detectLocalRefDialectMismatch(target.content, rootId, rootDialect);
+      if (targetLocalDialectError) return targetLocalDialectError;
+      for (const nestedId of this.collectSchemaDependencies(target.content)) {
+        if (!visited.has(nestedId)) queue.push(nestedId);
+      }
+    }
+    return null;
   }
 
   private async loadSchema(uri: string): Promise<any> {
@@ -185,7 +334,9 @@ export class GtsStore {
 
     const schemaUnchanged = !!previous && !replacing && previous.isSchema && entity.isSchema;
     if (previous?.isSchema && !schemaUnchanged) {
-      this.ajv.removeSchema(entity.id);
+      for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) {
+        ajv.removeSchema(entity.id);
+      }
     }
     this.byId.set(entity.id, entity);
 
@@ -197,7 +348,7 @@ export class GtsStore {
         if (!normalizedSchema.$id) {
           normalizedSchema.$id = entity.id;
         }
-        this.ajv.addSchema(normalizedSchema, entity.id);
+        this.ajvForSchema(normalizedSchema).addSchema(normalizedSchema, entity.id);
       } catch (err) {
         // Ignore malformed schemas; unchanged schemas do not reach this path.
       }
@@ -224,7 +375,9 @@ export class GtsStore {
     this.byId.delete(id);
     if (entity.isSchema) {
       try {
-        this.ajv.removeSchema(id);
+        for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) {
+          ajv.removeSchema(id);
+        }
       } catch (err) {
         // Ignore errors removing schema - mirrors the best-effort addSchema above.
       }
@@ -258,11 +411,28 @@ export class GtsStore {
     return this.validateInstanceTransitive(gtsId, new Set(), new Map(), refValidation);
   }
 
+  async validateInstanceAsync(
+    gtsId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): Promise<ValidationResult> {
+    return this.validateInstance(gtsId, refValidation);
+  }
+
+  validateTransientInstance(
+    content: any,
+    typeId: string,
+    resultId: string | null,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult {
+    return this.validateInstanceTransitive(resultId ?? '', new Set(), new Map(), refValidation, { content, typeId });
+  }
+
   private validateInstanceTransitive(
     gtsId: string,
     visiting: Set<string>,
     completed: Map<string, ValidationResult>,
-    refValidation: GtsRefValidationMode
+    refValidation: GtsRefValidationMode,
+    candidate?: { content: any; typeId: string }
   ): ValidationResult {
     const key = `instance:${gtsId}`;
     const cached = completed.get(key);
@@ -272,23 +442,37 @@ export class GtsStore {
     visiting.add(key);
     const referencedIds = new Set<string>();
     const wildcardPatterns = new Set<string>();
-    const localResult = this.validateInstanceLocal(gtsId, referencedIds, wildcardPatterns, refValidation);
+    const localResult = candidate
+      ? this.validateTransientInstanceLocal(
+          candidate.content,
+          candidate.typeId,
+          gtsId,
+          referencedIds,
+          wildcardPatterns,
+          refValidation
+        )
+      : this.validateInstanceLocal(gtsId, referencedIds, wildcardPatterns, refValidation);
     if (!localResult.ok) {
       visiting.delete(key);
       completed.set(key, localResult);
       return localResult;
     }
 
-    let objId = gtsId;
-    if (Gts.isValidGtsID(gtsId)) objId = Gts.parseGtsID(gtsId).id;
-    const obj = this.get(objId)!;
-    const typeResult = this.validateSchemaTransitive(obj.schemaId!, visiting, completed, refValidation);
+    let typeId = candidate?.typeId;
+    if (!typeId) {
+      let objId = gtsId;
+      if (Gts.isValidGtsID(gtsId)) objId = Gts.parseGtsID(gtsId).id;
+      typeId = this.get(objId)!.schemaId!;
+    }
+    const typeResult = this.validateSchemaTransitive(typeId, visiting, completed, refValidation);
     if (!typeResult.ok) {
+      const message = `Instance type '${typeId}' is invalid: ${typeResult.error}`;
       const result = {
         id: gtsId,
         ok: false,
         valid: false,
-        error: `Instance type '${obj.schemaId}' is invalid: ${typeResult.error}`,
+        error: message,
+        errors: this.transitiveIssues(message, typeResult, '/type', 'type'),
       };
       visiting.delete(key);
       completed.set(key, result);
@@ -299,11 +483,13 @@ export class GtsStore {
       for (const dependencyId of referencedIds) {
         const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed, refValidation);
         if (!dependencyResult.ok) {
+          const message = `Referenced entity '${dependencyId}' is invalid: ${dependencyResult.error}`;
           const result = {
             id: gtsId,
             ok: false,
             valid: false,
-            error: `Referenced entity '${dependencyId}' is invalid: ${dependencyResult.error}`,
+            error: message,
+            errors: this.transitiveIssues(message, dependencyResult, '/$id', 'x-gts-ref'),
           };
           visiting.delete(key);
           completed.set(key, result);
@@ -312,11 +498,13 @@ export class GtsStore {
       }
       for (const pattern of wildcardPatterns) {
         if (!this.hasValidWildcardMatch(pattern, visiting, completed, refValidation)) {
+          const message = `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`;
           const result = {
             id: gtsId,
             ok: false,
             valid: false,
-            error: `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`,
+            error: message,
+            errors: [this.validationIssue(message, '/$id', 'x-gts-ref')],
           };
           visiting.delete(key);
           completed.set(key, result);
@@ -383,15 +571,28 @@ export class GtsStore {
 
       // §9.11.3 item 2 - the rightmost type in the chain must be instantiable
       if (GtsModifiers.isAbstract(schemaEntity.content)) {
+        const message = `Type '${obj.schemaId}' is abstract and cannot be directly instantiated`;
         return {
           id: gtsId,
           ok: false,
           valid: false,
-          error: `Type '${obj.schemaId}' is abstract and cannot be directly instantiated`,
+          error: message,
+          errors: [this.validationIssue(message, '/type', 'x-gts-abstract', { schemaId: obj.schemaId })],
         };
       }
 
-      const validate = this.ajv.compile(this.normalizeSchema(schemaEntity.content));
+      const dialectError = this.detectChainDialectMismatch(schemaEntity.content, obj.schemaId);
+      if (dialectError) {
+        return {
+          id: gtsId,
+          ok: false,
+          valid: false,
+          error: dialectError,
+          errors: [this.validationIssue(dialectError, '/type', 'dialect', { schemaId: obj.schemaId })],
+        };
+      }
+
+      const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
       const isValid = validate(obj.content);
 
       if (!isValid) {
@@ -405,12 +606,19 @@ export class GtsStore {
           ok: false,
           valid: false,
           error: errors,
+          errors: this.validationIssuesFromAjv(validate.errors),
         };
       }
 
       // Validate x-gts-ref constraints
       const xGtsRefValidator = new XGtsRefValidator(this, refValidation);
-      const xGtsRefErrors = xGtsRefValidator.validateInstance(obj.content, schemaEntity.content, '', obj.schemaId);
+      const xGtsRefErrors = xGtsRefValidator.validateInstance(
+        obj.content,
+        schemaEntity.content,
+        '',
+        obj.schemaId,
+        gtsId
+      );
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
         return {
@@ -418,6 +626,7 @@ export class GtsStore {
           ok: false,
           valid: false,
           error: `x-gts-ref validation failed: ${errorMsgs}`,
+          errors: xGtsRefErrors.map((error) => this.xGtsRefIssue(error)),
         };
       }
       for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
@@ -463,8 +672,14 @@ export class GtsStore {
    * too - closing the same junk-document-compiles-as-schema hole for the
    * auto-detect route that P6-2/P6-3 closed for the explicit-type route.
    */
-  validateTransientInstance(content: any, typeId: string, resultId: string | null): ValidationResult {
-    const id = resultId ?? '';
+  private validateTransientInstanceLocal(
+    content: any,
+    typeId: string,
+    id: string,
+    referencedIds: Set<string>,
+    wildcardPatterns: Set<string>,
+    refValidation: GtsRefValidationMode
+  ): ValidationResult {
     try {
       const schemaEntity = this.get(typeId);
       if (!schemaEntity) {
@@ -476,32 +691,179 @@ export class GtsStore {
 
       // §9.11.3 item 2 - the rightmost type in the chain must be instantiable.
       if (GtsModifiers.isAbstract(schemaEntity.content)) {
+        const message = `Type '${typeId}' is abstract and cannot be directly instantiated`;
         return {
           id,
           ok: false,
-          error: `Type '${typeId}' is abstract and cannot be directly instantiated`,
+          error: message,
+          errors: [this.validationIssue(message, '/type', 'x-gts-abstract', { schemaId: typeId })],
         };
       }
 
-      const validate = this.ajv.compile(this.normalizeSchema(schemaEntity.content));
+      const dialectError = this.detectChainDialectMismatch(schemaEntity.content, typeId);
+      if (dialectError) {
+        return {
+          id,
+          ok: false,
+          error: dialectError,
+          errors: [this.validationIssue(dialectError, '/type', 'dialect', { schemaId: typeId })],
+        };
+      }
+
+      const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
       const isValid = validate(content);
 
       if (!isValid) {
         const errors = validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
-        return { id, ok: false, error: errors };
+        return { id, ok: false, error: errors, errors: this.validationIssuesFromAjv(validate.errors) };
       }
 
-      const xGtsRefValidator = new XGtsRefValidator(this);
-      const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content, '', typeId);
+      const xGtsRefValidator = new XGtsRefValidator(this, refValidation);
+      const xGtsRefErrors = xGtsRefValidator.validateInstance(content, schemaEntity.content, '', typeId, id);
       if (xGtsRefErrors.length > 0) {
         const errorMsgs = xGtsRefErrors.map((err) => err.reason).join('; ');
-        return { id, ok: false, error: `x-gts-ref validation failed: ${errorMsgs}` };
+        return {
+          id,
+          ok: false,
+          error: `x-gts-ref validation failed: ${errorMsgs}`,
+          errors: xGtsRefErrors.map((error) => this.xGtsRefIssue(error)),
+        };
+      }
+      for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
+        referencedIds.add(dependencyId);
+      }
+      for (const pattern of xGtsRefValidator.getReferencedWildcardPatterns()) {
+        wildcardPatterns.add(pattern);
       }
 
       return { id, ok: true, error: '' };
     } catch (error) {
       return { id, ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  private validationIssueFromAjv(error: import('ajv').ErrorObject, instancePathPrefix: string = ''): ValidationIssue {
+    const instancePath = `${instancePathPrefix}${error.instancePath}` || '/';
+    return {
+      instancePath,
+      schemaPath: error.schemaPath || '#',
+      keyword: error.keyword,
+      message: error.message || 'Validation failed',
+      params: error.params as Record<string, unknown>,
+      data: error.data,
+    };
+  }
+
+  private validationIssuesFromAjv(
+    errors: import('ajv').ErrorObject[] | null | undefined,
+    instancePathPrefix: string = ''
+  ): ValidationIssue[] {
+    return (errors || []).map((error) => this.validationIssueFromAjv(error, instancePathPrefix));
+  }
+
+  private validationIssue(
+    message: string,
+    instancePath: string,
+    keyword: string,
+    params: Record<string, unknown> = {}
+  ): ValidationIssue {
+    return { instancePath, schemaPath: '#', keyword, message, params };
+  }
+
+  // A transitive dependency failure (an invalid type, referenced entity,
+  // ancestor, schema `$ref`, or x-gts-ref target) must retain both sides of the
+  // failure: a wrapper issue located on the referring entity and the child's
+  // structured issues tagged with their own entity identity. Text validation
+  // can then attach each issue only to the document entity it actually describes.
+  private transitiveIssues(
+    message: string,
+    child: ValidationResult,
+    instancePath: string,
+    keyword: string
+  ): ValidationIssue[] {
+    const wrapper = this.validationIssue(message, instancePath, keyword);
+    if (!child.errors || child.errors.length === 0) return [wrapper];
+    return [wrapper, ...child.errors.map((issue) => (issue.entityId ? issue : { ...issue, entityId: child.id }))];
+  }
+
+  private xGtsRefIssue(error: {
+    fieldPath: string;
+    reason: string;
+    value: unknown;
+    refPattern: string;
+  }): ValidationIssue {
+    return this.validationIssue(error.reason, error.fieldPath || '/', 'x-gts-ref', {
+      value: error.value,
+      refPattern: error.refPattern,
+    });
+  }
+
+  // Best-effort mapping of a derivation message's property name to a JSON
+  // Pointer into the schema document. It only walks `properties`/`items`/`allOf`
+  // and cannot resolve `oneOf`/`anyOf`/`$ref` composition; callers fall back to
+  // `/$id` when it returns null. The property name is recovered from the
+  // human-readable message, so it is tied to `compareOverlayToBase` wording.
+  private formatDiagnosticPropertyPath(parts: string[]): string {
+    return parts.some((part) => /[./~]/.test(part))
+      ? `/${parts.map(escapeJsonPointerSegment).join('/')}`
+      : parts.join('.');
+  }
+
+  private parseDiagnosticPropertyPath(path: string): string[] {
+    return path.startsWith('/')
+      ? path
+          .slice(1)
+          .split('/')
+          .map((part) => part.replace(/~1/g, '/').replace(/~0/g, '~'))
+      : path.split('.');
+  }
+
+  private findSchemaPropertyPath(content: any, parts: string[]): string | null {
+    const walk = (node: any, currentPath: string): string | null => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.properties && typeof node.properties === 'object') {
+        let current = node.properties;
+        let path = currentPath ? `${currentPath}/properties` : '/properties';
+        let found = true;
+        for (const part of parts) {
+          const escapedPart = escapeJsonPointerSegment(part);
+          if (current?.[part] !== undefined) {
+            path += `/${escapedPart}`;
+            current = current[part];
+          } else if (current?.properties?.[part] !== undefined) {
+            path += `/properties/${escapedPart}`;
+            current = current.properties[part];
+          } else if (current?.items && part === 'items') {
+            path += '/items';
+            current = current.items;
+          } else {
+            found = false;
+            break;
+          }
+        }
+        if (found) return path;
+      }
+      if (Array.isArray(node.allOf)) {
+        for (let index = 0; index < node.allOf.length; index++) {
+          const result = walk(node.allOf[index], `${currentPath}/allOf/${index}`);
+          if (result) return result;
+        }
+      }
+      return null;
+    };
+    return walk(content, '');
+  }
+
+  private derivationIssues(content: any, messages: string[]): ValidationIssue[] {
+    return messages.map((message) => {
+      const property = message.match(/^Property '([^']+)'/)?.[1];
+      return this.validationIssue(
+        message,
+        property ? this.findSchemaPropertyPath(content, this.parseDiagnosticPropertyPath(property)) || '/$id' : '/$id',
+        'x-gts-schema',
+        property ? { property } : {}
+      );
+    });
   }
 
   /**
@@ -551,13 +913,36 @@ export class GtsStore {
 
       const newKey = key;
       let newValue = value;
+      if (key === '$schema' && typeof value === 'string') {
+        newValue = this.canonicalDialectUri(this.dialectOf({ $schema: value }));
+      }
 
       // Recursively normalize nested objects
       if (value && typeof value === 'object') {
         newValue = this.normalizeSchemaRecursive(value);
       }
 
-      normalized[newKey] = newValue;
+      Object.defineProperty(normalized, newKey, {
+        value: newValue,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+
+    const protoSchema = Object.getOwnPropertyDescriptor(normalized.properties || {}, '__proto__')?.value;
+    if (protoSchema !== undefined) {
+      delete normalized.properties.__proto__;
+      const patternProperties = normalized.patternProperties || {};
+      const exactProtoPattern = '^__proto__$';
+      const existing = Object.getOwnPropertyDescriptor(patternProperties, exactProtoPattern)?.value;
+      Object.defineProperty(patternProperties, exactProtoPattern, {
+        value: existing === undefined ? protoSchema : { allOf: [existing, protoSchema] },
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+      normalized.patternProperties = patternProperties;
     }
 
     // Clean up combinator arrays: remove subschemas that were x-gts-ref-only (now empty after stripping)
@@ -1096,7 +1481,7 @@ export class GtsStore {
   validateCastResult(toSchema: any, casted: any): string | null {
     try {
       const modifiedSchema = this.removeGtsConstConstraints(toSchema);
-      const validate = this.ajv.compile(this.normalizeSchema(modifiedSchema));
+      const validate = this.ajvForSchema(toSchema).compile(this.normalizeSchema(modifiedSchema));
       if (!validate(casted)) {
         // P6-4: shared formatter, so a cast-result failure reads the same
         // way as every other validation path instead of raw Ajv wording.
@@ -1176,6 +1561,56 @@ export class GtsStore {
     return unique.sort();
   }
 
+  private validateSchemaDocument(content: any, schemaId: string): ValidationResult {
+    try {
+      const normalized = this.normalizeSchema(content);
+      const ajv = this.ajvForSchema(normalized);
+      const metaOk = ajv.validateSchema(normalized);
+      if (metaOk) return { id: schemaId, ok: true, error: '' };
+      const issues = this.validationIssuesFromAjv(ajv.errors);
+      const error = (ajv.errors || []).map((item) => this.formatValidationError(item)).join('; ');
+      return {
+        id: schemaId,
+        ok: false,
+        error: `JSON Schema validation failed: ${error}`,
+        errors: issues,
+      };
+    } catch (error) {
+      const message = `JSON Schema validation failed: ${error instanceof Error ? error.message : String(error)}`;
+      return {
+        id: schemaId,
+        ok: false,
+        error: message,
+        errors: [this.validationIssue(message, '/$schema', 'schema')],
+      };
+    }
+  }
+
+  validateSchema(
+    schemaId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): ValidationResult {
+    const entity = this.get(schemaId);
+    if (!entity) {
+      const message = `Entity not found: ${schemaId}`;
+      return { id: schemaId, ok: false, error: message, errors: [this.validationIssue(message, '/$id', 'schema')] };
+    }
+    if (!entity.isSchema) {
+      const message = `Entity is not a schema: ${schemaId}`;
+      return { id: schemaId, ok: false, error: message, errors: [this.validationIssue(message, '/$id', 'schema')] };
+    }
+    const documentResult = this.validateSchemaDocument(entity.content, schemaId);
+    if (!documentResult.ok) return documentResult;
+    return this.validateSchemaAgainstParent(schemaId, refValidation);
+  }
+
+  async validateSchemaAsync(
+    schemaId: string,
+    refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
+  ): Promise<ValidationResult> {
+    return this.validateSchema(schemaId, refValidation);
+  }
+
   /**
    * OP#6 `POST /validate-json` (transient JSON validation, spec commit
    * ab1287e) - validates a candidate type schema document WITHOUT
@@ -1197,17 +1632,23 @@ export class GtsStore {
    */
   validateTransientSchema(content: any, schemaId: string): ValidationResult {
     try {
-      const normalized = this.normalizeSchema(content);
-      const metaOk = this.ajv.validateSchema(normalized);
-      if (!metaOk) {
-        const errors = (this.ajv.errors || []).map((e) => this.formatValidationError(e)).join('; ');
-        return { id: schemaId, ok: false, error: `JSON Schema validation failed: ${errors}` };
-      }
+      const documentResult = this.validateSchemaDocument(content, schemaId);
+      if (!documentResult.ok) return documentResult;
 
       // §9.11.5 - the explicit validation endpoints always enforce the guards.
       const ruleError = this.checkTypeSchemaRules(content, schemaId, { enforceGuards: true });
       if (ruleError) {
         return { id: schemaId, ok: false, error: ruleError };
+      }
+
+      const dialectError = this.detectChainDialectMismatch(content, schemaId);
+      if (dialectError) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: dialectError,
+          errors: [this.validationIssue(dialectError, '/$schema', 'dialect', { schemaId })],
+        };
       }
 
       let chain: string[];
@@ -1238,9 +1679,14 @@ export class GtsStore {
       const resolvedParent = this.resolveSchemaFully(parentEntity.content);
       const overlay = this.extractOverlay(content);
       const inheritsViaRef = this.inheritsParentViaRef(content, parentId);
-      const errors = this.compareOverlayToBase(overlay, resolvedParent, '', inheritsViaRef);
+      const errors = this.compareOverlayToBase(overlay, resolvedParent, [], inheritsViaRef);
       if (errors.length > 0) {
-        return { id: schemaId, ok: false, error: `Derived schema is not compatible with base: ${errors.join('; ')}` };
+        return {
+          id: schemaId,
+          ok: false,
+          error: `Derived schema is not compatible with base: ${errors.join('; ')}`,
+          errors: this.derivationIssues(content, errors),
+        };
       }
 
       return { id: schemaId, ok: true, error: '' };
@@ -1322,10 +1768,12 @@ export class GtsStore {
     for (const ancestorId of chain.slice(0, -1)) {
       const ancestorResult = this.validateSchemaTransitive(ancestorId, visiting, completed, refValidation);
       if (!ancestorResult.ok) {
+        const message = `Ancestor type '${ancestorId}' is invalid: ${ancestorResult.error}`;
         const result = {
           id: schemaId,
           ok: false,
-          error: `Ancestor type '${ancestorId}' is invalid: ${ancestorResult.error}`,
+          error: message,
+          errors: this.transitiveIssues(message, ancestorResult, '/$id', 'ancestor'),
         };
         visiting.delete(key);
         completed.set(key, result);
@@ -1336,10 +1784,12 @@ export class GtsStore {
     for (const dependencyId of this.collectSchemaDependencies(entity.content)) {
       const dependencyResult = this.validateSchemaTransitive(dependencyId, visiting, completed, refValidation);
       if (!dependencyResult.ok) {
+        const message = `Referenced type '${dependencyId}' is invalid: ${dependencyResult.error}`;
         const result = {
           id: schemaId,
           ok: false,
-          error: `Referenced type '${dependencyId}' is invalid: ${dependencyResult.error}`,
+          error: message,
+          errors: this.transitiveIssues(message, dependencyResult, '/$ref', 'reference'),
         };
         visiting.delete(key);
         completed.set(key, result);
@@ -1351,10 +1801,12 @@ export class GtsStore {
       for (const dependencyId of referencedIds) {
         const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed, refValidation);
         if (!dependencyResult.ok) {
+          const message = `Referenced x-gts-ref entity '${dependencyId}' is invalid: ${dependencyResult.error}`;
           const result = {
             id: schemaId,
             ok: false,
-            error: `Referenced x-gts-ref entity '${dependencyId}' is invalid: ${dependencyResult.error}`,
+            error: message,
+            errors: this.transitiveIssues(message, dependencyResult, '/$id', 'x-gts-ref'),
           };
           visiting.delete(key);
           completed.set(key, result);
@@ -1363,10 +1815,12 @@ export class GtsStore {
       }
       for (const pattern of wildcardPatterns) {
         if (!this.hasValidWildcardMatch(pattern, visiting, completed, refValidation)) {
+          const message = `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`;
           const result = {
             id: schemaId,
             ok: false,
-            error: `x-gts-ref wildcard constraint '${pattern}' has no valid registered match`,
+            error: message,
+            errors: [this.validationIssue(message, '/$id', 'x-gts-ref')],
           };
           visiting.delete(key);
           completed.set(key, result);
@@ -1459,13 +1913,33 @@ export class GtsStore {
         return { id: schemaId, ok: false, error: refError };
       }
 
+      const dialectError = this.detectChainDialectMismatch(content, schemaId);
+      if (dialectError) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: dialectError,
+          errors: [this.validationIssue(dialectError, '/$schema', 'dialect', { schemaId })],
+        };
+      }
+
       const schemaRefValidator = new XGtsRefValidator(this, refValidation);
+      const declarationErrors = schemaRefValidator.validateSchema(content);
+      if (declarationErrors.length > 0) {
+        return {
+          id: schemaId,
+          ok: false,
+          error: `x-gts-ref validation failed: ${declarationErrors.map((error) => error.reason).join('; ')}`,
+          errors: declarationErrors.map((error) => this.xGtsRefIssue(error)),
+        };
+      }
       const xGtsRefErrors = schemaRefValidator.validateSchemaRefExistence(content, '', schemaId);
       if (xGtsRefErrors.length > 0) {
         return {
           id: schemaId,
           ok: false,
           error: `x-gts-ref validation failed: ${xGtsRefErrors.map((error) => error.reason).join('; ')}`,
+          errors: xGtsRefErrors.map((error) => this.xGtsRefIssue(error)),
         };
       }
       for (const dependencyId of schemaRefValidator.getReferencedIds()) {
@@ -1513,9 +1987,14 @@ export class GtsStore {
 
       // Compare overlay against resolved parent
       const inheritsViaRef = this.inheritsParentViaRef(content, parentId);
-      const errors = this.compareOverlayToBase(overlay, resolvedParent, '', inheritsViaRef);
+      const errors = this.compareOverlayToBase(overlay, resolvedParent, [], inheritsViaRef);
       if (errors.length > 0) {
-        return { id: schemaId, ok: false, error: errors.join('; ') };
+        return {
+          id: schemaId,
+          ok: false,
+          error: errors.join('; '),
+          errors: this.derivationIssues(content, errors),
+        };
       }
 
       // OP#13: Validate schema traits across the inheritance chain
@@ -1670,11 +2149,18 @@ export class GtsStore {
 
     try {
       const schemaForValidation = isAbstract ? this.withoutRequired(effectiveSchema) : effectiveSchema;
-      const validate = this.ajv.compile(this.normalizeSchema(schemaForValidation));
+      const validate = this.ajvForSchema(self?.content ?? schemaForValidation).compile(
+        this.normalizeSchema(schemaForValidation)
+      );
       if (!validate(materialized)) {
         const errors =
           validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
-        return { id: schemaId, ok: false, error: `trait validation: ${errors}` };
+        return {
+          id: schemaId,
+          ok: false,
+          error: `trait validation: ${errors}`,
+          errors: this.validationIssuesFromAjv(validate.errors, '/x-gts-traits'),
+        };
       }
     } catch (e) {
       return {
@@ -1726,6 +2212,7 @@ export class GtsStore {
         id: schemaId,
         ok: false,
         error: `x-gts-ref validation failed: ${xGtsRefErrors.map((err) => err.reason).join('; ')}`,
+        errors: xGtsRefErrors.map((error) => this.xGtsRefIssue(error)),
       };
     }
     for (const dependencyId of xGtsRefValidator.getReferencedIds()) {
@@ -2837,7 +3324,7 @@ export class GtsStore {
   private compareOverlayToBase(
     overlay: ResolvedSchema,
     baseResolved: ResolvedSchema,
-    path: string,
+    path: string[],
     inheritsViaRef: boolean = true
   ): string[] {
     const errors: string[] = [];
@@ -2845,12 +3332,13 @@ export class GtsStore {
     const baseProps = baseResolved.properties || {};
 
     for (const [propName, propSchema] of Object.entries(overlayProps)) {
-      const propPath = path ? `${path}.${propName}` : propName;
+      const propPath = [...path, propName];
+      const displayPath = this.formatDiagnosticPropertyPath(propPath);
 
       // Property schema set to false
       if (propSchema === false) {
         if (baseProps[propName] !== undefined) {
-          errors.push(`Property '${propPath}' is set to false but exists in base`);
+          errors.push(`Property '${displayPath}' is set to false but exists in base`);
         }
         continue;
       }
@@ -2860,14 +3348,14 @@ export class GtsStore {
       if (baseProp === undefined || baseProp === null) {
         // New property not in base
         if (baseResolved.additionalProperties === false) {
-          errors.push(`Property '${propPath}' not in base and base has additionalProperties: false`);
+          errors.push(`Property '${displayPath}' not in base and base has additionalProperties: false`);
         }
         continue;
       }
 
       if (baseProp === false) {
         // Base already set property to false, overlay can't use it
-        errors.push(`Property '${propPath}' is forbidden in base`);
+        errors.push(`Property '${displayPath}' is forbidden in base`);
         continue;
       }
 
@@ -2884,8 +3372,9 @@ export class GtsStore {
       for (const propName of Object.keys(baseProps)) {
         if (baseProps[propName] === false) continue;
         if (!(propName in overlayProps)) {
-          const propPath = path ? `${path}.${propName}` : propName;
-          errors.push(`Property '${propPath}' is declared in base but excluded by additionalProperties: false`);
+          const propPath = [...path, propName];
+          const displayPath = this.formatDiagnosticPropertyPath(propPath);
+          errors.push(`Property '${displayPath}' is declared in base but excluded by additionalProperties: false`);
         }
       }
     }
@@ -2900,8 +3389,9 @@ export class GtsStore {
       const overlayRequired = new Set(overlay.required || []);
       for (const requiredProp of baseResolved.required || []) {
         if (!overlayRequired.has(requiredProp)) {
-          const propPath = path ? `${path}.${requiredProp}` : requiredProp;
-          errors.push(`Property '${propPath}' is required in base but not in derived`);
+          const propPath = [...path, requiredProp];
+          const displayPath = this.formatDiagnosticPropertyPath(propPath);
+          errors.push(`Property '${displayPath}' is required in base but not in derived`);
         }
       }
     }
@@ -2912,10 +3402,11 @@ export class GtsStore {
   private comparePropertyConstraints(
     derived: any,
     base: any,
-    propPath: string,
+    propPath: string[],
     inheritsViaRef: boolean = true
   ): string[] {
     const errors: string[] = [];
+    const displayPath = this.formatDiagnosticPropertyPath(propPath);
 
     if (typeof base !== 'object' || base === null) {
       return errors;
@@ -2932,7 +3423,7 @@ export class GtsStore {
     // intersection, which is exactly this question.
     const crossKeywordConflict = this.findValueConflict([derived, base]) || findCrossedBound([derived, base]);
     if (crossKeywordConflict) {
-      errors.push(`Property '${propPath}' cannot be satisfied: ${crossKeywordConflict}`);
+      errors.push(`Property '${displayPath}' cannot be satisfied: ${crossKeywordConflict}`);
     }
 
     // Type check
@@ -2942,7 +3433,7 @@ export class GtsStore {
       if (Array.isArray(derivedType)) {
         // Derived has array type — widening (fail)
         if (!Array.isArray(baseType)) {
-          errors.push(`Property '${propPath}' widens type from '${baseType}' to array`);
+          errors.push(`Property '${displayPath}' widens type from '${baseType}' to array`);
           return errors;
         }
       }
@@ -2950,14 +3441,14 @@ export class GtsStore {
         if (!Array.isArray(derivedType)) {
           // Could be narrowing from array type
           if (!baseType.includes(derivedType)) {
-            errors.push(`Property '${propPath}' type '${derivedType}' not in base types [${baseType}]`);
+            errors.push(`Property '${displayPath}' type '${derivedType}' not in base types [${baseType}]`);
             return errors;
           }
         }
       } else if (!Array.isArray(derivedType)) {
         // Both scalar types
         if (baseType !== derivedType) {
-          errors.push(`Property '${propPath}' type changed from '${baseType}' to '${derivedType}'`);
+          errors.push(`Property '${displayPath}' type changed from '${baseType}' to '${derivedType}'`);
           return errors;
         }
       }
@@ -2987,10 +3478,10 @@ export class GtsStore {
       if (base[kw] !== undefined) {
         if (derived[kw] === undefined) {
           if (!hasNewConstraints) {
-            errors.push(`Property '${propPath}' drops constraint '${kw}'`);
+            errors.push(`Property '${displayPath}' drops constraint '${kw}'`);
           }
         } else if (derived[kw] > base[kw]) {
-          errors.push(`Property '${propPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
+          errors.push(`Property '${displayPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
         }
       }
     }
@@ -3000,10 +3491,10 @@ export class GtsStore {
       if (base[kw] !== undefined) {
         if (derived[kw] === undefined) {
           if (!hasNewConstraints) {
-            errors.push(`Property '${propPath}' drops constraint '${kw}'`);
+            errors.push(`Property '${displayPath}' drops constraint '${kw}'`);
           }
         } else if (derived[kw] < base[kw]) {
-          errors.push(`Property '${propPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
+          errors.push(`Property '${displayPath}' loosens '${kw}' from ${base[kw]} to ${derived[kw]}`);
         }
       }
     }
@@ -3012,13 +3503,13 @@ export class GtsStore {
     if (base.enum !== undefined) {
       if (derived.enum === undefined) {
         if (!hasNewConstraints) {
-          errors.push(`Property '${propPath}' drops constraint 'enum'`);
+          errors.push(`Property '${displayPath}' drops constraint 'enum'`);
         }
       } else {
         const baseSet = new Set(base.enum.map((v: any) => JSON.stringify(v)));
         for (const val of derived.enum) {
           if (!baseSet.has(JSON.stringify(val))) {
-            errors.push(`Property '${propPath}' enum value '${val}' not in base enum`);
+            errors.push(`Property '${displayPath}' enum value '${val}' not in base enum`);
           }
         }
       }
@@ -3028,21 +3519,21 @@ export class GtsStore {
     if (base.const !== undefined) {
       if (derived.const === undefined) {
         if (!hasNewConstraints) {
-          errors.push(`Property '${propPath}' drops constraint 'const'`);
+          errors.push(`Property '${displayPath}' drops constraint 'const'`);
         }
       } else if (JSON.stringify(base.const) !== JSON.stringify(derived.const)) {
         errors.push(
-          `Property '${propPath}' const conflict: ${JSON.stringify(derived.const)} vs base ${JSON.stringify(base.const)}`
+          `Property '${displayPath}' const conflict: ${JSON.stringify(derived.const)} vs base ${JSON.stringify(base.const)}`
         );
       }
     }
     // Check const in derived against base numeric constraints
     if (derived.const !== undefined && typeof derived.const === 'number') {
       if (base.minimum !== undefined && derived.const < base.minimum) {
-        errors.push(`Property '${propPath}' const ${derived.const} violates base minimum ${base.minimum}`);
+        errors.push(`Property '${displayPath}' const ${derived.const} violates base minimum ${base.minimum}`);
       }
       if (base.maximum !== undefined && derived.const > base.maximum) {
-        errors.push(`Property '${propPath}' const ${derived.const} violates base maximum ${base.maximum}`);
+        errors.push(`Property '${displayPath}' const ${derived.const} violates base maximum ${base.maximum}`);
       }
     }
 
@@ -3050,10 +3541,10 @@ export class GtsStore {
     if (base.pattern !== undefined) {
       if (derived.pattern === undefined) {
         if (!hasNewConstraints) {
-          errors.push(`Property '${propPath}' drops constraint 'pattern'`);
+          errors.push(`Property '${displayPath}' drops constraint 'pattern'`);
         }
       } else if (base.pattern !== derived.pattern) {
-        errors.push(`Property '${propPath}' pattern changed from '${base.pattern}' to '${derived.pattern}'`);
+        errors.push(`Property '${displayPath}' pattern changed from '${base.pattern}' to '${derived.pattern}'`);
       }
     }
 
@@ -3061,10 +3552,12 @@ export class GtsStore {
     if (base.items !== undefined) {
       if (derived.items === undefined) {
         if (!hasNewConstraints) {
-          errors.push(`Property '${propPath}' drops constraint 'items'`);
+          errors.push(`Property '${displayPath}' drops constraint 'items'`);
         }
       } else if (typeof base.items === 'object' && typeof derived.items === 'object') {
-        errors.push(...this.comparePropertyConstraints(derived.items, base.items, `${propPath}.items`, inheritsViaRef));
+        errors.push(
+          ...this.comparePropertyConstraints(derived.items, base.items, [...propPath, 'items'], inheritsViaRef)
+        );
       }
     }
 

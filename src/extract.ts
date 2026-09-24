@@ -1,4 +1,4 @@
-import { ExtractResult, GTS_URI_PREFIX, GTS_PREFIX } from './types';
+import { ExtractResult, GTS_URI_PREFIX } from './types';
 import { Gts } from './gts';
 
 export interface GtsConfig {
@@ -62,21 +62,8 @@ export class GtsExtractor {
       return false;
     }
 
-    // Check for JSON Schema meta-schema
     // Issue #25: A document is a schema ONLY if $schema field is present
-    const schemaField = content['$schema'];
-    if (typeof schemaField === 'string') {
-      // Standard JSON Schema meta-schema URLs
-      if (schemaField.includes('json-schema.org')) {
-        return true;
-      }
-      // GTS schema reference (ends with ~)
-      if (schemaField.startsWith(GTS_URI_PREFIX) || schemaField.startsWith(GTS_PREFIX)) {
-        return true;
-      }
-    }
-
-    return false;
+    return Object.prototype.hasOwnProperty.call(content, '$schema');
   }
 
   /**

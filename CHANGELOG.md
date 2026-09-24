@@ -5,7 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-09-21
+
+### Added
+
+- Optional structured `ValidationIssue[]` details on `ValidationResult`, while preserving the existing joined `error` string.
+- Source-aware text validation through `registerAndValidateText(text, format)`, with array entity indexes and key/value spans containing absolute offsets and zero-based line/column coordinates for `json`, `jsonc`, `yaml`.
+- Full registered Type Schema validation through `validateSchema()` / `validateSchemaAsync()` and Promise-based `validateInstanceAsync()`.
+- Draft 2019-09 and Draft 2020-12 schema registries alongside Draft 7 validation.
+- JSONC/YAML text parsing APIs, including `parseGtsText(text, format)` entity extraction.
+- Root exports for `XGtsRefValidator` and its public types.
+
+### Fixed
+
+- Preserve and enforce JSON Schema constraints for a property named `__proto__` instead of dropping them during normalization.
+- Validate instance candidates before registration so a `422` response never exposes rejected registry state.
+- Update `fast-uri` to patched runtime versions and make production dependency audits CI-blocking.
 
 ## [0.6.0] - 2026-09-16
 

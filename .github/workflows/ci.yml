@@ -89,10 +89,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Run security audit but do not fail CI (as requested).
-      - name: npm audit
-        run: npm audit
-        continue-on-error: true
+      # Fail CI when a dependency shipped to consumers has a known vulnerability.
+      - name: npm audit (production)
+        run: npm audit --omit=dev
 
   coverage:
     name: Code Coverage (jest)
