@@ -199,11 +199,7 @@ export class GtsStore {
     return current;
   }
 
-  private detectLocalRefDialectMismatch(
-    content: any,
-    rootId: string,
-    rootDialect: string
-  ): string | null {
+  private detectLocalRefDialectMismatch(content: any, rootId: string, rootDialect: string): string | null {
     let mismatch: string | null = null;
     const scan = (schema: any): void => {
       if (mismatch || !schema || typeof schema !== 'object' || Array.isArray(schema)) return;
