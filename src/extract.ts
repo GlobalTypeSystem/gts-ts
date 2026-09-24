@@ -66,22 +66,13 @@ export class GtsExtractor {
     return Object.prototype.hasOwnProperty.call(content, '$schema');
   }
 
-  /**
-   * @param forceIsSchema - When provided, overrides the `$schema`-keyword
-   * shape heuristic (`isJsonSchema`) with the caller's own declared intent.
-   * Used by `POST /type-schemas` (and the underlying explicit-`type_id`
-   * register path): a document registered there is authoritatively a GTS
-   * Type Schema regardless of whether it happens to embed a `$schema`/root
-   * -type keyword (P6-2/P6-3) - the heuristic alone cannot tell a
-   * schema-less-looking-but-declared schema from ordinary instance JSON.
-   */
-  static extractID(content: any, schemaContent?: any, forceIsSchema?: boolean): ExtractResult {
+  static extractID(content: any, schemaContent?: any): ExtractResult {
     const config = getDefaultConfig();
     let id = '';
     let schemaId: string | null = null;
     let selectedEntityField: string | undefined;
     let selectedSchemaIdField: string | undefined;
-    const isSchema = forceIsSchema ?? this.isJsonSchema(content);
+    const isSchema = this.isJsonSchema(content);
 
     if (typeof content === 'object' && content !== null) {
       // Extract entity ID (look for any non-empty value, preferring valid GTS IDs)

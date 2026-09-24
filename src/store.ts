@@ -3663,17 +3663,8 @@ export class GtsStore {
   }
 }
 
-/**
- * @param forceIsSchema - Caller-declared intent (P6-2/P6-3): when set,
- * stamps `isSchema` authoritatively instead of deriving it from
- * `GtsExtractor`'s `$schema`-keyword shape heuristic, which cannot
- * distinguish a schema-less-looking-but-declared schema (e.g. registered via
- * `POST /type-schemas` with no embedded `$schema`) from ordinary instance
- * JSON - a shape heuristic can never close that gap because the document
- * can contain zero schema keywords.
- */
-export function createJsonEntity(content: any, _config?: Partial<GtsConfig>, forceIsSchema?: boolean): JsonEntity {
-  const extractResult = GtsExtractor.extractID(content, undefined, forceIsSchema);
+export function createJsonEntity(content: any, _config?: Partial<GtsConfig>): JsonEntity {
+  const extractResult = GtsExtractor.extractID(content);
 
   const references = new Set<string>();
   findReferences(content, references);

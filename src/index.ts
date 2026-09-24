@@ -142,16 +142,8 @@ export class GTS {
     return { ok: results.every((entry) => entry.result.ok), entities: results, errors };
   }
 
-  /**
-   * @param forceIsSchema - Passed through to `createJsonEntity` (P6-2/P6-3):
-   * lets a caller that already knows an entity is a GTS Type Schema by its
-   * own declared intent (e.g. `POST /type-schemas`'s explicit `type_id`)
-   * stamp `isSchema` authoritatively, rather than leaving it to
-   * `GtsExtractor`'s document-shape heuristic, which cannot detect a schema
-   * that embeds no `$schema`/root-type keyword at all.
-   */
-  register(content: any, forceIsSchema?: boolean): JsonEntity | undefined {
-    const entity = createJsonEntity(content, undefined, forceIsSchema);
+  register(content: any): JsonEntity | undefined {
+    const entity = createJsonEntity(content);
     return this.store.register(entity);
   }
 

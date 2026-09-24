@@ -270,8 +270,7 @@ export class GtsServer {
       Body: any;
       Querystring: { validate?: string; validation?: string; 'gts-ref-validation'?: string };
     }>,
-    reply: FastifyReply,
-    options?: { forceIsSchema?: boolean }
+    reply: FastifyReply
   ): Promise<OperationResult> {
     try {
       const content = request.body;
@@ -281,11 +280,7 @@ export class GtsServer {
         reply.code(422);
         return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
       }
-      // `forceIsSchema` (P6-2/P6-3): `POST /type-schemas` calls through here
-      // with the caller's declared intent - the registered entity IS a GTS
-      // Type Schema by construction, regardless of whether `content` embeds
-      // a `$schema`/root-type keyword the shape heuristic would key off.
-      const entity = createJsonEntity(content, undefined, options?.forceIsSchema);
+      const entity = createJsonEntity(content);
 
       // §9.11.1 - a malformed modifier declaration is always rejected: the
       // document cannot be interpreted, so there is nothing to register.
@@ -394,7 +389,7 @@ export class GtsServer {
       }
 
       // Register the entity
-      const previous = this.store.register(content, options?.forceIsSchema);
+      const previous = this.store.register(content);
 
       // A derived schema (chained `$id`) must be compatible with its GTS
       // chain parent - e.g. it cannot drop a `required` field the parent
@@ -602,7 +597,7 @@ export class GtsServer {
   ): Promise<OperationResult> {
     const { type_id, type_schema } = request.body || ({} as TypeSchemaRegisterBody);
 
-    if (!type_id || !type_schema || typeof type_schema !== 'object') {
+    if (!type_id || !type_schema || typeof type_schema !== 'object' || Array.isArray(type_schema)) {
       reply.code(422);
       return { ok: false, error: 'Missing required fields: type_id, type_schema' };
     }
@@ -616,18 +611,27 @@ export class GtsServer {
       };
     }
 
-    // The explicit type_id wins over any identifier carried inside the body, so
-    // an embedded $id must be dropped rather than left to shadow it.
-    const content: Record<string, any> = { ...type_schema };
-    content['$id'] = type_id;
+    if (typeof type_schema['$schema'] !== 'string' || type_schema['$schema'].length === 0) {
+      return { ok: false, error: 'GTS Type Schema must contain a top-level $schema field' };
+    }
 
-    // P6-2/P6-3: the caller declared `type_id` explicitly, so this document
-    // IS a GTS Type Schema by construction - stamp `isSchema` authoritatively
-    // rather than leaving it to `GtsExtractor.isJsonSchema`'s document-shape
-    // heuristic, which would misclassify a schema with no embedded
-    // `$schema`/root-type keyword as a plain instance (see
-    // `TestCaseOp6ValidateJson_ExplicitSchemaWithoutEmbeddedIdentity`).
-    return this.handleAddEntity({ ...request, body: content } as any, reply, { forceIsSchema: true });
+    const embeddedId = type_schema['$id'];
+    if (typeof embeddedId !== 'string' || !embeddedId.startsWith('gts://')) {
+      return { ok: false, error: 'GTS Type Schema must contain a top-level $id in gts:// form' };
+    }
+
+    const normalizedId = embeddedId.slice('gts://'.length);
+    if (!gts.isValidGtsID(normalizedId) || !normalizedId.endsWith('~')) {
+      return { ok: false, error: `Invalid GTS Type Schema $id: '${embeddedId}'` };
+    }
+    if (normalizedId !== type_id) {
+      return {
+        ok: false,
+        error: `Embedded $id '${embeddedId}' must match external type_id '${type_id}'`,
+      };
+    }
+
+    return this.handleAddEntity({ ...request, body: { ...type_schema } } as any, reply);
   }
 
   // OP#1 - Validate ID
