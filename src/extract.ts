@@ -1,4 +1,4 @@
-import { ExtractResult, GTS_URI_PREFIX } from './types';
+import { ExtractResult, stripUriPrefix } from './types';
 import { Gts } from './gts';
 
 export interface GtsConfig {
@@ -14,17 +14,11 @@ export function getDefaultConfig(): GtsConfig {
 }
 
 export class GtsExtractor {
-  private static normalizeValue(value: string, fieldName?: string): string {
-    let normalized = value.trim();
-
-    // Strip the "gts://" URI prefix for $id field (JSON Schema compatibility)
-    if (fieldName === '$id' && normalized.startsWith(GTS_URI_PREFIX)) {
-      normalized = normalized.substring(GTS_URI_PREFIX.length);
-    } else if (normalized.startsWith(GTS_URI_PREFIX)) {
-      normalized = normalized.substring(GTS_URI_PREFIX.length);
-    }
-
-    return normalized;
+  private static normalizeValue(value: string, _fieldName?: string): string {
+    // Strip the "gts://" URI prefix (JSON Schema compatibility). Applied to
+    // every id-shaped field, not just `$id`: the URI form is legal wherever a
+    // GTS identifier is embedded in JSON Schema.
+    return stripUriPrefix(value.trim());
   }
 
   private static findFirstValidField(

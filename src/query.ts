@@ -1,4 +1,4 @@
-import { QueryResult } from './types';
+import { QueryResult, GTS_PREFIX } from './types';
 import { GtsStore } from './store';
 import { Gts } from './gts';
 
@@ -115,8 +115,8 @@ export class GtsQuery {
       // Validate as wildcard pattern
       try {
         // Just check it's a valid pattern format
-        if (!basePattern.startsWith('gts.')) {
-          return "Invalid query: pattern must start with 'gts.'";
+        if (!basePattern.startsWith(GTS_PREFIX)) {
+          return `Invalid query: pattern must start with '${GTS_PREFIX}'`;
         }
       } catch (err) {
         return `Invalid query: ${err}`;

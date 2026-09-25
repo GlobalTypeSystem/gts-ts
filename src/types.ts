@@ -3,6 +3,41 @@ export const GTS_URI_PREFIX = 'gts://';
 export const MAX_ID_LENGTH = 1024;
 
 /**
+ * Host that every supported JSON Schema meta-schema (`$schema`) URI lives
+ * under. Centralized so dialect checks do not scatter the literal - mirrors
+ * the prefix-constant discipline gts-rust enforces via its `gts-dylint` lint
+ * and gts-dotnet's `GtsConstants`.
+ */
+export const JSON_SCHEMA_HOST = 'json-schema.org';
+
+/**
+ * A JSON value, modelled as a recursive union rather than `any`. Prefer this
+ * (or `unknown` plus a guard) over `any` for parsed-JSON positions so the
+ * compiler keeps checking the untrusted data that flows through validation.
+ */
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+/** A JSON object - the shape every registered entity's `content` takes. */
+export type JsonObject = { [key: string]: JsonValue };
+
+/**
+ * Whether `value` carries the `gts://` URI prefix that JSON Schema `$id`/`$ref`
+ * fields use to embed a GTS identifier (gts-spec §3.4).
+ */
+export function hasUriPrefix(value: string): boolean {
+  return value.startsWith(GTS_URI_PREFIX);
+}
+
+/**
+ * Strip a leading `gts://` URI prefix if present, returning the bare GTS
+ * identifier. A single choke point for the prefix so the length offset is
+ * never hardcoded (`.substring(6)` / `.slice(6)`) at call sites.
+ */
+export function stripUriPrefix(value: string): string {
+  return hasUriPrefix(value) ? value.slice(GTS_URI_PREFIX.length) : value;
+}
+
+/**
  * Recursion bound shared by every walker over schema documents.
  *
  * The limit exists to stop pathological or cyclic input, never to decide a

@@ -4,7 +4,15 @@
  */
 
 import { Gts } from './gts';
-import { EntityLookup, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS, GtsRefValidationMode } from './types';
+import {
+  EntityLookup,
+  MAX_SCHEMA_DEPTH,
+  MAX_SCHEMA_PATHS,
+  GtsRefValidationMode,
+  GTS_PREFIX,
+  hasUriPrefix,
+  stripUriPrefix,
+} from './types';
 
 export const X_GTS_REF_SELF = '/$id';
 
@@ -94,7 +102,7 @@ export class XGtsRefValidator {
 
   private getSelectedTypeId(schema: any, selectedTypeId?: string): string | undefined {
     const candidate = selectedTypeId ?? schema?.$id;
-    return typeof candidate === 'string' ? this.stripGtsURIPrefix(candidate) : undefined;
+    return typeof candidate === 'string' ? stripUriPrefix(candidate) : undefined;
   }
 
   /**
@@ -111,7 +119,7 @@ export class XGtsRefValidator {
     // The id of the entity being validated. A reference to it is satisfied by
     // that entity itself, so it must bypass the registry-existence check (the
     // entity may not be registered yet under validate-before-register).
-    this.selfId = typeof selfId === 'string' ? this.stripGtsURIPrefix(selfId) : undefined;
+    this.selfId = typeof selfId === 'string' ? stripUriPrefix(selfId) : undefined;
     const errors: XGtsRefValidationError[] = [];
     this.visitInstance(instance, schema, instancePath, schema, errors);
     return errors;
@@ -154,7 +162,7 @@ export class XGtsRefValidator {
     // a validation failure is preferable to hiding it.
     if (
       typeof schema.$ref === 'string' &&
-      (schema.$ref === '#' || schema.$ref.startsWith('#/') || schema.$ref.startsWith('gts://'))
+      (schema.$ref === '#' || schema.$ref.startsWith('#/') || hasUriPrefix(schema.$ref))
     ) {
       if (depth >= MAX_SCHEMA_DEPTH) {
         errors.push({
@@ -177,7 +185,7 @@ export class XGtsRefValidator {
       }
       const resolved = this.resolveSchemaRef(rootSchema, schema.$ref);
       if (resolved && typeof resolved === 'object' && !Array.isArray(resolved)) {
-        const resolvedRoot = schema.$ref.startsWith('gts://') ? resolved : rootSchema;
+        const resolvedRoot = hasUriPrefix(schema.$ref) ? resolved : rootSchema;
         this.visitInstance(instance, resolved, path, resolvedRoot, errors, depth + 1, pathBudget);
       } else {
         // The pointer either resolves nowhere (`resolveSchemaRef` returned
@@ -341,8 +349,8 @@ export class XGtsRefValidator {
   /** Resolve local and GTS `$ref` targets for x-gts-ref traversal. */
   private resolveSchemaRef(rootSchema: any, ref: string): any {
     if (ref === '#') return rootSchema;
-    if (ref.startsWith('gts://')) {
-      return this.store?.get(ref.slice('gts://'.length))?.content ?? null;
+    if (hasUriPrefix(ref)) {
+      return this.store?.get(stripUriPrefix(ref))?.content ?? null;
     }
     if (!ref.startsWith('#/')) return null;
 
@@ -415,7 +423,7 @@ export class XGtsRefValidator {
     }
 
     // Case 1: Absolute GTS pattern
-    if (refPattern.startsWith('gts.')) {
+    if (refPattern.startsWith(GTS_PREFIX)) {
       return this.validateGtsIDOrPattern(refPattern, fieldPath);
     }
 
@@ -432,14 +440,14 @@ export class XGtsRefValidator {
   }
 
   private validateGtsIDOrPattern(pattern: string, fieldPath: string): XGtsRefValidationError | null {
-    if (pattern === 'gts.*') {
+    if (pattern === GTS_PREFIX + '*') {
       return null; // Valid wildcard
     }
 
     if (pattern.includes('*')) {
       // Wildcard pattern - validate prefix
       const prefix = pattern.replace('*', '');
-      if (!prefix.startsWith('gts.')) {
+      if (!prefix.startsWith(GTS_PREFIX)) {
         return {
           fieldPath,
           value: pattern,
@@ -550,7 +558,7 @@ export class XGtsRefValidator {
     const ref = schema['x-gts-ref'];
     const refPath = appendJsonPointer(path, 'x-gts-ref');
     const resolvedRef = this.isSelfReference(ref) ? selectedTypeId : ref;
-    if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.')) {
+    if (typeof resolvedRef === 'string' && resolvedRef.startsWith(GTS_PREFIX)) {
       if (resolvedRef.includes('*')) {
         const matches =
           this.store?.getAll?.().filter((entity) => Gts.matchIDPattern(entity.id, resolvedRef).match) ?? [];
@@ -592,12 +600,5 @@ export class XGtsRefValidator {
       }
     }
     return false;
-  }
-
-  /**
-   * Strip the "gts://" prefix from a value if present
-   */
-  private stripGtsURIPrefix(value: string): string {
-    return value.replace(/^gts:\/\//, '');
   }
 }
