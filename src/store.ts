@@ -84,6 +84,31 @@ function contentHash(content: Record<string, any>): string {
   return createHash('sha256').update(canonicalJson(content)).digest('hex');
 }
 
+function cloneJsonValue<T>(value: T, seen: WeakMap<object, any> = new WeakMap()): T {
+  if (value === null || typeof value !== 'object') return value;
+  const existing = seen.get(value as object);
+  if (existing !== undefined) return existing;
+  const clone: any = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+  seen.set(value as object, clone);
+  for (const key of Object.keys(value as object)) {
+    Object.defineProperty(clone, key, {
+      value: cloneJsonValue((value as any)[key], seen),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return clone;
+}
+
+function cloneJsonEntity(entity: JsonEntity): JsonEntity {
+  return {
+    ...entity,
+    content: cloneJsonValue(entity.content),
+    references: new Set(entity.references),
+  };
+}
+
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   private config: GtsConfig;
@@ -275,6 +300,7 @@ export class GtsStore {
   }
 
   register(entity: JsonEntity): JsonEntity | undefined {
+    entity = cloneJsonEntity(entity);
     // A malformed entity id would silently break every ancestor-chain
     // computation downstream (`buildSchemaChain` and friends), which then
     // fail open by treating the entity as if it had no ancestors at all -
@@ -303,8 +329,8 @@ export class GtsStore {
     // Protect registry state: unless entity updates are allowed, re-registering
     // an id with *different* content is rejected (EntityConflictError, surfaced
     // as HTTP 409), while an identical re-submission stays idempotent. Stored
-    // content remains mutable through get(), so both hashes must reflect the
-    // values at comparison time rather than relying on a cached snapshot.
+    // both hashes are computed from the current values rather than relying on
+    // a cached snapshot.
     const previous = this.byId.get(entity.id);
     const replacing = !!previous && contentHash(previous.content) !== contentHash(entity.content);
     if (replacing && !this.config.allowEntityUpdates) {
@@ -353,11 +379,12 @@ export class GtsStore {
         // Ignore malformed schemas; unchanged schemas do not reach this path.
       }
     }
-    return previous;
+    return previous ? cloneJsonEntity(previous) : undefined;
   }
 
   get(id: string): JsonEntity | undefined {
-    return this.byId.get(id);
+    const entity = this.byId.get(id);
+    return entity ? cloneJsonEntity(entity) : undefined;
   }
 
   /**
@@ -385,7 +412,7 @@ export class GtsStore {
   }
 
   getAll(): JsonEntity[] {
-    return Array.from(this.byId.values());
+    return Array.from(this.byId.values(), cloneJsonEntity);
   }
 
   query(pattern: string, limit?: number): string[] {

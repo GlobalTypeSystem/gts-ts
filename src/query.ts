@@ -34,7 +34,7 @@ export class GtsQuery {
           continue;
         }
 
-        results.push(entity.content);
+        results.push(structuredClone(entity.content));
       }
 
       return {

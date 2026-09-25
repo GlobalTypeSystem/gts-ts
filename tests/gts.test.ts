@@ -1966,26 +1966,28 @@ describe('x-gts-ref array tuple traversal', () => {
 });
 
 describe('entity content identity', () => {
-  test('accepts content matching a stored entity mutated through get()', () => {
+  test('does not retain caller-owned or returned content', () => {
     const gts = new GTS();
     const id = 'gts.x.unit.hash.mutable.v1~x.unit._.item.v1';
-    gts.register({ id, value: 1 });
-    gts.register({ id, value: 1 });
-    gts.get(id).value = 2;
+    const content = { id, value: 1 };
+    gts.register(content);
+    content.value = 2;
+    gts.get(id).value = 3;
 
-    expect(() => gts.register({ id, value: 2 })).not.toThrow();
-    expect(gts.get(id).value).toBe(2);
+    expect(gts.get(id).value).toBe(1);
+    expect(() => gts.register({ id, value: 2 })).toThrow(/already registered with different content/);
   });
 
-  test('rejects content differing from a stored entity mutated through get()', () => {
-    const gts = new GTS();
+  test('returns defensive copies from store collections', () => {
+    const store = new GtsStore();
     const id = 'gts.x.unit.hash.mutable_conflict.v1~x.unit._.item.v1';
-    gts.register({ id, value: 1 });
-    gts.register({ id, value: 1 });
-    gts.get(id).value = 2;
+    store.register(createJsonEntity({ id, value: 1 }));
+    const all = store.getAll();
+    all[0].content.value = 2;
+    all[0].references.add('gts.x.unit.hash.other.v1~');
 
-    expect(() => gts.register({ id, value: 1 })).toThrow(/already registered with different content/);
-    expect(gts.get(id).value).toBe(2);
+    expect(store.get(id)?.content.value).toBe(1);
+    expect(store.get(id)?.references.size).toBe(0);
   });
 
   test('does not add an identical schema to Ajv twice', () => {
