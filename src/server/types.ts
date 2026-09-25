@@ -100,11 +100,6 @@ export interface ValidateTypeSchemaBody {
   type_id: string;
 }
 
-export interface TypeSchemaRegisterBody {
-  type_id: string;
-  type_schema: Record<string, any>;
-}
-
 export interface ValidateEntityBody {
   entity_id?: string;
   gts_id?: string;

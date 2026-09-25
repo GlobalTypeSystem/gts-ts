@@ -14,7 +14,6 @@ import {
   CastBody,
   QueryParams,
   ValidateTypeSchemaBody,
-  TypeSchemaRegisterBody,
   ValidateEntityBody,
   ValidateJsonResult,
 } from './types';
@@ -155,7 +154,7 @@ export class GtsServer {
     this.fastify.get('/entities/:id', this.handleGetEntity.bind(this));
     this.fastify.post('/entities', this.handleAddEntity.bind(this));
     this.fastify.post('/entities/bulk', this.handleAddEntities.bind(this));
-    this.fastify.post('/type-schemas', this.handleAddTypeSchema.bind(this));
+    this.fastify.post('/type-schemas', this.handleAddTypeSchemas.bind(this));
 
     // OP#1 - Validate ID
     this.fastify.get('/validate-id', this.handleValidateID.bind(this));
@@ -590,48 +589,65 @@ export class GtsServer {
     }
   }
 
-  // Register a GTS Type Schema under an explicit type_id
-  private async handleAddTypeSchema(
-    request: FastifyRequest<{ Body: TypeSchemaRegisterBody }>,
+  // Register a batch of GTS Type Schemas. The request body is a JSON array of
+  // GTS Type Schema objects; each entry's GTS Type Identifier is derived from
+  // its embedded $id (there is no external type_id field). The response is an
+  // aggregate { ok, results: [...] } body where the top-level ok is true only
+  // when every entry registered successfully.
+  private async handleAddTypeSchemas(
+    request: FastifyRequest<{ Body: any }>,
     reply: FastifyReply
   ): Promise<OperationResult> {
-    const { type_id, type_schema } = request.body || ({} as TypeSchemaRegisterBody);
-
-    if (!type_id || !type_schema || typeof type_schema !== 'object' || Array.isArray(type_schema)) {
+    const schemas = request.body;
+    if (!Array.isArray(schemas)) {
       reply.code(422);
-      return { ok: false, error: 'Missing required fields: type_id, type_schema' };
+      return { ok: false, error: 'Request body must be a JSON array of GTS Type Schemas' };
     }
 
-    // §2.1 / §11.1 Rule C.1 - a GTS Type Identifier MUST end with `~`.
-    if (!gts.isValidGtsID(type_id) || !type_id.endsWith('~')) {
-      reply.code(422);
-      return {
-        ok: false,
-        error: `Invalid type_id: must be a well-formed GTS Type Identifier ending with '~', got '${type_id}'`,
-      };
+    const results: Array<{ ok: boolean; type_id: string | null; error?: string }> = [];
+    for (const schema of schemas) {
+      results.push(await this.registerTypeSchema(schema, request));
     }
 
-    if (typeof type_schema['$schema'] !== 'string' || type_schema['$schema'].length === 0) {
-      return { ok: false, error: 'GTS Type Schema must contain a top-level $schema field' };
+    return {
+      ok: results.every((r) => r.ok),
+      results,
+    };
+  }
+
+  // Registers a single GTS Type Schema, deriving its GTS Type Identifier from
+  // the embedded $id, and returns a per-item result.
+  private async registerTypeSchema(
+    schema: any,
+    request: FastifyRequest<{ Body: any }>
+  ): Promise<{ ok: boolean; type_id: string | null; error?: string }> {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+      return { ok: false, type_id: null, error: 'GTS Type Schema entry must be a JSON object' };
     }
 
-    const embeddedId = type_schema['$id'];
+    if (typeof schema['$schema'] !== 'string' || schema['$schema'].length === 0) {
+      return { ok: false, type_id: null, error: 'GTS Type Schema must contain a top-level $schema field' };
+    }
+
+    const embeddedId = schema['$id'];
     if (typeof embeddedId !== 'string' || !embeddedId.startsWith('gts://')) {
-      return { ok: false, error: 'GTS Type Schema must contain a top-level $id in gts:// form' };
+      return { ok: false, type_id: null, error: 'GTS Type Schema must contain a top-level $id in gts:// form' };
     }
 
-    const normalizedId = embeddedId.slice('gts://'.length);
-    if (!gts.isValidGtsID(normalizedId) || !normalizedId.endsWith('~')) {
-      return { ok: false, error: `Invalid GTS Type Schema $id: '${embeddedId}'` };
-    }
-    if (normalizedId !== type_id) {
-      return {
-        ok: false,
-        error: `Embedded $id '${embeddedId}' must match external type_id '${type_id}'`,
-      };
+    const typeId = embeddedId.slice('gts://'.length);
+    if (!gts.isValidGtsID(typeId) || !typeId.endsWith('~')) {
+      return { ok: false, type_id: typeId, error: `Invalid GTS Type Schema $id: '${embeddedId}'` };
     }
 
-    return this.handleAddEntity({ ...request, body: { ...type_schema } } as any, reply);
+    // Reuse the single-entity registration path (x-gts-ref checks, modifier
+    // rules, store.register) via a throwaway reply that swallows status codes;
+    // per-entry outcomes are surfaced through the aggregate `results` instead.
+    const fakeReply = { code: () => fakeReply } as unknown as FastifyReply;
+    const result = await this.handleAddEntity({ ...request, body: { ...schema }, query: {} } as any, fakeReply);
+    if (result.ok) {
+      return { ok: true, type_id: typeId };
+    }
+    return { ok: false, type_id: typeId, error: result.error };
   }
 
   // OP#1 - Validate ID
@@ -988,7 +1004,7 @@ export class GtsServer {
     const content = request.body;
 
     // A well-formed GTS Type Identifier MUST end with `~` (§2.1/§11.1 Rule
-    // C.1, mirroring `handleAddTypeSchema` above). Unlike that handler,
+    // C.1, mirroring `registerTypeSchema` above). Unlike that handler,
     // the two ways a path segment can fail this are reported with distinct
     // messages here: a string that is not GTS-shaped at all ("not-a-gts-
     // type") versus one that is a syntactically ordinary GTS identifier but
@@ -1024,15 +1040,11 @@ export class GtsServer {
       };
     }
 
-    // Existence AND `isSchema` check (P6-2/P6-3). Before the registration-
-    // time fix (`POST /type-schemas` now stamps `isSchema` from the caller's
-    // declared `type_id` intent, not from `GtsExtractor.isJsonSchema`'s
-    // document-shape heuristic), this was an existence-only check: a junk
-    // document with zero schema keywords, registered via `POST
-    // /type-schemas`, would compile here as a constraint-free schema
-    // accepting anything. `TestCaseOp6ValidateJson_ExplicitSchemaWithoutEmbeddedIdentity`
-    // still passes because that type IS now correctly stamped `isSchema:
-    // true` at registration.
+    // Existence AND `isSchema` check (P6-2/P6-3). A GTS Type Schema registered
+    // via `POST /type-schemas` carries a canonical embedded `$id`/`$schema`,
+    // so it is classified as a schema at registration; this guards against a
+    // junk document with zero schema keywords compiling here as a
+    // constraint-free schema that would accept anything.
     const isRegisteredSchema = this.store.isRegisteredSchema(pathType);
     if (isRegisteredSchema === undefined) {
       return {
@@ -1265,34 +1277,22 @@ export class GtsServer {
       },
       '/type-schemas': {
         post: {
-          summary: 'Register a GTS Type Schema under an explicit type_id',
-          operationId: 'addTypeSchema',
+          summary: 'Register a batch of GTS Type Schemas',
+          operationId: 'addTypeSchemas',
           requestBody: {
             required: true,
             content: {
               'application/json': {
                 schema: {
-                  type: 'object',
-                  properties: {
-                    type_id: { type: 'string' },
-                    type_schema: { type: 'object' },
-                  },
-                  required: ['type_id', 'type_schema'],
+                  type: 'array',
+                  items: { type: 'object' },
                 },
               },
             },
           },
           responses: {
             200: {
-              description: 'Operation result',
-              content: {
-                'application/json': {
-                  schema: { $ref: '#/components/schemas/OperationResult' },
-                },
-              },
-            },
-            409: {
-              description: 'Entity conflict',
+              description: 'Aggregate batch registration result',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/OperationResult' },

@@ -6,7 +6,7 @@ A complete TypeScript implementation of the Global Type System (GTS)
 
 GTS [Global Type System](https://github.com/globaltypesystem/gts-spec) is a simple, human-readable, globally unique identifier and referencing system for data type definitions (e.g., JSON Schemas) and data instances (e.g., JSON objects). This TypeScript implementation provides type-safe operations for working with GTS identifiers.
 
-**Targets gts-spec [v0.14.1](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.14.1)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for the breaking changes in the v0.13.3 → v0.14.1
+**Targets gts-spec [v0.14.2](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.14.2)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for breaking changes.
 
 ## Roadmap
 
@@ -262,7 +262,7 @@ opt into replacement semantics.
 - `GET /entities/:id` - Get specific entity
 - `POST /entities` - Add new entity
 - `POST /entities/bulk` - Add multiple entities
-- `POST /type-schemas` - Register a GTS Type Schema under an explicit `type_id`
+- `POST /type-schemas` - Register a batch (JSON array) of GTS Type Schemas; each `type_id` is derived from its embedded `$id`
 
 #### GTS Operations
 
@@ -296,13 +296,13 @@ curl http://127.0.0.1:8000/health
 # Validate a GTS ID
 curl "http://127.0.0.1:8000/validate-id?id=gts.vendor.pkg.ns.type.v1~"
 
-# Register a GTS Type Schema
+# Register a batch of GTS Type Schemas (type_id derived from each $id)
 curl -X POST http://127.0.0.1:8000/type-schemas \
   -H "Content-Type: application/json" \
-  -d '{
-    "type_id": "gts.test.example.ns.person.v1~",
-    "type_schema": {
+  -d '[
+    {
       "$schema": "http://json-schema.org/draft-07/schema#",
+      "$id": "gts://gts.test.example.ns.person.v1~",
       "type": "object",
       "properties": {
         "name": { "type": "string" },
@@ -310,7 +310,7 @@ curl -X POST http://127.0.0.1:8000/type-schemas \
       },
       "required": ["name"]
     }
-  }'
+  ]'
 
 # Query entities
 curl "http://127.0.0.1:8000/query?expr=gts.test.*&limit=10"
