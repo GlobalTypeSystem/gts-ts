@@ -10,7 +10,22 @@ export interface ServerConfig {
    * `--allow-entity-updates` CLI flag.
    */
   allowEntityUpdates?: boolean;
+  /**
+   * Maximum accepted request body size, in bytes. Defaults to
+   * {@link DEFAULT_BODY_LIMIT_BYTES}. Bounds memory a single request can force
+   * the server to buffer (Fastify reads the whole body before the handler
+   * runs), including the bulk `POST /entities/bulk` and `POST /type-schemas`
+   * routes that accept arrays.
+   */
+  bodyLimit?: number;
 }
+
+/**
+ * Default request body cap (1 MiB) - the same limit Fastify applies when
+ * unset, made explicit so the bound is visible and adjustable rather than an
+ * implicit framework default.
+ */
+export const DEFAULT_BODY_LIMIT_BYTES = 1024 * 1024;
 
 export interface EntityResponse {
   id: string;

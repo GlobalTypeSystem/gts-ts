@@ -1,8 +1,19 @@
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { GTS, createJsonEntity, EntityConflictError, EntityContentDepthError, GtsRefValidationMode } from '../index';
+import {
+  GTS,
+  createJsonEntity,
+  EntityConflictError,
+  EntityContentDepthError,
+  GtsRefValidationMode,
+  GTS_PREFIX,
+  hasUriPrefix,
+  stripUriPrefix,
+  validateSchemaIdentityAndRefs,
+} from '../index';
 import { XGtsRefValidator } from '../x-gts-ref';
 import {
   ServerConfig,
+  DEFAULT_BODY_LIMIT_BYTES,
   EntityResponse,
   OperationResult,
   ListResult,
@@ -54,6 +65,11 @@ export class GtsServer {
       routerOptions: {
         maxParamLength: 2048,
       },
+      // Cap the request body explicitly rather than relying on Fastify's
+      // implicit 1 MiB default. Fastify buffers the whole body before a
+      // handler runs, so this bounds the memory a single request - including
+      // the array-bodied bulk routes - can force the server to allocate.
+      bodyLimit: config.bodyLimit ?? DEFAULT_BODY_LIMIT_BYTES,
       forceCloseConnections: true,
     });
 
@@ -295,7 +311,7 @@ export class GtsServer {
       }
 
       if (validate && entity.isSchema) {
-        const validationError = this.validateSchemaStrict(content);
+        const validationError = validateSchemaIdentityAndRefs(content);
         if (validationError) {
           reply.code(422);
           return {
@@ -437,103 +453,6 @@ export class GtsServer {
     }
   }
 
-  private validateSchemaStrict(content: any): string | null {
-    // Check for $id
-    const schemaId = content['$id'];
-    if (!schemaId) {
-      return 'Unable to detect GTS ID in schema';
-    }
-
-    // Normalize the ID
-    let normalizedId = schemaId;
-    if (typeof normalizedId === 'string') {
-      // Check if it starts with gts:// prefix
-      if (normalizedId.startsWith('gts://')) {
-        normalizedId = normalizedId.substring(6);
-      } else if (normalizedId.startsWith('gts.')) {
-        // Plain gts. prefix without gts:// is not allowed for JSON Schema $id
-        return 'Schema $id with GTS identifier must use gts:// URI format (e.g., gts://gts.vendor.pkg.ns.type.v1~)';
-      } else {
-        // Non-GTS $id is not allowed
-        return 'Schema $id must be a valid GTS identifier with gts:// URI format';
-      }
-
-      // Check for wildcards in schema ID
-      if (normalizedId.includes('*')) {
-        return 'Schema $id cannot contain wildcards';
-      }
-
-      // Validate the GTS ID
-      if (!gts.isValidGtsID(normalizedId)) {
-        return `Schema $id is not a valid GTS identifier: ${normalizedId}`;
-      }
-    }
-
-    // Validate $ref fields
-    const refErrors = this.validateSchemaRefs(content, '');
-    if (refErrors.length > 0) {
-      return refErrors[0];
-    }
-
-    return null;
-  }
-
-  private validateSchemaRefs(obj: any, path: string): string[] {
-    const errors: string[] = [];
-
-    if (!obj || typeof obj !== 'object') {
-      return errors;
-    }
-
-    // Check $ref
-    const ref = obj['$ref'];
-    if (typeof ref === 'string') {
-      const refPath = path ? `${path}/$ref` : '$ref';
-
-      // Local refs (#/...) are allowed
-      if (ref.startsWith('#')) {
-        // OK - local ref
-      } else if (ref.startsWith('gts://')) {
-        // gts:// URI is allowed - validate the GTS ID
-        const normalizedRef = ref.substring(6);
-
-        // Check for wildcards
-        if (normalizedRef.includes('*')) {
-          errors.push(`Invalid $ref at ${refPath}: wildcards are not allowed in $ref`);
-        } else if (!gts.isValidGtsID(normalizedRef)) {
-          errors.push(`Invalid $ref at ${refPath}: ${normalizedRef} is not a valid GTS identifier`);
-        }
-      } else if (ref.startsWith('gts.')) {
-        // Plain gts. prefix without gts:// is not allowed
-        errors.push(`Invalid $ref at ${refPath}: GTS references must use gts:// URI format`);
-      } else if (ref.startsWith('http://') || ref.startsWith('https://')) {
-        // External HTTP refs are not allowed (except json-schema.org for $schema)
-        if (!ref.includes('json-schema.org')) {
-          errors.push(`Invalid $ref at ${refPath}: external HTTP references are not allowed`);
-        }
-      }
-    }
-
-    // Recurse into nested objects
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === '$ref') continue;
-      if (value && typeof value === 'object') {
-        const nestedPath = path ? `${path}/${key}` : key;
-        if (Array.isArray(value)) {
-          value.forEach((item, idx) => {
-            if (item && typeof item === 'object') {
-              errors.push(...this.validateSchemaRefs(item, `${nestedPath}[${idx}]`));
-            }
-          });
-        } else {
-          errors.push(...this.validateSchemaRefs(value, nestedPath));
-        }
-      }
-    }
-
-    return errors;
-  }
-
   private async handleAddEntities(
     request: FastifyRequest<{ Body: any[] }>,
     _reply: FastifyReply
@@ -630,11 +549,11 @@ export class GtsServer {
     }
 
     const embeddedId = schema['$id'];
-    if (typeof embeddedId !== 'string' || !embeddedId.startsWith('gts://')) {
+    if (typeof embeddedId !== 'string' || !hasUriPrefix(embeddedId)) {
       return { ok: false, type_id: null, error: 'GTS Type Schema must contain a top-level $id in gts:// form' };
     }
 
-    const typeId = embeddedId.slice('gts://'.length);
+    const typeId = stripUriPrefix(embeddedId);
     if (!gts.isValidGtsID(typeId) || !typeId.endsWith('~')) {
       return { ok: false, type_id: typeId, error: `Invalid GTS Type Schema $id: '${embeddedId}'` };
     }
@@ -1013,7 +932,7 @@ export class GtsServer {
     // (`TestCaseOp6ValidateJson_MalformedExplicitType` vs.
     // `_ExplicitNonSchemaType`).
     if (!pathType.endsWith('~')) {
-      if (!pathType.startsWith('gts.')) {
+      if (!pathType.startsWith(GTS_PREFIX)) {
         return {
           ok: false,
           id: null,

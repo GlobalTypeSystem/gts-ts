@@ -8,6 +8,7 @@ export { GtsQuery } from './query';
 export { GtsModifiers, DOCUMENT_LEVEL_KEYWORDS } from './modifiers';
 export { XGtsRefValidator, X_GTS_REF_SELF } from './x-gts-ref';
 export type { XGtsRefValidationError } from './x-gts-ref';
+export { validateSchemaIdentityAndRefs, validateSchemaRefs } from './schema-refs';
 export {
   parseJSONC,
   tryParseJSONC,
