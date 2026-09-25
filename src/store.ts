@@ -3,6 +3,7 @@ import Ajv from 'ajv';
 import AjvCore from 'ajv/dist/core';
 import Ajv2019 from 'ajv/dist/2019';
 import Ajv2020 from 'ajv/dist/2020';
+import safeRegex from 'safe-regex2';
 import { applyGtsFormats } from './formats';
 import {
   GtsConfig,
@@ -115,6 +116,8 @@ export class GtsStore {
   private ajv: Ajv;
   private ajv2019: Ajv2019;
   private ajv2020: Ajv2020;
+  private sortedIds: string[] | undefined;
+  private schemaCompileErrors: Map<string, string> = new Map();
 
   constructor(config?: Partial<GtsConfig>) {
     this.config = {
@@ -198,6 +201,67 @@ export class GtsStore {
     if (dialect === '2019-09') return 'https://json-schema.org/draft/2019-09/schema';
     if (dialect === '2020-12') return 'https://json-schema.org/draft/2020-12/schema';
     return 'http://json-schema.org/draft-07/schema#';
+  }
+
+  private assertSafeSchemaPatterns(root: any): void {
+    const stack: Array<{ value: any; depth: number }> = [{ value: root, depth: 0 }];
+    const seen = new WeakSet<object>();
+    let paths = 0;
+    while (stack.length > 0) {
+      const { value, depth } = stack.pop()!;
+      if (!isPlainSchemaObject(value) || seen.has(value)) continue;
+      if (depth > MAX_SCHEMA_DEPTH) throw new EntityContentDepthError();
+      if (++paths > MAX_SCHEMA_PATHS) throw new Error(`Schema exceeds the ${MAX_SCHEMA_PATHS} path safety limit`);
+      seen.add(value);
+      const patterns = [
+        ...(typeof value.pattern === 'string' ? [value.pattern] : []),
+        ...(isPlainSchemaObject(value.patternProperties) ? Object.keys(value.patternProperties) : []),
+      ];
+      for (const pattern of patterns) {
+        if (!safeRegex(pattern)) throw new Error(`Unsafe regular expression pattern: ${pattern}`);
+      }
+      visitJsonSubschemas(value, '', (subschema) => stack.push({ value: subschema, depth: depth + 1 }));
+    }
+  }
+
+  private removeAjvSchema(id: string): void {
+    for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) ajv.removeSchema(id);
+  }
+
+  private addAjvSchema(entity: JsonEntity): void {
+    const normalized = this.normalizeSchema(entity.content);
+    if (!normalized.$id) normalized.$id = entity.id;
+    this.ajvForSchema(normalized).addSchema(normalized, entity.id);
+  }
+
+  private invalidateIndexes(): void {
+    this.sortedIds = undefined;
+  }
+
+  private sortedEntityIds(): string[] {
+    if (!this.sortedIds) this.sortedIds = Array.from(this.byId.keys()).sort();
+    return this.sortedIds;
+  }
+
+  private matchingIds(pattern: string, chainSuffixMatchesSelf: boolean = true): string[] {
+    const wildcard = pattern.endsWith('*');
+    const ids = this.sortedEntityIds();
+    if (!wildcard) {
+      return ids.filter((id) => Gts.matchIDPattern(id, pattern, { chainSuffixMatchesSelf }).match);
+    }
+    const prefix = pattern.slice(0, -1).replace(/~$/, '');
+    let low = 0;
+    let high = ids.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (ids[middle] < prefix) low = middle + 1;
+      else high = middle;
+    }
+    const matches: string[] = [];
+    for (let index = low; index < ids.length && ids[index].startsWith(prefix); index++) {
+      if (Gts.matchIDPattern(ids[index], pattern, { chainSuffixMatchesSelf }).match) matches.push(ids[index]);
+    }
+    return matches;
   }
 
   private resolveLocalSchemaRef(root: any, ref: string): any {
@@ -291,6 +355,8 @@ export class GtsStore {
     const normalizedUri = uri.startsWith(GTS_URI_PREFIX) ? uri.substring(GTS_URI_PREFIX.length) : uri;
 
     if (Gts.isValidGtsID(normalizedUri)) {
+      const compileError = this.schemaCompileErrors.get(normalizedUri);
+      if (compileError) throw new Error(`Unresolvable invalid GTS schema '${normalizedUri}': ${compileError}`);
       const entity = this.get(normalizedUri);
       if (entity && entity.isSchema) {
         return entity.content;
@@ -359,26 +425,19 @@ export class GtsStore {
     }
 
     const schemaUnchanged = !!previous && !replacing && previous.isSchema && entity.isSchema;
-    if (previous?.isSchema && !schemaUnchanged) {
-      for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) {
-        ajv.removeSchema(entity.id);
+    if (!schemaUnchanged) {
+      if (entity.isSchema && entity.content) this.assertSafeSchemaPatterns(entity.content);
+      if (previous?.isSchema) this.removeAjvSchema(entity.id);
+      this.schemaCompileErrors.delete(entity.id);
+      try {
+        if (entity.isSchema && entity.content) this.addAjvSchema(entity);
+      } catch (error) {
+        this.removeAjvSchema(entity.id);
+        this.schemaCompileErrors.set(entity.id, error instanceof Error ? error.message : String(error));
       }
     }
     this.byId.set(entity.id, entity);
-
-    // If this is a schema, add it to AJV for reference resolution
-    if (entity.isSchema && entity.content && !schemaUnchanged) {
-      try {
-        const normalizedSchema = this.normalizeSchema(entity.content);
-        // Set $id to the GTS ID if not already set
-        if (!normalizedSchema.$id) {
-          normalizedSchema.$id = entity.id;
-        }
-        this.ajvForSchema(normalizedSchema).addSchema(normalizedSchema, entity.id);
-      } catch (err) {
-        // Ignore malformed schemas; unchanged schemas do not reach this path.
-      }
-    }
+    this.invalidateIndexes();
     return previous ? cloneJsonEntity(previous) : undefined;
   }
 
@@ -400,11 +459,11 @@ export class GtsStore {
       return;
     }
     this.byId.delete(id);
+    this.schemaCompileErrors.delete(id);
+    this.invalidateIndexes();
     if (entity.isSchema) {
       try {
-        for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) {
-          ajv.removeSchema(id);
-        }
+        this.removeAjvSchema(id);
       } catch (err) {
         // Ignore errors removing schema - mirrors the best-effort addSchema above.
       }
@@ -415,20 +474,12 @@ export class GtsStore {
     return Array.from(this.byId.values(), cloneJsonEntity);
   }
 
-  query(pattern: string, limit?: number): string[] {
-    const results: string[] = [];
-    const maxResults = limit ?? Number.MAX_SAFE_INTEGER;
+  entries(): Array<[string, JsonEntity]> {
+    return Array.from(this.byId, ([id, entity]) => [id, cloneJsonEntity(entity)]);
+  }
 
-    for (const [id] of this.byId) {
-      if (results.length >= maxResults) break;
-
-      const matchResult = Gts.matchIDPattern(id, pattern);
-      if (matchResult.match) {
-        results.push(id);
-      }
-    }
-
-    return results;
+  query(pattern: string, limit?: number, chainSuffixMatchesSelf: boolean = true): string[] {
+    return this.matchingIds(pattern, chainSuffixMatchesSelf).slice(0, limit ?? Number.MAX_SAFE_INTEGER);
   }
 
   validateInstance(
@@ -920,6 +971,7 @@ export class GtsStore {
   }
 
   private normalizeSchema(schema: any): any {
+    this.assertSafeSchemaPatterns(schema);
     return this.normalizeSchemaRecursive(schema);
   }
 
@@ -1880,9 +1932,9 @@ export class GtsStore {
     completed: Map<string, ValidationResult>,
     refValidation: GtsRefValidationMode
   ): boolean {
-    return this.getAll()
-      .filter((entity) => Gts.matchIDPattern(entity.id, pattern).match)
-      .some((entity) => this.validateEntityTransitive(entity.id, visiting, completed, refValidation).ok);
+    return this.matchingIds(pattern).some(
+      (id) => this.validateEntityTransitive(id, visiting, completed, refValidation).ok
+    );
   }
 
   private collectSchemaDependencies(node: any, dependencies: Set<string> = new Set()): Set<string> {

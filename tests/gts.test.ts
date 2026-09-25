@@ -1802,6 +1802,57 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
       expect(result.error).toMatch(new RegExp(`nests deeper than ${MAX_SCHEMA_DEPTH} levels`));
     });
   });
+
+  describe('store hardening', () => {
+    test('rejects unsafe schema patterns without registering the schema', () => {
+      const store = new GtsStore();
+      const id = 'gts.x.security.regex.unsafe.v1~';
+      expect(() =>
+        store.register(
+          createJsonEntity({
+            $id: `gts://${id}`,
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'string',
+            pattern: '(a+)+$',
+          })
+        )
+      ).toThrow(/Unsafe regular expression pattern/);
+      expect(store.get(id)).toBeUndefined();
+    });
+
+    test('rolls AJV registration back when a replacement cannot be compiled', () => {
+      const id = 'gts.x.security.regex.rollback.v1~';
+      const store = new GtsStore({ allowEntityUpdates: true });
+      store.register(
+        createJsonEntity({
+          $id: `gts://${id}`,
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'string',
+          pattern: '^a+$',
+        })
+      );
+      expect(() =>
+        store.register(
+          createJsonEntity({
+            $id: `gts://${id}`,
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'string',
+            pattern: '(a+)+$',
+          })
+        )
+      ).toThrow(/Unsafe regular expression pattern/);
+      expect(store.get(id)?.content.pattern).toBe('^a+$');
+    });
+
+    test('exposes cloned entries through the store abstraction', () => {
+      const store = new GtsStore();
+      const id = 'gts.x.query.entries.item.v1~x.query._.instance.v1.0';
+      store.register(createJsonEntity({ gtsId: id, value: 1 }));
+      const entries = store.entries();
+      entries[0][1].content.value = 2;
+      expect(store.get(id)?.content.value).toBe(1);
+    });
+  });
 });
 
 describe('x-gts-ref schema existence traversal', () => {
