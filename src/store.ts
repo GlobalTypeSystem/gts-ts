@@ -2079,6 +2079,17 @@ export class GtsStore {
               error: `x-gts-traits-schema in '${chainSchemaId}' must be an object subschema or a boolean`,
             };
           }
+          if ('$schema' in declaredSchema) {
+            const hostDialect = this.dialectOf(content);
+            const traitDialect = this.dialectOf(declaredSchema);
+            if (traitDialect !== hostDialect) {
+              return {
+                id: schemaId,
+                ok: false,
+                error: `trait schema dialect ${traitDialect} differs from host dialect ${hostDialect}`,
+              };
+            }
+          }
           try {
             traitSchemas.push(this.resolveTraitSchemaRefs(declaredSchema, new Set()));
           } catch (e) {

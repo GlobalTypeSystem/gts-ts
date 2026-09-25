@@ -2064,6 +2064,25 @@ describe("OP#13 - trait schemas use their root type's dialect", () => {
     expect(gts.validateEntity(id).ok).toBe(true);
   });
 
+  test('an embedded trait resource cannot declare a different dialect', () => {
+    const gts = new GTS({ validateRefs: false });
+    const id = 'gts.x.unit.tr.resourcedialect.v1~';
+    gts.register({
+      $id: id,
+      $schema: DRAFT2020,
+      type: 'object',
+      'x-gts-traits-schema': {
+        $id: 'https://example.com/gts/legacy-traits',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+      },
+    });
+
+    const result = gts.validateEntity(id);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('differs from host dialect');
+  });
+
   test('a draft-07 child cannot inherit a 2020-12 trait schema through a mixed-dialect chain', () => {
     const gts = new GTS({ validateRefs: false });
     const parentId = 'gts.x.unit.tr.inheriteddialect.v1~';
