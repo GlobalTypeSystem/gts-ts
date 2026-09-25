@@ -1,21 +1,24 @@
-import { createHash } from 'crypto';
 import Ajv from 'ajv';
 import AjvCore from 'ajv/dist/core';
 import Ajv2019 from 'ajv/dist/2019';
 import Ajv2020 from 'ajv/dist/2020';
-import safeRegex from 'safe-regex2';
 import { applyGtsFormats } from './formats';
+import { isPlainSchemaObject, contentHash, cloneJsonEntity } from './json-canonical';
+import { dialectOf, canonicalDialectUri } from './schema-dialect';
+import { assertSafeSchemaPatterns } from './schema-safety';
 import {
   GtsConfig,
   JsonEntity,
   ValidationResult,
   ValidationIssue,
   EntityConflictError,
-  EntityContentDepthError,
-  GTS_URI_PREFIX,
+  GTS_PREFIX,
+  JSON_SCHEMA_HOST,
   MAX_SCHEMA_DEPTH,
   MAX_SCHEMA_PATHS,
   GtsRefValidationMode,
+  hasUriPrefix,
+  stripUriPrefix,
 } from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
@@ -40,76 +43,28 @@ interface ResolvedSchema {
 const TRAIT_STRUCTURAL_KEYWORDS = ['properties', 'required', 'additionalProperties'];
 
 /**
- * True when `value` is safe to read schema keywords off (`.type`, `['$ref']`,
- * etc). Schemas are registered without meta-validation (`validateSchema:
- * false` above), so a registered document can contain a literal `null` (or
- * any other non-object) in a position where a schema object is expected -
- * e.g. `properties: {a: null}` or `allOf: [{...}, null]`. Every traversal
- * that walks into such a position must check this first, rather than reading
- * a property straight off the value: a `null`/non-object entry in a schema
- * position is malformed/no-op data, not a crash.
+ * In-memory registry of GTS entities plus the validation, casting, derivation
+ * and compatibility machinery that operates over them.
+ *
+ * ## Concurrency invariant
+ *
+ * The store holds no locks and needs none. Node runs JavaScript on a single
+ * thread, and every mutating operation here (notably {@link register},
+ * {@link unregister} and {@link rollbackRegistration}) is fully synchronous:
+ * it performs its read-modify-write on `byId` and the Ajv registries with no
+ * `await` in between. A request handler therefore runs to completion
+ * atomically with respect to every other handler, so concurrent HTTP requests
+ * cannot interleave a partial mutation - the property Go/Rust ports must buy
+ * with an explicit `RwLock`/`Mutex`.
+ *
+ * This invariant is load-bearing. If a genuine `await` is ever introduced
+ * between a read and a dependent write on shared state (e.g. async `$ref`
+ * loading via {@link loadSchema}, async schema compilation, or persistence),
+ * this lock-free assumption breaks and mutations would need to be serialized
+ * explicitly (a promise-chain mutex is the idiomatic TS analogue). Keep
+ * mutators synchronous, or reinstate serialization if that stops being
+ * possible.
  */
-function isPlainSchemaObject(value: unknown): value is Record<string, any> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
- * Canonical JSON serialization with object keys emitted in sorted order,
- * recursively. `JSON.stringify` preserves insertion order, so two entities
- * with equal content but differently-ordered keys would serialize
- * differently - sorting keys makes the serialization stable so equal content
- * always produces an equal string. Mirrors gts-go's reliance on Go's
- * `encoding/json` sorting map keys.
- */
-function canonicalJson(value: any, depth: number = 0): string {
-  if (depth > MAX_SCHEMA_DEPTH) {
-    throw new EntityContentDepthError();
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalJson(item, depth + 1)).join(',')}]`;
-  }
-  if (value !== null && typeof value === 'object') {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key], depth + 1)}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
-/**
- * A stable SHA-256 hash of an entity's content, used to distinguish an
- * idempotent re-submission (identical content) from a conflicting update
- * (changed content) without a deep structural comparison. Mirrors gts-go's
- * `contentHash`.
- */
-function contentHash(content: Record<string, any>): string {
-  return createHash('sha256').update(canonicalJson(content)).digest('hex');
-}
-
-function cloneJsonValue<T>(value: T, seen: WeakMap<object, any> = new WeakMap()): T {
-  if (value === null || typeof value !== 'object') return value;
-  const existing = seen.get(value as object);
-  if (existing !== undefined) return existing;
-  const clone: any = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
-  seen.set(value as object, clone);
-  for (const key of Object.keys(value as object)) {
-    Object.defineProperty(clone, key, {
-      value: cloneJsonValue((value as any)[key], seen),
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
-  }
-  return clone;
-}
-
-function cloneJsonEntity(entity: JsonEntity): JsonEntity {
-  return {
-    ...entity,
-    content: cloneJsonValue(entity.content),
-    references: new Set(entity.references),
-  };
-}
-
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   private config: GtsConfig;
@@ -144,84 +99,14 @@ export class GtsStore {
 
   // All three registries extend AjvCore, so the common base type lets callers
   // use compile/addSchema/removeSchema/validateSchema without a cast.
+  // All three registries extend AjvCore, so the common base type lets callers
+  // use compile/addSchema/removeSchema/validateSchema without a cast. Dialect
+  // detection lives in `schema-dialect.ts`.
   private ajvForSchema(schema: any): AjvCore {
-    const dialect = this.dialectOf(schema);
+    const dialect = dialectOf(schema);
     if (dialect === '2020-12') return this.ajv2020;
     if (dialect === '2019-09') return this.ajv2019;
     return this.ajv;
-  }
-
-  // The Ajv registries are dialect-specific (each holds only its own dialect's
-  // vocabulary), and instance validation compiles synchronously, so a `$ref`
-  // target must live in the SAME Ajv instance as the schema that references
-  // it: `$ref` composes the referenced schema INTO the referrer's single
-  // compiled validation, evaluated under the referrer's one dialect. JSON
-  // Schema itself assumes one dialect per validation and defines no semantics
-  // for composing subschemas of different dialects, so a cross-dialect `$ref`
-  // is not merely an Ajv limitation - it is underspecified. This returns the
-  // canonical dialect bucket (matching `ajvForSchema`'s routing) so a mismatch
-  // across a `$ref` can be rejected with a clear error instead of surfacing as
-  // a compile throw that the surrounding catch turns into a bogus "invalid".
-  private dialectOf(schema: any): string {
-    const dialect = schema?.$schema;
-    if (dialect === undefined) return 'draft-07';
-    if (typeof dialect !== 'string' || dialect.length === 0) {
-      throw new Error('$schema must declare a supported JSON Schema dialect');
-    }
-    let uri: URL;
-    try {
-      uri = new URL(dialect);
-    } catch {
-      throw new Error(`Unsupported JSON Schema dialect: ${String(dialect)}`);
-    }
-    if (
-      (uri.protocol !== 'http:' && uri.protocol !== 'https:') ||
-      uri.hostname.toLowerCase() !== 'json-schema.org' ||
-      uri.username !== '' ||
-      uri.password !== '' ||
-      uri.port !== '' ||
-      uri.search !== '' ||
-      uri.hash !== ''
-    ) {
-      throw new Error(`Unsupported JSON Schema dialect: ${dialect}`);
-    }
-    switch (uri.pathname) {
-      case '/draft-07/schema':
-        return 'draft-07';
-      case '/draft/2019-09/schema':
-        return '2019-09';
-      case '/draft/2020-12/schema':
-        return '2020-12';
-      default:
-        throw new Error(`Unsupported JSON Schema dialect: ${dialect}`);
-    }
-  }
-
-  private canonicalDialectUri(dialect: string): string {
-    if (dialect === '2019-09') return 'https://json-schema.org/draft/2019-09/schema';
-    if (dialect === '2020-12') return 'https://json-schema.org/draft/2020-12/schema';
-    return 'http://json-schema.org/draft-07/schema#';
-  }
-
-  private assertSafeSchemaPatterns(root: any): void {
-    const stack: Array<{ value: any; depth: number }> = [{ value: root, depth: 0 }];
-    const seen = new WeakSet<object>();
-    let paths = 0;
-    while (stack.length > 0) {
-      const { value, depth } = stack.pop()!;
-      if (!isPlainSchemaObject(value) || seen.has(value)) continue;
-      if (depth > MAX_SCHEMA_DEPTH) throw new EntityContentDepthError();
-      if (++paths > MAX_SCHEMA_PATHS) throw new Error(`Schema exceeds the ${MAX_SCHEMA_PATHS} path safety limit`);
-      seen.add(value);
-      const patterns = [
-        ...(typeof value.pattern === 'string' ? [value.pattern] : []),
-        ...(isPlainSchemaObject(value.patternProperties) ? Object.keys(value.patternProperties) : []),
-      ];
-      for (const pattern of patterns) {
-        if (!safeRegex(pattern)) throw new Error(`Unsafe regular expression pattern: ${pattern}`);
-      }
-      visitJsonSubschemas(value, '', (subschema) => stack.push({ value: subschema, depth: depth + 1 }));
-    }
   }
 
   private removeAjvSchema(id: string): void {
@@ -295,7 +180,7 @@ export class GtsStore {
       if (typeof schema.$ref === 'string' && schema.$ref.startsWith('#')) {
         const target = this.resolveLocalSchemaRef(content, schema.$ref);
         if (target && typeof target === 'object' && !Array.isArray(target) && '$schema' in target) {
-          const targetDialect = this.dialectOf(target);
+          const targetDialect = dialectOf(target);
           if (targetDialect !== rootDialect) {
             mismatch = `GTS schema reference graph mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but local $ref target '${schema.$ref}' uses ${targetDialect}`;
             return;
@@ -317,14 +202,14 @@ export class GtsStore {
     const chain = this.buildSchemaChain(schemaId);
     const rootId = chain[0];
     const rootContent = rootId === schemaId ? content : this.get(rootId)?.content;
-    const rootDialect = this.dialectOf(rootContent ?? content);
+    const rootDialect = dialectOf(rootContent ?? content);
     const localDialectError = this.detectLocalRefDialectMismatch(content, rootId, rootDialect);
     if (localDialectError) return localDialectError;
 
     for (const chainId of chain) {
       const chainContent = chainId === schemaId ? content : this.get(chainId)?.content;
       if (!chainContent) continue;
-      const chainDialect = this.dialectOf(chainContent);
+      const chainDialect = dialectOf(chainContent);
       if (chainDialect !== rootDialect) {
         return `GTS derivation chain mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but '${chainId}' uses ${chainDialect}; every type in a chained $id hierarchy must use the root type's dialect`;
       }
@@ -338,7 +223,7 @@ export class GtsStore {
       visited.add(refId);
       const target = this.get(refId);
       if (!target?.isSchema || !target.content) continue;
-      const targetDialect = this.dialectOf(target.content);
+      const targetDialect = dialectOf(target.content);
       if (targetDialect !== rootDialect) {
         return `GTS derivation mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but $ref target '${refId}' uses ${targetDialect}; every type in the chain and its transitive gts:// $ref targets must use the root type's dialect`;
       }
@@ -351,8 +236,14 @@ export class GtsStore {
     return null;
   }
 
+  // Ajv's async `loadSchema` hook. Registered for completeness, but currently
+  // NEVER invoked: every validation compiles synchronously via `.compile()`
+  // (all `$ref` targets are pre-registered with `addSchema`), and Ajv only
+  // calls `loadSchema` from `compileAsync`. If a `compileAsync` path is ever
+  // introduced this hook goes live - and, per the class-level concurrency
+  // invariant, its `await` would then require serializing mutations.
   private async loadSchema(uri: string): Promise<any> {
-    const normalizedUri = uri.startsWith(GTS_URI_PREFIX) ? uri.substring(GTS_URI_PREFIX.length) : uri;
+    const normalizedUri = stripUriPrefix(uri);
 
     if (Gts.isValidGtsID(normalizedUri)) {
       const compileError = this.schemaCompileErrors.get(normalizedUri);
@@ -426,7 +317,7 @@ export class GtsStore {
 
     const schemaUnchanged = !!previous && !replacing && previous.isSchema && entity.isSchema;
     if (!schemaUnchanged) {
-      if (entity.isSchema && entity.content) this.assertSafeSchemaPatterns(entity.content);
+      if (entity.isSchema && entity.content) assertSafeSchemaPatterns(entity.content);
       if (previous?.isSchema) this.removeAjvSchema(entity.id);
       this.schemaCompileErrors.delete(entity.id);
       try {
@@ -489,6 +380,12 @@ export class GtsStore {
     return this.validateInstanceTransitive(gtsId, new Set(), new Map(), refValidation);
   }
 
+  /**
+   * Promise-returning form of {@link validateInstance}, kept for callers that
+   * want a uniform `await`-able API surface. Validation is fully synchronous
+   * today (see the class-level concurrency invariant); this wrapper adds no
+   * I/O and does not await, so it never yields the event loop mid-validation.
+   */
   async validateInstanceAsync(
     gtsId: string,
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
@@ -971,7 +868,7 @@ export class GtsStore {
   }
 
   private normalizeSchema(schema: any): any {
-    this.assertSafeSchemaPatterns(schema);
+    assertSafeSchemaPatterns(schema);
     return this.normalizeSchemaRecursive(schema);
   }
 
@@ -993,7 +890,7 @@ export class GtsStore {
       const newKey = key;
       let newValue = value;
       if (key === '$schema' && typeof value === 'string') {
-        newValue = this.canonicalDialectUri(this.dialectOf({ $schema: value }));
+        newValue = canonicalDialectUri(dialectOf({ $schema: value }));
       }
 
       // Recursively normalize nested objects
@@ -1045,16 +942,12 @@ export class GtsStore {
 
     // Normalize $id values
     if (normalized['$id'] && typeof normalized['$id'] === 'string') {
-      if (normalized['$id'].startsWith(GTS_URI_PREFIX)) {
-        normalized['$id'] = normalized['$id'].substring(GTS_URI_PREFIX.length);
-      }
+      normalized['$id'] = stripUriPrefix(normalized['$id']);
     }
 
     // Normalize $ref values
     if (normalized['$ref'] && typeof normalized['$ref'] === 'string') {
-      if (normalized['$ref'].startsWith(GTS_URI_PREFIX)) {
-        normalized['$ref'] = normalized['$ref'].substring(GTS_URI_PREFIX.length);
-      }
+      normalized['$ref'] = stripUriPrefix(normalized['$ref']);
     }
 
     return normalized;
@@ -1163,7 +1056,7 @@ export class GtsStore {
   }
 
   private isJsonSchemaUrl(s: string): boolean {
-    return (s.startsWith('http://') || s.startsWith('https://')) && s.includes('json-schema.org');
+    return (s.startsWith('http://') || s.startsWith('https://')) && s.includes(JSON_SCHEMA_HOST);
   }
 
   /**
@@ -1683,6 +1576,11 @@ export class GtsStore {
     return this.validateSchemaAgainstParent(schemaId, refValidation);
   }
 
+  /**
+   * Promise-returning form of {@link validateSchema}. Like
+   * {@link validateInstanceAsync}, this adds no I/O and does not await - see
+   * the class-level concurrency invariant.
+   */
   async validateSchemaAsync(
     schemaId: string,
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
@@ -1785,10 +1683,10 @@ export class GtsStore {
 
     if (typeof node.$ref === 'string' && !node.$ref.startsWith('#')) {
       const refPath = path ? `${path}/$ref` : '$ref';
-      if (!node.$ref.startsWith(GTS_URI_PREFIX)) {
+      if (!hasUriPrefix(node.$ref)) {
         return `Invalid $ref at ${refPath}: expected a local pointer or gts:// URI`;
       }
-      const targetId = node.$ref.substring(GTS_URI_PREFIX.length);
+      const targetId = stripUriPrefix(node.$ref);
       if (!Gts.isValidGtsID(targetId)) {
         return `Invalid $ref at ${refPath}: ${targetId} is not a valid GTS identifier`;
       }
@@ -1939,8 +1837,8 @@ export class GtsStore {
 
   private collectSchemaDependencies(node: any, dependencies: Set<string> = new Set()): Set<string> {
     if (!node || typeof node !== 'object') return dependencies;
-    if (typeof node.$ref === 'string' && node.$ref.startsWith(GTS_URI_PREFIX)) {
-      dependencies.add(node.$ref.substring(GTS_URI_PREFIX.length));
+    if (typeof node.$ref === 'string' && hasUriPrefix(node.$ref)) {
+      dependencies.add(stripUriPrefix(node.$ref));
     }
     visitJsonSubschemas(node, '', (subschema) => this.collectSchemaDependencies(subschema, dependencies));
     return dependencies;
@@ -2159,8 +2057,8 @@ export class GtsStore {
             };
           }
           if ('$schema' in declaredSchema) {
-            const hostDialect = this.dialectOf(content);
-            const traitDialect = this.dialectOf(declaredSchema);
+            const hostDialect = dialectOf(content);
+            const traitDialect = dialectOf(declaredSchema);
             if (traitDialect !== hostDialect) {
               return {
                 id: schemaId,
@@ -2836,7 +2734,7 @@ export class GtsStore {
 
   /** True when `typeId` resolves to a registered type marked `x-gts-abstract` (§9.11.3). */
   isAbstractType(typeId: string): boolean {
-    const normalized = typeId.startsWith(GTS_URI_PREFIX) ? typeId.substring(GTS_URI_PREFIX.length) : typeId;
+    const normalized = stripUriPrefix(typeId);
     const entity = this.get(normalized);
     return !!entity && entity.isSchema && GtsModifiers.isAbstract(entity.content);
   }
@@ -2850,7 +2748,7 @@ export class GtsStore {
 
       for (let i = 0; i < segments.length; i++) {
         const id =
-          'gts.' +
+          GTS_PREFIX +
           segments
             .slice(0, i + 1)
             .map((s) => s.segment)
@@ -2907,7 +2805,7 @@ export class GtsStore {
     for (const [key, value] of Object.entries(schema)) {
       if (key === '$ref') {
         const refUri = value as string;
-        const refId = refUri.startsWith(GTS_URI_PREFIX) ? refUri.substring(GTS_URI_PREFIX.length) : refUri;
+        const refId = stripUriPrefix(refUri);
 
         // `visited` tracks the active recursion path, not every reference seen
         // anywhere: two siblings may legitimately point at the same trait
@@ -3136,7 +3034,7 @@ export class GtsStore {
     // Check direct ref on this object
     const ref = content['$ref'];
     if (typeof ref === 'string') {
-      const refId = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+      const refId = stripUriPrefix(ref);
       if (visited.has(refId)) {
         return `Cyclic reference detected: ${refId}`;
       }
@@ -3204,7 +3102,7 @@ export class GtsStore {
    */
   private inheritsParentViaRef(schema: any, parentId: string): boolean {
     return this.collectDirectRefs(schema).some((ref) => {
-      const normalized = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+      const normalized = stripUriPrefix(ref);
       return normalized === parentId;
     });
   }
@@ -3231,7 +3129,7 @@ export class GtsStore {
     // nothing and its constraints become unenforceable for descendants.
     const ownRef = schema['$ref'];
     if (typeof ownRef === 'string') {
-      const refId = ownRef.startsWith(GTS_URI_PREFIX) ? ownRef.substring(GTS_URI_PREFIX.length) : ownRef;
+      const refId = stripUriPrefix(ownRef);
       if (!visited.has(refId)) {
         const refEntity = this.get(refId);
         if (refEntity && refEntity.content) {
@@ -3257,7 +3155,7 @@ export class GtsStore {
         const ref = sub['$ref'];
         if (typeof ref === 'string') {
           // Resolve referenced schema
-          const refId = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+          const refId = stripUriPrefix(ref);
           if (visited.has(refId)) {
             continue;
           }
@@ -3777,7 +3675,7 @@ function findReferences(obj: any, refs: Set<string>, visited = new Set()): void 
 
   if ('$ref' in obj && typeof obj['$ref'] === 'string') {
     const ref = obj['$ref'];
-    const normalized = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+    const normalized = stripUriPrefix(ref);
     if (Gts.isValidGtsID(normalized)) {
       refs.add(normalized);
     }
