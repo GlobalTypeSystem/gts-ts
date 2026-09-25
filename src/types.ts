@@ -88,6 +88,23 @@ export interface GtsID {
   segments: GtsIDSegment[];
 }
 
+/**
+ * A parsed GTS *pattern* - an identifier that may contain a single trailing
+ * `*` wildcard, used for matching rather than as an entity identity.
+ *
+ * Modelled as a distinct type (rather than folding wildcards into {@link GtsID}
+ * behind boolean segment flags) so pattern-only concerns do not leak into the
+ * identity type and callers can branch on {@link GtsPattern.hasWildcard}
+ * instead of re-scanning the raw string for `*`. Mirrors gts-rust's separate
+ * `GtsIdPattern`.
+ */
+export interface GtsPattern {
+  id: string;
+  segments: GtsIDSegment[];
+  /** Whether the pattern contains a `*` wildcard token. */
+  hasWildcard: boolean;
+}
+
 export interface SourceSpan {
   offset: number;
   length: number;
@@ -205,6 +222,46 @@ export interface RelationshipResult {
 /** Tri-state compatibility verdict (GTS spec 0.13 §4.3). */
 export type CompatVerdict = 'compatible' | 'incompatible' | 'unknown';
 
+/** Which subset relation a diagnostic pertains to. */
+export type CompatDirection = 'backward' | 'forward';
+
+/**
+ * A single piece of evidence behind a non-`compatible` verdict, modelled after
+ * gts-rust's `CompatibilityDiagnostic`. Structured (direction + verdict +
+ * message) rather than a bare string so callers can filter/group findings
+ * without parsing prose.
+ */
+export interface CompatibilityDiagnostic {
+  direction: CompatDirection;
+  verdict: CompatVerdict;
+  message: string;
+}
+
+/**
+ * Derive a verdict from diagnostics - the TS analogue of gts-rust's
+ * `CompatibilityVerdict::from_diagnostics`, keeping the verdict a pure reading
+ * of its evidence (no `incompatible` sitting next to an empty diagnostic list).
+ * `incompatible` dominates `unknown`, which dominates `compatible`; no matching
+ * diagnostic means `compatible`.
+ *
+ * Pass `direction` to recover a single directional verdict
+ * (`backward`/`forward`) by considering only that direction's diagnostics;
+ * omit it to recover the full verdict, which spans both directions and equals
+ * {@link CompatibilityResult.full_compatibility}.
+ */
+export function verdictFromDiagnostics(
+  diagnostics: CompatibilityDiagnostic[],
+  direction?: CompatDirection
+): CompatVerdict {
+  let verdict: CompatVerdict = 'compatible';
+  for (const d of diagnostics) {
+    if (direction !== undefined && d.direction !== direction) continue;
+    if (d.verdict === 'incompatible') return 'incompatible';
+    if (d.verdict === 'unknown') verdict = 'unknown';
+  }
+  return verdict;
+}
+
 export interface CompatibilityResult {
   old: string;
   new: string;
@@ -230,6 +287,16 @@ export interface CompatibilityResult {
   incompatibility_reasons: string[];
   backward_errors: string[];
   forward_errors: string[];
+  /**
+   * Structured evidence for the two directional verdicts, superseding the
+   * deprecated `*_properties` arrays (gts-rust parity). Kept consistent with
+   * the verdicts above: `backward_compatibility` equals
+   * `verdictFromDiagnostics(diagnostics, 'backward')`,
+   * `forward_compatibility` the `'forward'` variant, and
+   * `full_compatibility` equals `verdictFromDiagnostics(diagnostics)` with no
+   * direction. Empty when both directions are `compatible`.
+   */
+  diagnostics: CompatibilityDiagnostic[];
 }
 
 export interface CastResult {

@@ -1,10 +1,12 @@
 import {
   CompatibilityResult,
+  CompatibilityDiagnostic,
+  CompatDirection,
   CompatVerdict,
   EntityLookup,
-  GTS_URI_PREFIX,
   MAX_SCHEMA_DEPTH,
   MAX_SCHEMA_PATHS,
+  stripUriPrefix,
 } from './types';
 import { Gts } from './gts';
 
@@ -673,7 +675,7 @@ class SchemaResolver {
     // Local pointers are not followed; they are left to the unmodeled check.
     if (ref.startsWith('#')) return null;
 
-    const id = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+    const id = stripUriPrefix(ref);
     if (!Gts.isValidGtsID(id)) return null;
 
     const entity = this.store.get(id);
@@ -1135,7 +1137,7 @@ export class GtsCompatibility {
   }
 
   private static normalizeId(id: string): string {
-    return id.startsWith(GTS_URI_PREFIX) ? id.substring(GTS_URI_PREFIX.length) : id;
+    return stripUriPrefix(id);
   }
 
   /** Full compatibility holds only when both directions hold (§4.3). Shared
@@ -1156,6 +1158,12 @@ export class GtsCompatibility {
     forwardErrors: string[]
   ): CompatibilityResult {
     const full = this.fullVerdict(backward, forward);
+    const toDiagnostics = (direction: CompatDirection, verdict: CompatVerdict, messages: string[]) =>
+      messages.map((message) => ({ direction, verdict, message }));
+    const diagnostics: CompatibilityDiagnostic[] = [
+      ...toDiagnostics('backward', backward, backwardErrors),
+      ...toDiagnostics('forward', forward, forwardErrors),
+    ];
 
     return {
       old: oldId,
@@ -1176,6 +1184,7 @@ export class GtsCompatibility {
       incompatibility_reasons: Array.from(new Set([...backwardErrors, ...forwardErrors])),
       backward_errors: backwardErrors,
       forward_errors: forwardErrors,
+      diagnostics,
     };
   }
 
