@@ -41,9 +41,7 @@ export function gtsPatternViolation(value: string, pattern: string): string | nu
   }
   if (pattern === GTS_PREFIX + '*') return null;
   if (pattern.endsWith('*')) {
-    return value.startsWith(pattern.slice(0, -1))
-      ? null
-      : `Value '${value}' does not match pattern '${pattern}'`;
+    return value.startsWith(pattern.slice(0, -1)) ? null : `Value '${value}' does not match pattern '${pattern}'`;
   }
   if (!value.startsWith(pattern) || !matchesAtSegmentBoundary(value, pattern)) {
     return `Value '${value}' does not match pattern '${pattern}'`;
