@@ -591,6 +591,45 @@ describe('GTS Store Operations', () => {
       expect(result.ok).toBe(false);
       expect(result.error).toContain('mixes JSON Schema dialects');
     });
+
+    test('a cross-dialect $ref on an ancestor is rejected even when the descendant does not reference it', () => {
+      // Issue C: the ancestor `base` (draft-07) references a 2020-12 schema; the
+      // descendant `child` derives by re-declaration and references neither the
+      // ancestor nor the 2020-12 target. A leaf-only reference walk accepts the
+      // child; validating the whole chain closure must reject it.
+      gts.register({
+        $id: 'gts.test.pkg.ns.ancforeign.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: { note: { type: 'string' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.ancbase.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { ext: { $ref: 'gts://gts.test.pkg.ns.ancforeign.v1~' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { label: { type: 'string' } },
+      });
+      gts.register({
+        gtsId: 'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~test.pkg._.item.v1.0',
+        $schema: 'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~',
+        label: 'ok',
+      });
+
+      const schemaResult = gts.validateEntity('gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~');
+      const instanceResult = gts.validateInstance(
+        'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~test.pkg._.item.v1.0'
+      );
+      expect(schemaResult.ok).toBe(false);
+      expect(schemaResult.error).toContain('mixes JSON Schema dialects');
+      expect(instanceResult.ok).toBe(false);
+      expect(instanceResult.error).toContain('mixes JSON Schema dialects');
+    });
   });
 
   describe('OP#9 - a cast succeeds only if its result fits the target', () => {

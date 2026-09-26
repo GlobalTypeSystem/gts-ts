@@ -215,8 +215,23 @@ export class GtsStore {
       }
     }
 
+    // Seed the reference walk from every type in the chain, not just the leaf.
+    // A leaf-only walk would miss a cross-dialect $ref that lives on an ancestor
+    // the leaf does not itself reference; a type is only as valid as the types it
+    // builds on, so the whole chain plus its transitive gts:// $ref closure must
+    // share the root dialect (spec §11.0/§12, matching the Rust reference which
+    // validates each related type in the closure).
     const visited = new Set<string>();
-    const queue = Array.from(this.collectSchemaDependencies(content));
+    const queue: string[] = [];
+    for (const chainId of chain) {
+      const chainContent = chainId === schemaId ? content : this.get(chainId)?.content;
+      if (!chainContent) continue;
+      if (chainId !== schemaId) {
+        const chainLocalError = this.detectLocalRefDialectMismatch(chainContent, rootId, rootDialect);
+        if (chainLocalError) return chainLocalError;
+      }
+      for (const depId of this.collectSchemaDependencies(chainContent)) queue.push(depId);
+    }
     while (queue.length > 0) {
       const refId = queue.shift() as string;
       if (refId === schemaId || visited.has(refId)) continue;
