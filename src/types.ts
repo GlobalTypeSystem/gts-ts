@@ -3,6 +3,41 @@ export const GTS_URI_PREFIX = 'gts://';
 export const MAX_ID_LENGTH = 1024;
 
 /**
+ * Host that every supported JSON Schema meta-schema (`$schema`) URI lives
+ * under. Centralized so dialect checks do not scatter the literal - mirrors
+ * the prefix-constant discipline gts-rust enforces via its `gts-dylint` lint
+ * and gts-dotnet's `GtsConstants`.
+ */
+export const JSON_SCHEMA_HOST = 'json-schema.org';
+
+/**
+ * A JSON value, modelled as a recursive union rather than `any`. Prefer this
+ * (or `unknown` plus a guard) over `any` for parsed-JSON positions so the
+ * compiler keeps checking the untrusted data that flows through validation.
+ */
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+/** A JSON object - the shape every registered entity's `content` takes. */
+export type JsonObject = { [key: string]: JsonValue };
+
+/**
+ * Whether `value` carries the `gts://` URI prefix that JSON Schema `$id`/`$ref`
+ * fields use to embed a GTS identifier (gts-spec §3.4).
+ */
+export function hasUriPrefix(value: string): boolean {
+  return value.startsWith(GTS_URI_PREFIX);
+}
+
+/**
+ * Strip a leading `gts://` URI prefix if present, returning the bare GTS
+ * identifier. A single choke point for the prefix so the length offset is
+ * never hardcoded (`.substring(6)` / `.slice(6)`) at call sites.
+ */
+export function stripUriPrefix(value: string): string {
+  return hasUriPrefix(value) ? value.slice(GTS_URI_PREFIX.length) : value;
+}
+
+/**
  * Recursion bound shared by every walker over schema documents.
  *
  * The limit exists to stop pathological or cyclic input, never to decide a
@@ -51,6 +86,23 @@ export interface GtsIDSegment {
 export interface GtsID {
   id: string;
   segments: GtsIDSegment[];
+}
+
+/**
+ * A parsed GTS *pattern* - an identifier that may contain a single trailing
+ * `*` wildcard, used for matching rather than as an entity identity.
+ *
+ * Modelled as a distinct type (rather than folding wildcards into {@link GtsID}
+ * behind boolean segment flags) so pattern-only concerns do not leak into the
+ * identity type and callers can branch on {@link GtsPattern.hasWildcard}
+ * instead of re-scanning the raw string for `*`. Mirrors gts-rust's separate
+ * `GtsIdPattern`.
+ */
+export interface GtsPattern {
+  id: string;
+  segments: GtsIDSegment[];
+  /** Whether the pattern contains a `*` wildcard token. */
+  hasWildcard: boolean;
 }
 
 export interface SourceSpan {
@@ -170,6 +222,46 @@ export interface RelationshipResult {
 /** Tri-state compatibility verdict (GTS spec 0.13 §4.3). */
 export type CompatVerdict = 'compatible' | 'incompatible' | 'unknown';
 
+/** Which subset relation a diagnostic pertains to. */
+export type CompatDirection = 'backward' | 'forward';
+
+/**
+ * A single piece of evidence behind a non-`compatible` verdict, modelled after
+ * gts-rust's `CompatibilityDiagnostic`. Structured (direction + verdict +
+ * message) rather than a bare string so callers can filter/group findings
+ * without parsing prose.
+ */
+export interface CompatibilityDiagnostic {
+  direction: CompatDirection;
+  verdict: CompatVerdict;
+  message: string;
+}
+
+/**
+ * Derive a verdict from diagnostics - the TS analogue of gts-rust's
+ * `CompatibilityVerdict::from_diagnostics`, keeping the verdict a pure reading
+ * of its evidence (no `incompatible` sitting next to an empty diagnostic list).
+ * `incompatible` dominates `unknown`, which dominates `compatible`; no matching
+ * diagnostic means `compatible`.
+ *
+ * Pass `direction` to recover a single directional verdict
+ * (`backward`/`forward`) by considering only that direction's diagnostics;
+ * omit it to recover the full verdict, which spans both directions and equals
+ * {@link CompatibilityResult.full_compatibility}.
+ */
+export function verdictFromDiagnostics(
+  diagnostics: CompatibilityDiagnostic[],
+  direction?: CompatDirection
+): CompatVerdict {
+  let verdict: CompatVerdict = 'compatible';
+  for (const d of diagnostics) {
+    if (direction !== undefined && d.direction !== direction) continue;
+    if (d.verdict === 'incompatible') return 'incompatible';
+    if (d.verdict === 'unknown') verdict = 'unknown';
+  }
+  return verdict;
+}
+
 export interface CompatibilityResult {
   old: string;
   new: string;
@@ -195,6 +287,16 @@ export interface CompatibilityResult {
   incompatibility_reasons: string[];
   backward_errors: string[];
   forward_errors: string[];
+  /**
+   * Structured evidence for the two directional verdicts, superseding the
+   * deprecated `*_properties` arrays (gts-rust parity). Kept consistent with
+   * the verdicts above: `backward_compatibility` equals
+   * `verdictFromDiagnostics(diagnostics, 'backward')`,
+   * `forward_compatibility` the `'forward'` variant, and
+   * `full_compatibility` equals `verdictFromDiagnostics(diagnostics)` with no
+   * direction. Empty when both directions are `compatible`.
+   */
+  diagnostics: CompatibilityDiagnostic[];
 }
 
 export interface CastResult {

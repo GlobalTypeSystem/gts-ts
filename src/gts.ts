@@ -4,6 +4,7 @@ import {
   MAX_ID_LENGTH,
   GtsID,
   GtsIDSegment,
+  GtsPattern,
   InvalidGtsIDError,
   InvalidSegmentError,
   ValidationResult,
@@ -20,10 +21,31 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 export class Gts {
   static parseGtsID(id: string): GtsID {
     // If ID contains wildcard, validate as wildcard first
-    if (id.includes('*')) {
+    if (this.containsWildcard(id)) {
       return this.validateWildcard(id);
     }
     return this.parseGtsIDInternal(id, false);
+  }
+
+  /**
+   * Whether `value` carries the `*` wildcard token. A single choke point so the
+   * "is this a pattern?" test is not re-spelled as an inline `.includes('*')`
+   * at every call site.
+   */
+  static containsWildcard(value: string): boolean {
+    return value.includes('*');
+  }
+
+  /**
+   * OP#4 - parse a GTS pattern (an identifier that may end in a `*` wildcard)
+   * into a typed {@link GtsPattern}. Prefer this over {@link parseGtsID} when a
+   * value is used for matching: it returns the {@link GtsPattern.hasWildcard}
+   * flag directly, so callers need not re-scan the string. Throws on a
+   * malformed pattern (same rules as {@link matchIDPattern}'s pattern side).
+   */
+  static parsePattern(pattern: string): GtsPattern {
+    const parsed = this.validateWildcard(pattern);
+    return { id: parsed.id, segments: parsed.segments, hasWildcard: this.containsWildcard(parsed.id) };
   }
 
   private static splitPreservingTilde(s: string): string[] {
@@ -224,7 +246,7 @@ export class Gts {
   }
 
   static validateGtsID(id: string): ValidationResult {
-    const isWildcard = id.includes('*');
+    const isWildcard = this.containsWildcard(id);
     try {
       if (isWildcard) {
         // For wildcard patterns, use validateWildcard
@@ -320,7 +342,7 @@ export class Gts {
       // This catches malformed wildcards like 'a*' (wildcard not on token boundary)
       let candidateId: GtsID;
       try {
-        if (candidate.includes('*')) {
+        if (this.containsWildcard(candidate)) {
           // Validate candidate as a wildcard pattern first
           this.validateWildcard(candidate);
         }
@@ -497,7 +519,7 @@ export class Gts {
 
     // v0.7: Single-segment instance IDs are prohibited (skip for wildcard patterns)
     // Exception: combined anonymous instances (UUID tail) are always valid
-    if (!allowWildcard && !raw.includes('*')) {
+    if (!allowWildcard && !this.containsWildcard(raw)) {
       const lastSegment = gtsId.segments[gtsId.segments.length - 1];
       if (!lastSegment.isType && !lastSegment.isUuidTail && gtsId.segments.length === 1) {
         throw new InvalidGtsIDError(
@@ -516,7 +538,7 @@ export class Gts {
     }
 
     // If no wildcard in pattern, perform exact match with version flexibility
-    if (!pattern.id.includes('*')) {
+    if (!this.containsWildcard(pattern.id)) {
       return this.matchSegments(pattern.segments, candidate.segments, chainSuffixMatchesSelf);
     }
 

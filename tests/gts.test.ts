@@ -591,6 +591,45 @@ describe('GTS Store Operations', () => {
       expect(result.ok).toBe(false);
       expect(result.error).toContain('mixes JSON Schema dialects');
     });
+
+    test('a cross-dialect $ref on an ancestor is rejected even when the descendant does not reference it', () => {
+      // Issue C: the ancestor `base` (draft-07) references a 2020-12 schema; the
+      // descendant `child` derives by re-declaration and references neither the
+      // ancestor nor the 2020-12 target. A leaf-only reference walk accepts the
+      // child; validating the whole chain closure must reject it.
+      gts.register({
+        $id: 'gts.test.pkg.ns.ancforeign.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: { note: { type: 'string' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.ancbase.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { ext: { $ref: 'gts://gts.test.pkg.ns.ancforeign.v1~' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { label: { type: 'string' } },
+      });
+      gts.register({
+        gtsId: 'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~test.pkg._.item.v1.0',
+        $schema: 'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~',
+        label: 'ok',
+      });
+
+      const schemaResult = gts.validateEntity('gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~');
+      const instanceResult = gts.validateInstance(
+        'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~test.pkg._.item.v1.0'
+      );
+      expect(schemaResult.ok).toBe(false);
+      expect(schemaResult.error).toContain('mixes JSON Schema dialects');
+      expect(instanceResult.ok).toBe(false);
+      expect(instanceResult.error).toContain('mixes JSON Schema dialects');
+    });
   });
 
   describe('OP#9 - a cast succeeds only if its result fits the target', () => {
@@ -1802,6 +1841,57 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
       expect(result.error).toMatch(new RegExp(`nests deeper than ${MAX_SCHEMA_DEPTH} levels`));
     });
   });
+
+  describe('store hardening', () => {
+    test('rejects unsafe schema patterns without registering the schema', () => {
+      const store = new GtsStore();
+      const id = 'gts.x.security.regex.unsafe.v1~';
+      expect(() =>
+        store.register(
+          createJsonEntity({
+            $id: `gts://${id}`,
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'string',
+            pattern: '(a+)+$',
+          })
+        )
+      ).toThrow(/Unsafe regular expression pattern/);
+      expect(store.get(id)).toBeUndefined();
+    });
+
+    test('rolls AJV registration back when a replacement cannot be compiled', () => {
+      const id = 'gts.x.security.regex.rollback.v1~';
+      const store = new GtsStore({ allowEntityUpdates: true });
+      store.register(
+        createJsonEntity({
+          $id: `gts://${id}`,
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'string',
+          pattern: '^a+$',
+        })
+      );
+      expect(() =>
+        store.register(
+          createJsonEntity({
+            $id: `gts://${id}`,
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'string',
+            pattern: '(a+)+$',
+          })
+        )
+      ).toThrow(/Unsafe regular expression pattern/);
+      expect(store.get(id)?.content.pattern).toBe('^a+$');
+    });
+
+    test('exposes cloned entries through the store abstraction', () => {
+      const store = new GtsStore();
+      const id = 'gts.x.query.entries.item.v1~x.query._.instance.v1.0';
+      store.register(createJsonEntity({ gtsId: id, value: 1 }));
+      const entries = store.entries();
+      entries[0][1].content.value = 2;
+      expect(store.get(id)?.content.value).toBe(1);
+    });
+  });
 });
 
 describe('x-gts-ref schema existence traversal', () => {
@@ -1966,26 +2056,28 @@ describe('x-gts-ref array tuple traversal', () => {
 });
 
 describe('entity content identity', () => {
-  test('accepts content matching a stored entity mutated through get()', () => {
+  test('does not retain caller-owned or returned content', () => {
     const gts = new GTS();
     const id = 'gts.x.unit.hash.mutable.v1~x.unit._.item.v1';
-    gts.register({ id, value: 1 });
-    gts.register({ id, value: 1 });
-    gts.get(id).value = 2;
+    const content = { id, value: 1 };
+    gts.register(content);
+    content.value = 2;
+    gts.get(id).value = 3;
 
-    expect(() => gts.register({ id, value: 2 })).not.toThrow();
-    expect(gts.get(id).value).toBe(2);
+    expect(gts.get(id).value).toBe(1);
+    expect(() => gts.register({ id, value: 2 })).toThrow(/already registered with different content/);
   });
 
-  test('rejects content differing from a stored entity mutated through get()', () => {
-    const gts = new GTS();
+  test('returns defensive copies from store collections', () => {
+    const store = new GtsStore();
     const id = 'gts.x.unit.hash.mutable_conflict.v1~x.unit._.item.v1';
-    gts.register({ id, value: 1 });
-    gts.register({ id, value: 1 });
-    gts.get(id).value = 2;
+    store.register(createJsonEntity({ id, value: 1 }));
+    const all = store.getAll();
+    all[0].content.value = 2;
+    all[0].references.add('gts.x.unit.hash.other.v1~');
 
-    expect(() => gts.register({ id, value: 1 })).toThrow(/already registered with different content/);
-    expect(gts.get(id).value).toBe(2);
+    expect(store.get(id)?.content.value).toBe(1);
+    expect(store.get(id)?.references.size).toBe(0);
   });
 
   test('does not add an identical schema to Ajv twice', () => {

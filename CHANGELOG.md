@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-25
+
+### Breaking
+
+- `POST /type-schemas` now accepts a **JSON array** of GTS Type Schema objects (batch registration) instead of a single `{type_id, type_schema}` object. The external `type_id` field is removed — each entry's GTS Type Identifier is derived from its embedded `$id`. The endpoint returns an aggregate `{ok, results: [...]}` body (top-level `ok` is `true` only when every entry registered); each `results` entry reports `{ok, type_id, error?}`. A non-array body returns `422`.
+
 ## [0.7.0] - 2026-09-21
 
 ### Added

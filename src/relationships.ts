@@ -1,4 +1,4 @@
-import { RelationshipResult } from './types';
+import { RelationshipResult, stripUriPrefix } from './types';
 import { GtsStore } from './store';
 import { Gts } from './gts';
 
@@ -59,7 +59,7 @@ export class GtsRelationships {
 
     if ('$ref' in obj && typeof obj['$ref'] === 'string') {
       const ref = obj['$ref'];
-      const normalized = ref.startsWith('gts://') ? ref.substring(6) : ref;
+      const normalized = stripUriPrefix(ref);
       if (Gts.isValidGtsID(normalized)) {
         relationships.add(normalized);
         if (!store.get(normalized)) {

@@ -15,42 +15,90 @@ describe('HTTP connection lifecycle', () => {
 });
 
 describe('POST /type-schemas', () => {
-  test('rejects a type_id that does not end with the required "~" (spec 2.1 / 11.1 Rule C.1)', async () => {
+  test('rejects a non-array body with 422', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
 
     const response = await server.instance.inject({
       method: 'POST',
       url: '/type-schemas',
       payload: {
-        // Missing the trailing '~' that a GTS Type Identifier must have.
-        type_id: 'gts.x.unit.srv.notype.v1',
-        type_schema: { $schema: DRAFT7, type: 'object' },
+        $schema: DRAFT7,
+        $id: 'gts://gts.x.unit.srv.notanarray.v1~',
+        type: 'object',
       },
     });
 
     expect(response.statusCode).toBe(422);
     const body = JSON.parse(response.body);
     expect(body.ok).toBe(false);
-    expect(body.error).toMatch(/type_id/);
+    expect(body.error).toMatch(/array/);
 
     await server.stop();
   });
 
-  test('accepts a well-formed type_id ending with "~"', async () => {
+  test('registers a batch and derives each type_id from its embedded $id', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
 
     const response = await server.instance.inject({
       method: 'POST',
       url: '/type-schemas',
-      payload: {
-        type_id: 'gts.x.unit.srv.goodtype.v1~',
-        type_schema: { $schema: DRAFT7, type: 'object' },
-      },
+      payload: [
+        {
+          $schema: DRAFT7,
+          $id: 'gts://gts.x.unit.srv.goodtype.v1~',
+          type: 'object',
+        },
+      ],
     });
 
     expect(response.statusCode).toBe(200);
     const body = JSON.parse(response.body);
     expect(body.ok).toBe(true);
+    expect(body.results[0].ok).toBe(true);
+    expect(body.results[0].type_id).toBe('gts.x.unit.srv.goodtype.v1~');
+
+    await server.stop();
+  });
+
+  test.each([
+    ['missing $schema', { $id: 'gts://gts.x.unit.srv.canonical.v1~', type: 'object' }, /\$schema/],
+    ['missing $id', { $schema: DRAFT7, type: 'object' }, /\$id/],
+  ])('reports a per-item failure for a canonical schema with %s', async (_name, schema, expectedError) => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+
+    const response = await server.instance.inject({
+      method: 'POST',
+      url: '/type-schemas',
+      payload: [schema],
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.ok).toBe(false);
+    expect(body.results[0].ok).toBe(false);
+    expect(body.results[0].error).toMatch(expectedError);
+
+    await server.stop();
+  });
+
+  test('reports mixed per-item outcomes for a partially-valid batch', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+
+    const response = await server.instance.inject({
+      method: 'POST',
+      url: '/type-schemas',
+      payload: [
+        { $schema: DRAFT7, $id: 'gts://gts.x.unit.srv.batchok.v1~', type: 'object' },
+        { $schema: DRAFT7, type: 'object' },
+      ],
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.ok).toBe(false);
+    expect(body.results[0].ok).toBe(true);
+    expect(body.results[0].type_id).toBe('gts.x.unit.srv.batchok.v1~');
+    expect(body.results[1].ok).toBe(false);
 
     await server.stop();
   });
@@ -509,21 +557,19 @@ describe('GET /openapi', () => {
     await server.stop();
   });
 
-  test('documents conflict responses for entity and type-schema registration', async () => {
+  test('documents conflict responses for entity registration', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
     const response = await server.instance.inject({ method: 'GET', url: '/openapi' });
     const paths = JSON.parse(response.body).paths;
 
-    for (const path of ['/entities', '/type-schemas']) {
-      expect(paths[path].post.responses['409']).toEqual({
-        description: 'Entity conflict',
-        content: {
-          'application/json': {
-            schema: { $ref: '#/components/schemas/OperationResult' },
-          },
+    expect(paths['/entities'].post.responses['409']).toEqual({
+      description: 'Entity conflict',
+      content: {
+        'application/json': {
+          schema: { $ref: '#/components/schemas/OperationResult' },
         },
-      });
-    }
+      },
+    });
 
     await server.stop();
   });
@@ -855,17 +901,20 @@ describe('POST /validate-json (OP#6 transient JSON validation)', () => {
       await server.stop();
     });
 
-    test('ExplicitSchemaWithoutEmbeddedIdentity: a type registered via /type-schemas (no embedded $id) still validates by path', async () => {
+    test('ExplicitSchemaWithMatchingEmbeddedIdentity: a canonical type registered via /type-schemas validates by path', async () => {
       const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
       const typeId = 'gts.x.test6json._.external_identity.v1~';
 
       const registerResponse = await server.instance.inject({
         method: 'POST',
         url: '/type-schemas',
-        payload: {
-          type_id: typeId,
-          type_schema: { properties: { prop: { type: 'string' } } },
-        },
+        payload: [
+          {
+            $schema: DRAFT7,
+            $id: `gts://${typeId}`,
+            properties: { prop: { type: 'string' } },
+          },
+        ],
       });
       expect(registerResponse.statusCode).toBe(200);
       expect(JSON.parse(registerResponse.body).ok).toBe(true);
@@ -1155,41 +1204,6 @@ describe('Phase 6 review findings', () => {
     await server.stop();
   });
 
-  test('P6-2/P6-3: a $schema-less type registered via /type-schemas is authoritatively a schema, not a heuristic-derived instance', async () => {
-    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
-    const typeId = 'gts.acme.pkg.ns.order.v1~';
-
-    const registerResponse = await server.instance.inject({
-      method: 'POST',
-      url: '/type-schemas',
-      payload: {
-        type_id: typeId,
-        type_schema: { properties: { customerName: { type: 'string' } }, required: ['customerName'] },
-      },
-    });
-    expect(registerResponse.statusCode).toBe(200);
-    const registerBody = JSON.parse(registerResponse.body);
-    expect(registerBody.ok).toBe(true);
-    // The bug: this used to report `false` because `isSchema` was derived
-    // from `GtsExtractor.isJsonSchema`'s `$schema`-keyword shape heuristic,
-    // which a schema-less document like this one always fails.
-    expect(registerBody.is_type_schema).toBe(true);
-
-    // A body that violates the registered schema's actual constraints is
-    // still rejected (the schema's own keywords are enforced) ...
-    const invalidResponse = await server.instance.inject({
-      method: 'POST',
-      url: `/validate-json/${typeId}`,
-      payload: { notCustomerName: 'whatever' },
-    });
-    expect(invalidResponse.statusCode).toBe(200);
-    const invalidBody = JSON.parse(invalidResponse.body);
-    expect(invalidBody.ok).toBe(false);
-    expect(invalidBody.error).toMatch(/must have required property 'customerName'/);
-
-    await server.stop();
-  });
-
   test('P6-2/P6-3: /validate-json/{gts_type} rejects an existing non-schema entity as a type (the former existence-only bypass)', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
     const instanceLikeTypeId = 'gts.acme.pkg.ns.plainobject.v1~';
@@ -1218,7 +1232,7 @@ describe('Phase 6 review findings', () => {
     await server.stop();
   });
 
-  test('P6-3: a $schema-less /type-schemas-registered type can be used as a chain parent in a derived transient schema via /validate-json', async () => {
+  test('P6-3: a canonical /type-schemas-registered type can be used as a chain parent in a derived transient schema', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
     const parentId = 'gts.acme.pkg.ns.p6p3parent.v1~';
     const childId = `${parentId}acme.pkg.ns.p6p3child.v1~`;
@@ -1226,18 +1240,18 @@ describe('Phase 6 review findings', () => {
     const registerResponse = await server.instance.inject({
       method: 'POST',
       url: '/type-schemas',
-      payload: {
-        type_id: parentId,
-        type_schema: { properties: { base: { type: 'string' } }, required: ['base'] },
-      },
+      payload: [
+        {
+          $schema: DRAFT7,
+          $id: `gts://${parentId}`,
+          properties: { base: { type: 'string' } },
+          required: ['base'],
+        },
+      ],
     });
     expect(registerResponse.statusCode).toBe(200);
-    expect(JSON.parse(registerResponse.body).is_type_schema).toBe(true);
+    expect(JSON.parse(registerResponse.body).results[0].ok).toBe(true);
 
-    // Before the fix, `validateTransientSchema`'s own parent-entity check
-    // (`parentEntity.isSchema`) rejected this parent with "Parent entity is
-    // not a schema" - contradicting the explicit-route accommodation for
-    // the exact same kind of entity.
     const response = await server.instance.inject({
       method: 'POST',
       url: '/validate-json',
@@ -1509,13 +1523,15 @@ describe('configurable entity update mode (mirrors gts-go --allow-entity-updates
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
     const id = 'gts.x.unit.srv.force_schema.v1~';
 
-    expect((await postEntity(server, { $id: id })).statusCode).toBe(200);
+    const schema = { $schema: DRAFT7, $id: `gts://${id}` };
+    expect((await postEntity(server, schema)).statusCode).toBe(200);
     const registered = await server.instance.inject({
       method: 'POST',
       url: '/type-schemas',
-      payload: { type_id: id, type_schema: {} },
+      payload: [schema],
     });
     expect(registered.statusCode).toBe(200);
+    expect(JSON.parse(registered.body).results[0].ok).toBe(true);
 
     const validated = await server.instance.inject({
       method: 'POST',
@@ -1611,23 +1627,27 @@ describe('configurable entity update mode (mirrors gts-go --allow-entity-updates
     await server.stop();
   });
 
-  test('POST /type-schemas is likewise conflict-protected', async () => {
+  test('POST /type-schemas reports a per-item conflict for changed content', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
     const typeId = 'gts.x.unit.srv.updschema.v1~';
 
     const first = await server.instance.inject({
       method: 'POST',
       url: '/type-schemas',
-      payload: { type_id: typeId, type_schema: { $schema: DRAFT7, type: 'object' } },
+      payload: [{ $schema: DRAFT7, $id: `gts://${typeId}`, type: 'object' }],
     });
     expect(first.statusCode).toBe(200);
+    expect(JSON.parse(first.body).results[0].ok).toBe(true);
 
     const changed = await server.instance.inject({
       method: 'POST',
       url: '/type-schemas',
-      payload: { type_id: typeId, type_schema: { $schema: DRAFT7, type: 'string' } },
+      payload: [{ $schema: DRAFT7, $id: `gts://${typeId}`, type: 'string' }],
     });
-    expect(changed.statusCode).toBe(409);
+    expect(changed.statusCode).toBe(200);
+    const changedBody = JSON.parse(changed.body);
+    expect(changedBody.ok).toBe(false);
+    expect(changedBody.results[0].ok).toBe(false);
 
     await server.stop();
   });

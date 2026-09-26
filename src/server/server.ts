@@ -1,8 +1,19 @@
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { GTS, createJsonEntity, EntityConflictError, EntityContentDepthError, GtsRefValidationMode } from '../index';
+import {
+  GTS,
+  createJsonEntity,
+  EntityConflictError,
+  EntityContentDepthError,
+  GtsRefValidationMode,
+  GTS_PREFIX,
+  hasUriPrefix,
+  stripUriPrefix,
+  validateSchemaIdentityAndRefs,
+} from '../index';
 import { XGtsRefValidator } from '../x-gts-ref';
 import {
   ServerConfig,
+  DEFAULT_BODY_LIMIT_BYTES,
   EntityResponse,
   OperationResult,
   ListResult,
@@ -14,7 +25,6 @@ import {
   CastBody,
   QueryParams,
   ValidateTypeSchemaBody,
-  TypeSchemaRegisterBody,
   ValidateEntityBody,
   ValidateJsonResult,
 } from './types';
@@ -55,6 +65,11 @@ export class GtsServer {
       routerOptions: {
         maxParamLength: 2048,
       },
+      // Cap the request body explicitly rather than relying on Fastify's
+      // implicit 1 MiB default. Fastify buffers the whole body before a
+      // handler runs, so this bounds the memory a single request - including
+      // the array-bodied bulk routes - can force the server to allocate.
+      bodyLimit: config.bodyLimit ?? DEFAULT_BODY_LIMIT_BYTES,
       forceCloseConnections: true,
     });
 
@@ -155,7 +170,7 @@ export class GtsServer {
     this.fastify.get('/entities/:id', this.handleGetEntity.bind(this));
     this.fastify.post('/entities', this.handleAddEntity.bind(this));
     this.fastify.post('/entities/bulk', this.handleAddEntities.bind(this));
-    this.fastify.post('/type-schemas', this.handleAddTypeSchema.bind(this));
+    this.fastify.post('/type-schemas', this.handleAddTypeSchemas.bind(this));
 
     // OP#1 - Validate ID
     this.fastify.get('/validate-id', this.handleValidateID.bind(this));
@@ -270,8 +285,7 @@ export class GtsServer {
       Body: any;
       Querystring: { validate?: string; validation?: string; 'gts-ref-validation'?: string };
     }>,
-    reply: FastifyReply,
-    options?: { forceIsSchema?: boolean }
+    reply: FastifyReply
   ): Promise<OperationResult> {
     try {
       const content = request.body;
@@ -281,11 +295,7 @@ export class GtsServer {
         reply.code(422);
         return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
       }
-      // `forceIsSchema` (P6-2/P6-3): `POST /type-schemas` calls through here
-      // with the caller's declared intent - the registered entity IS a GTS
-      // Type Schema by construction, regardless of whether `content` embeds
-      // a `$schema`/root-type keyword the shape heuristic would key off.
-      const entity = createJsonEntity(content, undefined, options?.forceIsSchema);
+      const entity = createJsonEntity(content);
 
       // §9.11.1 - a malformed modifier declaration is always rejected: the
       // document cannot be interpreted, so there is nothing to register.
@@ -301,7 +311,7 @@ export class GtsServer {
       }
 
       if (validate && entity.isSchema) {
-        const validationError = this.validateSchemaStrict(content);
+        const validationError = validateSchemaIdentityAndRefs(content);
         if (validationError) {
           reply.code(422);
           return {
@@ -394,7 +404,7 @@ export class GtsServer {
       }
 
       // Register the entity
-      const previous = this.store.register(content, options?.forceIsSchema);
+      const previous = this.store.register(content);
 
       // A derived schema (chained `$id`) must be compatible with its GTS
       // chain parent - e.g. it cannot drop a `required` field the parent
@@ -441,103 +451,6 @@ export class GtsServer {
         error: error instanceof Error ? error.message : String(error),
       };
     }
-  }
-
-  private validateSchemaStrict(content: any): string | null {
-    // Check for $id
-    const schemaId = content['$id'];
-    if (!schemaId) {
-      return 'Unable to detect GTS ID in schema';
-    }
-
-    // Normalize the ID
-    let normalizedId = schemaId;
-    if (typeof normalizedId === 'string') {
-      // Check if it starts with gts:// prefix
-      if (normalizedId.startsWith('gts://')) {
-        normalizedId = normalizedId.substring(6);
-      } else if (normalizedId.startsWith('gts.')) {
-        // Plain gts. prefix without gts:// is not allowed for JSON Schema $id
-        return 'Schema $id with GTS identifier must use gts:// URI format (e.g., gts://gts.vendor.pkg.ns.type.v1~)';
-      } else {
-        // Non-GTS $id is not allowed
-        return 'Schema $id must be a valid GTS identifier with gts:// URI format';
-      }
-
-      // Check for wildcards in schema ID
-      if (normalizedId.includes('*')) {
-        return 'Schema $id cannot contain wildcards';
-      }
-
-      // Validate the GTS ID
-      if (!gts.isValidGtsID(normalizedId)) {
-        return `Schema $id is not a valid GTS identifier: ${normalizedId}`;
-      }
-    }
-
-    // Validate $ref fields
-    const refErrors = this.validateSchemaRefs(content, '');
-    if (refErrors.length > 0) {
-      return refErrors[0];
-    }
-
-    return null;
-  }
-
-  private validateSchemaRefs(obj: any, path: string): string[] {
-    const errors: string[] = [];
-
-    if (!obj || typeof obj !== 'object') {
-      return errors;
-    }
-
-    // Check $ref
-    const ref = obj['$ref'];
-    if (typeof ref === 'string') {
-      const refPath = path ? `${path}/$ref` : '$ref';
-
-      // Local refs (#/...) are allowed
-      if (ref.startsWith('#')) {
-        // OK - local ref
-      } else if (ref.startsWith('gts://')) {
-        // gts:// URI is allowed - validate the GTS ID
-        const normalizedRef = ref.substring(6);
-
-        // Check for wildcards
-        if (normalizedRef.includes('*')) {
-          errors.push(`Invalid $ref at ${refPath}: wildcards are not allowed in $ref`);
-        } else if (!gts.isValidGtsID(normalizedRef)) {
-          errors.push(`Invalid $ref at ${refPath}: ${normalizedRef} is not a valid GTS identifier`);
-        }
-      } else if (ref.startsWith('gts.')) {
-        // Plain gts. prefix without gts:// is not allowed
-        errors.push(`Invalid $ref at ${refPath}: GTS references must use gts:// URI format`);
-      } else if (ref.startsWith('http://') || ref.startsWith('https://')) {
-        // External HTTP refs are not allowed (except json-schema.org for $schema)
-        if (!ref.includes('json-schema.org')) {
-          errors.push(`Invalid $ref at ${refPath}: external HTTP references are not allowed`);
-        }
-      }
-    }
-
-    // Recurse into nested objects
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === '$ref') continue;
-      if (value && typeof value === 'object') {
-        const nestedPath = path ? `${path}/${key}` : key;
-        if (Array.isArray(value)) {
-          value.forEach((item, idx) => {
-            if (item && typeof item === 'object') {
-              errors.push(...this.validateSchemaRefs(item, `${nestedPath}[${idx}]`));
-            }
-          });
-        } else {
-          errors.push(...this.validateSchemaRefs(value, nestedPath));
-        }
-      }
-    }
-
-    return errors;
   }
 
   private async handleAddEntities(
@@ -595,39 +508,65 @@ export class GtsServer {
     }
   }
 
-  // Register a GTS Type Schema under an explicit type_id
-  private async handleAddTypeSchema(
-    request: FastifyRequest<{ Body: TypeSchemaRegisterBody }>,
+  // Register a batch of GTS Type Schemas. The request body is a JSON array of
+  // GTS Type Schema objects; each entry's GTS Type Identifier is derived from
+  // its embedded $id (there is no external type_id field). The response is an
+  // aggregate { ok, results: [...] } body where the top-level ok is true only
+  // when every entry registered successfully.
+  private async handleAddTypeSchemas(
+    request: FastifyRequest<{ Body: any }>,
     reply: FastifyReply
   ): Promise<OperationResult> {
-    const { type_id, type_schema } = request.body || ({} as TypeSchemaRegisterBody);
-
-    if (!type_id || !type_schema || typeof type_schema !== 'object') {
+    const schemas = request.body;
+    if (!Array.isArray(schemas)) {
       reply.code(422);
-      return { ok: false, error: 'Missing required fields: type_id, type_schema' };
+      return { ok: false, error: 'Request body must be a JSON array of GTS Type Schemas' };
     }
 
-    // §2.1 / §11.1 Rule C.1 - a GTS Type Identifier MUST end with `~`.
-    if (!gts.isValidGtsID(type_id) || !type_id.endsWith('~')) {
-      reply.code(422);
-      return {
-        ok: false,
-        error: `Invalid type_id: must be a well-formed GTS Type Identifier ending with '~', got '${type_id}'`,
-      };
+    const results: Array<{ ok: boolean; type_id: string | null; error?: string }> = [];
+    for (const schema of schemas) {
+      results.push(await this.registerTypeSchema(schema, request));
     }
 
-    // The explicit type_id wins over any identifier carried inside the body, so
-    // an embedded $id must be dropped rather than left to shadow it.
-    const content: Record<string, any> = { ...type_schema };
-    content['$id'] = type_id;
+    return {
+      ok: results.every((r) => r.ok),
+      results,
+    };
+  }
 
-    // P6-2/P6-3: the caller declared `type_id` explicitly, so this document
-    // IS a GTS Type Schema by construction - stamp `isSchema` authoritatively
-    // rather than leaving it to `GtsExtractor.isJsonSchema`'s document-shape
-    // heuristic, which would misclassify a schema with no embedded
-    // `$schema`/root-type keyword as a plain instance (see
-    // `TestCaseOp6ValidateJson_ExplicitSchemaWithoutEmbeddedIdentity`).
-    return this.handleAddEntity({ ...request, body: content } as any, reply, { forceIsSchema: true });
+  // Registers a single GTS Type Schema, deriving its GTS Type Identifier from
+  // the embedded $id, and returns a per-item result.
+  private async registerTypeSchema(
+    schema: any,
+    request: FastifyRequest<{ Body: any }>
+  ): Promise<{ ok: boolean; type_id: string | null; error?: string }> {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+      return { ok: false, type_id: null, error: 'GTS Type Schema entry must be a JSON object' };
+    }
+
+    if (typeof schema['$schema'] !== 'string' || schema['$schema'].length === 0) {
+      return { ok: false, type_id: null, error: 'GTS Type Schema must contain a top-level $schema field' };
+    }
+
+    const embeddedId = schema['$id'];
+    if (typeof embeddedId !== 'string' || !hasUriPrefix(embeddedId)) {
+      return { ok: false, type_id: null, error: 'GTS Type Schema must contain a top-level $id in gts:// form' };
+    }
+
+    const typeId = stripUriPrefix(embeddedId);
+    if (!gts.isValidGtsID(typeId) || !typeId.endsWith('~')) {
+      return { ok: false, type_id: typeId, error: `Invalid GTS Type Schema $id: '${embeddedId}'` };
+    }
+
+    // Reuse the single-entity registration path (x-gts-ref checks, modifier
+    // rules, store.register) via a throwaway reply that swallows status codes;
+    // per-entry outcomes are surfaced through the aggregate `results` instead.
+    const fakeReply = { code: () => fakeReply } as unknown as FastifyReply;
+    const result = await this.handleAddEntity({ ...request, body: { ...schema }, query: {} } as any, fakeReply);
+    if (result.ok) {
+      return { ok: true, type_id: typeId };
+    }
+    return { ok: false, type_id: typeId, error: result.error };
   }
 
   // OP#1 - Validate ID
@@ -984,7 +923,7 @@ export class GtsServer {
     const content = request.body;
 
     // A well-formed GTS Type Identifier MUST end with `~` (§2.1/§11.1 Rule
-    // C.1, mirroring `handleAddTypeSchema` above). Unlike that handler,
+    // C.1, mirroring `registerTypeSchema` above). Unlike that handler,
     // the two ways a path segment can fail this are reported with distinct
     // messages here: a string that is not GTS-shaped at all ("not-a-gts-
     // type") versus one that is a syntactically ordinary GTS identifier but
@@ -993,7 +932,7 @@ export class GtsServer {
     // (`TestCaseOp6ValidateJson_MalformedExplicitType` vs.
     // `_ExplicitNonSchemaType`).
     if (!pathType.endsWith('~')) {
-      if (!pathType.startsWith('gts.')) {
+      if (!pathType.startsWith(GTS_PREFIX)) {
         return {
           ok: false,
           id: null,
@@ -1020,15 +959,11 @@ export class GtsServer {
       };
     }
 
-    // Existence AND `isSchema` check (P6-2/P6-3). Before the registration-
-    // time fix (`POST /type-schemas` now stamps `isSchema` from the caller's
-    // declared `type_id` intent, not from `GtsExtractor.isJsonSchema`'s
-    // document-shape heuristic), this was an existence-only check: a junk
-    // document with zero schema keywords, registered via `POST
-    // /type-schemas`, would compile here as a constraint-free schema
-    // accepting anything. `TestCaseOp6ValidateJson_ExplicitSchemaWithoutEmbeddedIdentity`
-    // still passes because that type IS now correctly stamped `isSchema:
-    // true` at registration.
+    // Existence AND `isSchema` check (P6-2/P6-3). A GTS Type Schema registered
+    // via `POST /type-schemas` carries a canonical embedded `$id`/`$schema`,
+    // so it is classified as a schema at registration; this guards against a
+    // junk document with zero schema keywords compiling here as a
+    // constraint-free schema that would accept anything.
     const isRegisteredSchema = this.store.isRegisteredSchema(pathType);
     if (isRegisteredSchema === undefined) {
       return {
@@ -1261,34 +1196,22 @@ export class GtsServer {
       },
       '/type-schemas': {
         post: {
-          summary: 'Register a GTS Type Schema under an explicit type_id',
-          operationId: 'addTypeSchema',
+          summary: 'Register a batch of GTS Type Schemas',
+          operationId: 'addTypeSchemas',
           requestBody: {
             required: true,
             content: {
               'application/json': {
                 schema: {
-                  type: 'object',
-                  properties: {
-                    type_id: { type: 'string' },
-                    type_schema: { type: 'object' },
-                  },
-                  required: ['type_id', 'type_schema'],
+                  type: 'array',
+                  items: { type: 'object' },
                 },
               },
             },
           },
           responses: {
             200: {
-              description: 'Operation result',
-              content: {
-                'application/json': {
-                  schema: { $ref: '#/components/schemas/OperationResult' },
-                },
-              },
-            },
-            409: {
-              description: 'Entity conflict',
+              description: 'Aggregate batch registration result',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/OperationResult' },

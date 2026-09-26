@@ -1,24 +1,28 @@
-import { createHash } from 'crypto';
 import Ajv from 'ajv';
 import AjvCore from 'ajv/dist/core';
 import Ajv2019 from 'ajv/dist/2019';
 import Ajv2020 from 'ajv/dist/2020';
 import { applyGtsFormats } from './formats';
+import { isPlainSchemaObject, contentHash, cloneJsonEntity } from './json-canonical';
+import { dialectOf, canonicalDialectUri } from './schema-dialect';
+import { assertSafeSchemaPatterns } from './schema-safety';
 import {
   GtsConfig,
   JsonEntity,
   ValidationResult,
   ValidationIssue,
   EntityConflictError,
-  EntityContentDepthError,
-  GTS_URI_PREFIX,
+  GTS_PREFIX,
+  JSON_SCHEMA_HOST,
   MAX_SCHEMA_DEPTH,
   MAX_SCHEMA_PATHS,
   GtsRefValidationMode,
+  hasUriPrefix,
+  stripUriPrefix,
 } from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
-import { escapeJsonPointerSegment, visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
+import { applyXGtsRefKeyword, escapeJsonPointerSegment, visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
 import { GtsCompatibility, findCrossedBound, isEmptySchema } from './compatibility';
 import { GtsModifiers } from './modifiers';
 
@@ -39,57 +43,40 @@ interface ResolvedSchema {
 const TRAIT_STRUCTURAL_KEYWORDS = ['properties', 'required', 'additionalProperties'];
 
 /**
- * True when `value` is safe to read schema keywords off (`.type`, `['$ref']`,
- * etc). Schemas are registered without meta-validation (`validateSchema:
- * false` above), so a registered document can contain a literal `null` (or
- * any other non-object) in a position where a schema object is expected -
- * e.g. `properties: {a: null}` or `allOf: [{...}, null]`. Every traversal
- * that walks into such a position must check this first, rather than reading
- * a property straight off the value: a `null`/non-object entry in a schema
- * position is malformed/no-op data, not a crash.
+ * In-memory registry of GTS entities plus the validation, casting, derivation
+ * and compatibility machinery that operates over them.
+ *
+ * ## Concurrency invariant
+ *
+ * The store holds no locks and needs none. Node runs JavaScript on a single
+ * thread, and every mutating operation here (notably {@link register},
+ * {@link unregister} and {@link rollbackRegistration}) is fully synchronous:
+ * it performs its read-modify-write on `byId` and the Ajv registries with no
+ * `await` in between. A request handler therefore runs to completion
+ * atomically with respect to every other handler, so concurrent HTTP requests
+ * cannot interleave a partial mutation - the property Go/Rust ports must buy
+ * with an explicit `RwLock`/`Mutex`.
+ *
+ * This invariant is load-bearing. If a genuine `await` is ever introduced
+ * between a read and a dependent write on shared state (e.g. async `$ref`
+ * loading via {@link loadSchema}, async schema compilation, or persistence),
+ * this lock-free assumption breaks and mutations would need to be serialized
+ * explicitly (a promise-chain mutex is the idiomatic TS analogue). Keep
+ * mutators synchronous, or reinstate serialization if that stops being
+ * possible.
  */
-function isPlainSchemaObject(value: unknown): value is Record<string, any> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
- * Canonical JSON serialization with object keys emitted in sorted order,
- * recursively. `JSON.stringify` preserves insertion order, so two entities
- * with equal content but differently-ordered keys would serialize
- * differently - sorting keys makes the serialization stable so equal content
- * always produces an equal string. Mirrors gts-go's reliance on Go's
- * `encoding/json` sorting map keys.
- */
-function canonicalJson(value: any, depth: number = 0): string {
-  if (depth > MAX_SCHEMA_DEPTH) {
-    throw new EntityContentDepthError();
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalJson(item, depth + 1)).join(',')}]`;
-  }
-  if (value !== null && typeof value === 'object') {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key], depth + 1)}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
-/**
- * A stable SHA-256 hash of an entity's content, used to distinguish an
- * idempotent re-submission (identical content) from a conflicting update
- * (changed content) without a deep structural comparison. Mirrors gts-go's
- * `contentHash`.
- */
-function contentHash(content: Record<string, any>): string {
-  return createHash('sha256').update(canonicalJson(content)).digest('hex');
-}
-
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   private config: GtsConfig;
   private ajv: Ajv;
   private ajv2019: Ajv2019;
   private ajv2020: Ajv2020;
+  // The GTS type currently being validated, used by the `x-gts-ref` Ajv keyword
+  // to resolve the `/$id` self-reference during combinator resolution. Set only
+  // for the duration of a single synchronous `validate(...)` call.
+  private currentSelectedTypeId: string | undefined;
+  private sortedIds: string[] | undefined;
+  private schemaCompileErrors: Map<string, string> = new Map();
 
   constructor(config?: Partial<GtsConfig>) {
     this.config = {
@@ -112,67 +99,81 @@ export class GtsStore {
     applyGtsFormats(this.ajv);
     applyGtsFormats(this.ajv2019);
     applyGtsFormats(this.ajv2020);
+    // Register x-gts-ref as a real keyword so the engine evaluates it during
+    // combinator resolution (oneOf/anyOf/allOf), instead of stripping it and
+    // rewriting the schema. Existence and /$id remain in XGtsRefValidator.
+    const selectedTypeIdGetter = () => this.currentSelectedTypeId;
+    applyXGtsRefKeyword(this.ajv, selectedTypeIdGetter);
+    applyXGtsRefKeyword(this.ajv2019, selectedTypeIdGetter);
+    applyXGtsRefKeyword(this.ajv2020, selectedTypeIdGetter);
+  }
+
+  /**
+   * Runs `fn` (a synchronous Ajv `validate(...)` call) with `selectedTypeId`
+   * exposed to the `x-gts-ref` keyword so `/$id` resolves to the type being
+   * validated. Restores the previous value afterwards so nested validations
+   * (e.g. combinator branches that compile sibling schemas) stay correct.
+   */
+  private withSelectedType<T>(selectedTypeId: string | undefined, fn: () => T): T {
+    const previous = this.currentSelectedTypeId;
+    this.currentSelectedTypeId = typeof selectedTypeId === 'string' ? stripUriPrefix(selectedTypeId) : undefined;
+    try {
+      return fn();
+    } finally {
+      this.currentSelectedTypeId = previous;
+    }
   }
 
   // All three registries extend AjvCore, so the common base type lets callers
   // use compile/addSchema/removeSchema/validateSchema without a cast.
+  // All three registries extend AjvCore, so the common base type lets callers
+  // use compile/addSchema/removeSchema/validateSchema without a cast. Dialect
+  // detection lives in `schema-dialect.ts`.
   private ajvForSchema(schema: any): AjvCore {
-    const dialect = this.dialectOf(schema);
+    const dialect = dialectOf(schema);
     if (dialect === '2020-12') return this.ajv2020;
     if (dialect === '2019-09') return this.ajv2019;
     return this.ajv;
   }
 
-  // The Ajv registries are dialect-specific (each holds only its own dialect's
-  // vocabulary), and instance validation compiles synchronously, so a `$ref`
-  // target must live in the SAME Ajv instance as the schema that references
-  // it: `$ref` composes the referenced schema INTO the referrer's single
-  // compiled validation, evaluated under the referrer's one dialect. JSON
-  // Schema itself assumes one dialect per validation and defines no semantics
-  // for composing subschemas of different dialects, so a cross-dialect `$ref`
-  // is not merely an Ajv limitation - it is underspecified. This returns the
-  // canonical dialect bucket (matching `ajvForSchema`'s routing) so a mismatch
-  // across a `$ref` can be rejected with a clear error instead of surfacing as
-  // a compile throw that the surrounding catch turns into a bogus "invalid".
-  private dialectOf(schema: any): string {
-    const dialect = schema?.$schema;
-    if (dialect === undefined) return 'draft-07';
-    if (typeof dialect !== 'string' || dialect.length === 0) {
-      throw new Error('$schema must declare a supported JSON Schema dialect');
-    }
-    let uri: URL;
-    try {
-      uri = new URL(dialect);
-    } catch {
-      throw new Error(`Unsupported JSON Schema dialect: ${String(dialect)}`);
-    }
-    if (
-      (uri.protocol !== 'http:' && uri.protocol !== 'https:') ||
-      uri.hostname.toLowerCase() !== 'json-schema.org' ||
-      uri.username !== '' ||
-      uri.password !== '' ||
-      uri.port !== '' ||
-      uri.search !== '' ||
-      uri.hash !== ''
-    ) {
-      throw new Error(`Unsupported JSON Schema dialect: ${dialect}`);
-    }
-    switch (uri.pathname) {
-      case '/draft-07/schema':
-        return 'draft-07';
-      case '/draft/2019-09/schema':
-        return '2019-09';
-      case '/draft/2020-12/schema':
-        return '2020-12';
-      default:
-        throw new Error(`Unsupported JSON Schema dialect: ${dialect}`);
-    }
+  private removeAjvSchema(id: string): void {
+    for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) ajv.removeSchema(id);
   }
 
-  private canonicalDialectUri(dialect: string): string {
-    if (dialect === '2019-09') return 'https://json-schema.org/draft/2019-09/schema';
-    if (dialect === '2020-12') return 'https://json-schema.org/draft/2020-12/schema';
-    return 'http://json-schema.org/draft-07/schema#';
+  private addAjvSchema(entity: JsonEntity): void {
+    const normalized = this.normalizeSchema(entity.content);
+    if (!normalized.$id) normalized.$id = entity.id;
+    this.ajvForSchema(normalized).addSchema(normalized, entity.id);
+  }
+
+  private invalidateIndexes(): void {
+    this.sortedIds = undefined;
+  }
+
+  private sortedEntityIds(): string[] {
+    if (!this.sortedIds) this.sortedIds = Array.from(this.byId.keys()).sort();
+    return this.sortedIds;
+  }
+
+  private matchingIds(pattern: string, chainSuffixMatchesSelf: boolean = true): string[] {
+    const wildcard = pattern.endsWith('*');
+    const ids = this.sortedEntityIds();
+    if (!wildcard) {
+      return ids.filter((id) => Gts.matchIDPattern(id, pattern, { chainSuffixMatchesSelf }).match);
+    }
+    const prefix = pattern.slice(0, -1).replace(/~$/, '');
+    let low = 0;
+    let high = ids.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (ids[middle] < prefix) low = middle + 1;
+      else high = middle;
+    }
+    const matches: string[] = [];
+    for (let index = low; index < ids.length && ids[index].startsWith(prefix); index++) {
+      if (Gts.matchIDPattern(ids[index], pattern, { chainSuffixMatchesSelf }).match) matches.push(ids[index]);
+    }
+    return matches;
   }
 
   private resolveLocalSchemaRef(root: any, ref: string): any {
@@ -206,7 +207,7 @@ export class GtsStore {
       if (typeof schema.$ref === 'string' && schema.$ref.startsWith('#')) {
         const target = this.resolveLocalSchemaRef(content, schema.$ref);
         if (target && typeof target === 'object' && !Array.isArray(target) && '$schema' in target) {
-          const targetDialect = this.dialectOf(target);
+          const targetDialect = dialectOf(target);
           if (targetDialect !== rootDialect) {
             mismatch = `GTS schema reference graph mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but local $ref target '${schema.$ref}' uses ${targetDialect}`;
             return;
@@ -228,28 +229,43 @@ export class GtsStore {
     const chain = this.buildSchemaChain(schemaId);
     const rootId = chain[0];
     const rootContent = rootId === schemaId ? content : this.get(rootId)?.content;
-    const rootDialect = this.dialectOf(rootContent ?? content);
+    const rootDialect = dialectOf(rootContent ?? content);
     const localDialectError = this.detectLocalRefDialectMismatch(content, rootId, rootDialect);
     if (localDialectError) return localDialectError;
 
     for (const chainId of chain) {
       const chainContent = chainId === schemaId ? content : this.get(chainId)?.content;
       if (!chainContent) continue;
-      const chainDialect = this.dialectOf(chainContent);
+      const chainDialect = dialectOf(chainContent);
       if (chainDialect !== rootDialect) {
         return `GTS derivation chain mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but '${chainId}' uses ${chainDialect}; every type in a chained $id hierarchy must use the root type's dialect`;
       }
     }
 
+    // Seed the reference walk from every type in the chain, not just the leaf.
+    // A leaf-only walk would miss a cross-dialect $ref that lives on an ancestor
+    // the leaf does not itself reference; a type is only as valid as the types it
+    // builds on, so the whole chain plus its transitive gts:// $ref closure must
+    // share the root dialect (spec §11.0/§12, matching the Rust reference which
+    // validates each related type in the closure).
     const visited = new Set<string>();
-    const queue = Array.from(this.collectSchemaDependencies(content));
+    const queue: string[] = [];
+    for (const chainId of chain) {
+      const chainContent = chainId === schemaId ? content : this.get(chainId)?.content;
+      if (!chainContent) continue;
+      if (chainId !== schemaId) {
+        const chainLocalError = this.detectLocalRefDialectMismatch(chainContent, rootId, rootDialect);
+        if (chainLocalError) return chainLocalError;
+      }
+      for (const depId of this.collectSchemaDependencies(chainContent)) queue.push(depId);
+    }
     while (queue.length > 0) {
       const refId = queue.shift() as string;
       if (refId === schemaId || visited.has(refId)) continue;
       visited.add(refId);
       const target = this.get(refId);
       if (!target?.isSchema || !target.content) continue;
-      const targetDialect = this.dialectOf(target.content);
+      const targetDialect = dialectOf(target.content);
       if (targetDialect !== rootDialect) {
         return `GTS derivation mixes JSON Schema dialects: root type '${rootId}' uses ${rootDialect} but $ref target '${refId}' uses ${targetDialect}; every type in the chain and its transitive gts:// $ref targets must use the root type's dialect`;
       }
@@ -262,10 +278,18 @@ export class GtsStore {
     return null;
   }
 
+  // Ajv's async `loadSchema` hook. Registered for completeness, but currently
+  // NEVER invoked: every validation compiles synchronously via `.compile()`
+  // (all `$ref` targets are pre-registered with `addSchema`), and Ajv only
+  // calls `loadSchema` from `compileAsync`. If a `compileAsync` path is ever
+  // introduced this hook goes live - and, per the class-level concurrency
+  // invariant, its `await` would then require serializing mutations.
   private async loadSchema(uri: string): Promise<any> {
-    const normalizedUri = uri.startsWith(GTS_URI_PREFIX) ? uri.substring(GTS_URI_PREFIX.length) : uri;
+    const normalizedUri = stripUriPrefix(uri);
 
     if (Gts.isValidGtsID(normalizedUri)) {
+      const compileError = this.schemaCompileErrors.get(normalizedUri);
+      if (compileError) throw new Error(`Unresolvable invalid GTS schema '${normalizedUri}': ${compileError}`);
       const entity = this.get(normalizedUri);
       if (entity && entity.isSchema) {
         return entity.content;
@@ -275,6 +299,7 @@ export class GtsStore {
   }
 
   register(entity: JsonEntity): JsonEntity | undefined {
+    entity = cloneJsonEntity(entity);
     // A malformed entity id would silently break every ancestor-chain
     // computation downstream (`buildSchemaChain` and friends), which then
     // fail open by treating the entity as if it had no ancestors at all -
@@ -303,8 +328,8 @@ export class GtsStore {
     // Protect registry state: unless entity updates are allowed, re-registering
     // an id with *different* content is rejected (EntityConflictError, surfaced
     // as HTTP 409), while an identical re-submission stays idempotent. Stored
-    // content remains mutable through get(), so both hashes must reflect the
-    // values at comparison time rather than relying on a cached snapshot.
+    // both hashes are computed from the current values rather than relying on
+    // a cached snapshot.
     const previous = this.byId.get(entity.id);
     const replacing = !!previous && contentHash(previous.content) !== contentHash(entity.content);
     if (replacing && !this.config.allowEntityUpdates) {
@@ -333,31 +358,25 @@ export class GtsStore {
     }
 
     const schemaUnchanged = !!previous && !replacing && previous.isSchema && entity.isSchema;
-    if (previous?.isSchema && !schemaUnchanged) {
-      for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) {
-        ajv.removeSchema(entity.id);
+    if (!schemaUnchanged) {
+      if (entity.isSchema && entity.content) assertSafeSchemaPatterns(entity.content);
+      if (previous?.isSchema) this.removeAjvSchema(entity.id);
+      this.schemaCompileErrors.delete(entity.id);
+      try {
+        if (entity.isSchema && entity.content) this.addAjvSchema(entity);
+      } catch (error) {
+        this.removeAjvSchema(entity.id);
+        this.schemaCompileErrors.set(entity.id, error instanceof Error ? error.message : String(error));
       }
     }
     this.byId.set(entity.id, entity);
-
-    // If this is a schema, add it to AJV for reference resolution
-    if (entity.isSchema && entity.content && !schemaUnchanged) {
-      try {
-        const normalizedSchema = this.normalizeSchema(entity.content);
-        // Set $id to the GTS ID if not already set
-        if (!normalizedSchema.$id) {
-          normalizedSchema.$id = entity.id;
-        }
-        this.ajvForSchema(normalizedSchema).addSchema(normalizedSchema, entity.id);
-      } catch (err) {
-        // Ignore malformed schemas; unchanged schemas do not reach this path.
-      }
-    }
-    return previous;
+    this.invalidateIndexes();
+    return previous ? cloneJsonEntity(previous) : undefined;
   }
 
   get(id: string): JsonEntity | undefined {
-    return this.byId.get(id);
+    const entity = this.byId.get(id);
+    return entity ? cloneJsonEntity(entity) : undefined;
   }
 
   /**
@@ -373,11 +392,11 @@ export class GtsStore {
       return;
     }
     this.byId.delete(id);
+    this.schemaCompileErrors.delete(id);
+    this.invalidateIndexes();
     if (entity.isSchema) {
       try {
-        for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) {
-          ajv.removeSchema(id);
-        }
+        this.removeAjvSchema(id);
       } catch (err) {
         // Ignore errors removing schema - mirrors the best-effort addSchema above.
       }
@@ -385,23 +404,15 @@ export class GtsStore {
   }
 
   getAll(): JsonEntity[] {
-    return Array.from(this.byId.values());
+    return Array.from(this.byId.values(), cloneJsonEntity);
   }
 
-  query(pattern: string, limit?: number): string[] {
-    const results: string[] = [];
-    const maxResults = limit ?? Number.MAX_SAFE_INTEGER;
+  entries(): Array<[string, JsonEntity]> {
+    return Array.from(this.byId, ([id, entity]) => [id, cloneJsonEntity(entity)]);
+  }
 
-    for (const [id] of this.byId) {
-      if (results.length >= maxResults) break;
-
-      const matchResult = Gts.matchIDPattern(id, pattern);
-      if (matchResult.match) {
-        results.push(id);
-      }
-    }
-
-    return results;
+  query(pattern: string, limit?: number, chainSuffixMatchesSelf: boolean = true): string[] {
+    return this.matchingIds(pattern, chainSuffixMatchesSelf).slice(0, limit ?? Number.MAX_SAFE_INTEGER);
   }
 
   validateInstance(
@@ -411,6 +422,12 @@ export class GtsStore {
     return this.validateInstanceTransitive(gtsId, new Set(), new Map(), refValidation);
   }
 
+  /**
+   * Promise-returning form of {@link validateInstance}, kept for callers that
+   * want a uniform `await`-able API surface. Validation is fully synchronous
+   * today (see the class-level concurrency invariant); this wrapper adds no
+   * I/O and does not await, so it never yields the event loop mid-validation.
+   */
   async validateInstanceAsync(
     gtsId: string,
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
@@ -593,7 +610,7 @@ export class GtsStore {
       }
 
       const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
-      const isValid = validate(obj.content);
+      const isValid = this.withSelectedType(obj.schemaId, () => validate(obj.content));
 
       if (!isValid) {
         // P6-4: routed through the same `formatValidationError` the
@@ -711,7 +728,7 @@ export class GtsStore {
       }
 
       const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
-      const isValid = validate(content);
+      const isValid = this.withSelectedType(typeId, () => validate(content));
 
       if (!isValid) {
         const errors = validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
@@ -883,6 +900,11 @@ export class GtsStore {
     if (e.keyword === 'required') {
       return `${e.instancePath || '/'} must have required property '${(e.params as any)?.missingProperty}'`;
     }
+    // x-gts-ref is our registered keyword; name it so callers/tests can tell an
+    // x-gts-ref constraint failure apart from a plain structural mismatch.
+    if (e.keyword === 'x-gts-ref') {
+      return `${e.instancePath || '/'} x-gts-ref: ${e.message}`;
+    }
     // P6-6: the root-level path (an empty `instancePath`) must fall back to
     // '/' here too, matching the `required` branch above - otherwise a
     // root-level failure (e.g. `additionalProperties` on the document
@@ -893,6 +915,7 @@ export class GtsStore {
   }
 
   private normalizeSchema(schema: any): any {
+    assertSafeSchemaPatterns(schema);
     return this.normalizeSchemaRecursive(schema);
   }
 
@@ -908,13 +931,12 @@ export class GtsStore {
     const normalized: any = {};
 
     for (const [key, value] of Object.entries(obj)) {
-      // Strip x-gts-ref so Ajv never sees the unknown keyword
-      if (key === 'x-gts-ref') continue;
-
+      // x-gts-ref is kept: it is a registered Ajv keyword (see applyXGtsRefKeyword),
+      // so the engine evaluates it natively during combinator resolution.
       const newKey = key;
       let newValue = value;
       if (key === '$schema' && typeof value === 'string') {
-        newValue = this.canonicalDialectUri(this.dialectOf({ $schema: value }));
+        newValue = canonicalDialectUri(dialectOf({ $schema: value }));
       }
 
       // Recursively normalize nested objects
@@ -945,37 +967,14 @@ export class GtsStore {
       normalized.patternProperties = patternProperties;
     }
 
-    // Clean up combinator arrays: remove subschemas that were x-gts-ref-only (now empty after stripping)
-    for (const combinator of ['oneOf', 'anyOf', 'allOf']) {
-      if (Array.isArray(normalized[combinator])) {
-        normalized[combinator] = normalized[combinator].filter((_sub: any, idx: number) => {
-          const original = (obj as any)[combinator]?.[idx];
-          const isXGtsRefOnly =
-            original &&
-            typeof original === 'object' &&
-            !Array.isArray(original) &&
-            Object.keys(original).length === 1 &&
-            original['x-gts-ref'] !== undefined;
-          return !isXGtsRefOnly;
-        });
-        if (normalized[combinator].length === 0) {
-          delete normalized[combinator];
-        }
-      }
-    }
-
     // Normalize $id values
     if (normalized['$id'] && typeof normalized['$id'] === 'string') {
-      if (normalized['$id'].startsWith(GTS_URI_PREFIX)) {
-        normalized['$id'] = normalized['$id'].substring(GTS_URI_PREFIX.length);
-      }
+      normalized['$id'] = stripUriPrefix(normalized['$id']);
     }
 
     // Normalize $ref values
     if (normalized['$ref'] && typeof normalized['$ref'] === 'string') {
-      if (normalized['$ref'].startsWith(GTS_URI_PREFIX)) {
-        normalized['$ref'] = normalized['$ref'].substring(GTS_URI_PREFIX.length);
-      }
+      normalized['$ref'] = stripUriPrefix(normalized['$ref']);
     }
 
     return normalized;
@@ -1084,7 +1083,7 @@ export class GtsStore {
   }
 
   private isJsonSchemaUrl(s: string): boolean {
-    return (s.startsWith('http://') || s.startsWith('https://')) && s.includes('json-schema.org');
+    return (s.startsWith('http://') || s.startsWith('https://')) && s.includes(JSON_SCHEMA_HOST);
   }
 
   /**
@@ -1482,7 +1481,7 @@ export class GtsStore {
     try {
       const modifiedSchema = this.removeGtsConstConstraints(toSchema);
       const validate = this.ajvForSchema(toSchema).compile(this.normalizeSchema(modifiedSchema));
-      if (!validate(casted)) {
+      if (!this.withSelectedType(toSchema?.$id, () => validate(casted))) {
         // P6-4: shared formatter, so a cast-result failure reads the same
         // way as every other validation path instead of raw Ajv wording.
         return validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
@@ -1604,6 +1603,11 @@ export class GtsStore {
     return this.validateSchemaAgainstParent(schemaId, refValidation);
   }
 
+  /**
+   * Promise-returning form of {@link validateSchema}. Like
+   * {@link validateInstanceAsync}, this adds no I/O and does not await - see
+   * the class-level concurrency invariant.
+   */
   async validateSchemaAsync(
     schemaId: string,
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
@@ -1706,10 +1710,10 @@ export class GtsStore {
 
     if (typeof node.$ref === 'string' && !node.$ref.startsWith('#')) {
       const refPath = path ? `${path}/$ref` : '$ref';
-      if (!node.$ref.startsWith(GTS_URI_PREFIX)) {
+      if (!hasUriPrefix(node.$ref)) {
         return `Invalid $ref at ${refPath}: expected a local pointer or gts:// URI`;
       }
-      const targetId = node.$ref.substring(GTS_URI_PREFIX.length);
+      const targetId = stripUriPrefix(node.$ref);
       if (!Gts.isValidGtsID(targetId)) {
         return `Invalid $ref at ${refPath}: ${targetId} is not a valid GTS identifier`;
       }
@@ -1853,15 +1857,15 @@ export class GtsStore {
     completed: Map<string, ValidationResult>,
     refValidation: GtsRefValidationMode
   ): boolean {
-    return this.getAll()
-      .filter((entity) => Gts.matchIDPattern(entity.id, pattern).match)
-      .some((entity) => this.validateEntityTransitive(entity.id, visiting, completed, refValidation).ok);
+    return this.matchingIds(pattern).some(
+      (id) => this.validateEntityTransitive(id, visiting, completed, refValidation).ok
+    );
   }
 
   private collectSchemaDependencies(node: any, dependencies: Set<string> = new Set()): Set<string> {
     if (!node || typeof node !== 'object') return dependencies;
-    if (typeof node.$ref === 'string' && node.$ref.startsWith(GTS_URI_PREFIX)) {
-      dependencies.add(node.$ref.substring(GTS_URI_PREFIX.length));
+    if (typeof node.$ref === 'string' && hasUriPrefix(node.$ref)) {
+      dependencies.add(stripUriPrefix(node.$ref));
     }
     visitJsonSubschemas(node, '', (subschema) => this.collectSchemaDependencies(subschema, dependencies));
     return dependencies;
@@ -2079,6 +2083,17 @@ export class GtsStore {
               error: `x-gts-traits-schema in '${chainSchemaId}' must be an object subschema or a boolean`,
             };
           }
+          if ('$schema' in declaredSchema) {
+            const hostDialect = dialectOf(content);
+            const traitDialect = dialectOf(declaredSchema);
+            if (traitDialect !== hostDialect) {
+              return {
+                id: schemaId,
+                ok: false,
+                error: `trait schema dialect ${traitDialect} differs from host dialect ${hostDialect}`,
+              };
+            }
+          }
           try {
             traitSchemas.push(this.resolveTraitSchemaRefs(declaredSchema, new Set()));
           } catch (e) {
@@ -2152,7 +2167,7 @@ export class GtsStore {
       const validate = this.ajvForSchema(self?.content ?? schemaForValidation).compile(
         this.normalizeSchema(schemaForValidation)
       );
-      if (!validate(materialized)) {
+      if (!this.withSelectedType(schemaId, () => validate(materialized))) {
         const errors =
           validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
         return {
@@ -2746,7 +2761,7 @@ export class GtsStore {
 
   /** True when `typeId` resolves to a registered type marked `x-gts-abstract` (§9.11.3). */
   isAbstractType(typeId: string): boolean {
-    const normalized = typeId.startsWith(GTS_URI_PREFIX) ? typeId.substring(GTS_URI_PREFIX.length) : typeId;
+    const normalized = stripUriPrefix(typeId);
     const entity = this.get(normalized);
     return !!entity && entity.isSchema && GtsModifiers.isAbstract(entity.content);
   }
@@ -2760,7 +2775,7 @@ export class GtsStore {
 
       for (let i = 0; i < segments.length; i++) {
         const id =
-          'gts.' +
+          GTS_PREFIX +
           segments
             .slice(0, i + 1)
             .map((s) => s.segment)
@@ -2817,7 +2832,7 @@ export class GtsStore {
     for (const [key, value] of Object.entries(schema)) {
       if (key === '$ref') {
         const refUri = value as string;
-        const refId = refUri.startsWith(GTS_URI_PREFIX) ? refUri.substring(GTS_URI_PREFIX.length) : refUri;
+        const refId = stripUriPrefix(refUri);
 
         // `visited` tracks the active recursion path, not every reference seen
         // anywhere: two siblings may legitimately point at the same trait
@@ -3046,7 +3061,7 @@ export class GtsStore {
     // Check direct ref on this object
     const ref = content['$ref'];
     if (typeof ref === 'string') {
-      const refId = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+      const refId = stripUriPrefix(ref);
       if (visited.has(refId)) {
         return `Cyclic reference detected: ${refId}`;
       }
@@ -3114,7 +3129,7 @@ export class GtsStore {
    */
   private inheritsParentViaRef(schema: any, parentId: string): boolean {
     return this.collectDirectRefs(schema).some((ref) => {
-      const normalized = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+      const normalized = stripUriPrefix(ref);
       return normalized === parentId;
     });
   }
@@ -3141,7 +3156,7 @@ export class GtsStore {
     // nothing and its constraints become unenforceable for descendants.
     const ownRef = schema['$ref'];
     if (typeof ownRef === 'string') {
-      const refId = ownRef.startsWith(GTS_URI_PREFIX) ? ownRef.substring(GTS_URI_PREFIX.length) : ownRef;
+      const refId = stripUriPrefix(ownRef);
       if (!visited.has(refId)) {
         const refEntity = this.get(refId);
         if (refEntity && refEntity.content) {
@@ -3167,7 +3182,7 @@ export class GtsStore {
         const ref = sub['$ref'];
         if (typeof ref === 'string') {
           // Resolve referenced schema
-          const refId = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+          const refId = stripUriPrefix(ref);
           if (visited.has(refId)) {
             continue;
           }
@@ -3663,17 +3678,8 @@ export class GtsStore {
   }
 }
 
-/**
- * @param forceIsSchema - Caller-declared intent (P6-2/P6-3): when set,
- * stamps `isSchema` authoritatively instead of deriving it from
- * `GtsExtractor`'s `$schema`-keyword shape heuristic, which cannot
- * distinguish a schema-less-looking-but-declared schema (e.g. registered via
- * `POST /type-schemas` with no embedded `$schema`) from ordinary instance
- * JSON - a shape heuristic can never close that gap because the document
- * can contain zero schema keywords.
- */
-export function createJsonEntity(content: any, _config?: Partial<GtsConfig>, forceIsSchema?: boolean): JsonEntity {
-  const extractResult = GtsExtractor.extractID(content, undefined, forceIsSchema);
+export function createJsonEntity(content: any, _config?: Partial<GtsConfig>): JsonEntity {
+  const extractResult = GtsExtractor.extractID(content);
 
   const references = new Set<string>();
   findReferences(content, references);
@@ -3696,7 +3702,7 @@ function findReferences(obj: any, refs: Set<string>, visited = new Set()): void 
 
   if ('$ref' in obj && typeof obj['$ref'] === 'string') {
     const ref = obj['$ref'];
-    const normalized = ref.startsWith(GTS_URI_PREFIX) ? ref.substring(GTS_URI_PREFIX.length) : ref;
+    const normalized = stripUriPrefix(ref);
     if (Gts.isValidGtsID(normalized)) {
       refs.add(normalized);
     }
