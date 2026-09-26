@@ -56,17 +56,28 @@ export function gtsPatternViolation(value: string, pattern: string): string | nu
  * the same design gts-go and gts-rust use (a registered keyword/vocabulary) and
  * removes the need to strip x-gts-ref and rewrite `oneOf`→`anyOf`.
  *
- * Only concrete/wildcard patterns are enforced here. The `/$id` self-reference
- * (needs the selected type) and registry existence stay with XGtsRefValidator.
+ * Concrete/wildcard patterns are enforced here. The `/$id` self-reference is
+ * resolved through `getSelectedTypeId` (the type currently being validated) so
+ * it participates in `oneOf`/`anyOf` branch selection like any other pattern
+ * instead of matching unconditionally; without a selected type it defers to
+ * XGtsRefValidator. Registry existence always stays with XGtsRefValidator.
  */
-export function applyXGtsRefKeyword(ajv: Ajv): void {
+export function applyXGtsRefKeyword(ajv: Ajv, getSelectedTypeId?: () => string | undefined): void {
   // Named so it can attach a descriptive error (Ajv reads `validate.errors`
   // straight after the call), keeping the same "does not match pattern" wording
   // the standalone walker produces.
   const validate = function xGtsRefValidate(refPattern: string, data: unknown): boolean {
-    if (typeof refPattern !== 'string' || refPattern === X_GTS_REF_SELF) return true;
+    if (typeof refPattern !== 'string') return true;
     if (typeof data !== 'string') return true;
-    const reason = gtsPatternViolation(data, stripUriPrefix(refPattern));
+    let pattern = refPattern;
+    if (refPattern === X_GTS_REF_SELF) {
+      // Resolve /$id to the selected type so a /$id branch matches only that
+      // type, not every value. If it is unknown here, defer to XGtsRefValidator.
+      const selected = getSelectedTypeId?.();
+      if (!selected) return true;
+      pattern = selected;
+    }
+    const reason = gtsPatternViolation(data, stripUriPrefix(pattern));
     if (reason === null) return true;
     (validate as unknown as { errors: unknown[] }).errors = [
       { keyword: 'x-gts-ref', message: reason, params: { pattern: refPattern } },

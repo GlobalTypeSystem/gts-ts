@@ -71,6 +71,10 @@ export class GtsStore {
   private ajv: Ajv;
   private ajv2019: Ajv2019;
   private ajv2020: Ajv2020;
+  // The GTS type currently being validated, used by the `x-gts-ref` Ajv keyword
+  // to resolve the `/$id` self-reference during combinator resolution. Set only
+  // for the duration of a single synchronous `validate(...)` call.
+  private currentSelectedTypeId: string | undefined;
   private sortedIds: string[] | undefined;
   private schemaCompileErrors: Map<string, string> = new Map();
 
@@ -98,9 +102,26 @@ export class GtsStore {
     // Register x-gts-ref as a real keyword so the engine evaluates it during
     // combinator resolution (oneOf/anyOf/allOf), instead of stripping it and
     // rewriting the schema. Existence and /$id remain in XGtsRefValidator.
-    applyXGtsRefKeyword(this.ajv);
-    applyXGtsRefKeyword(this.ajv2019);
-    applyXGtsRefKeyword(this.ajv2020);
+    const selectedTypeIdGetter = () => this.currentSelectedTypeId;
+    applyXGtsRefKeyword(this.ajv, selectedTypeIdGetter);
+    applyXGtsRefKeyword(this.ajv2019, selectedTypeIdGetter);
+    applyXGtsRefKeyword(this.ajv2020, selectedTypeIdGetter);
+  }
+
+  /**
+   * Runs `fn` (a synchronous Ajv `validate(...)` call) with `selectedTypeId`
+   * exposed to the `x-gts-ref` keyword so `/$id` resolves to the type being
+   * validated. Restores the previous value afterwards so nested validations
+   * (e.g. combinator branches that compile sibling schemas) stay correct.
+   */
+  private withSelectedType<T>(selectedTypeId: string | undefined, fn: () => T): T {
+    const previous = this.currentSelectedTypeId;
+    this.currentSelectedTypeId = typeof selectedTypeId === 'string' ? stripUriPrefix(selectedTypeId) : undefined;
+    try {
+      return fn();
+    } finally {
+      this.currentSelectedTypeId = previous;
+    }
   }
 
   // All three registries extend AjvCore, so the common base type lets callers
@@ -589,7 +610,7 @@ export class GtsStore {
       }
 
       const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
-      const isValid = validate(obj.content);
+      const isValid = this.withSelectedType(obj.schemaId, () => validate(obj.content));
 
       if (!isValid) {
         // P6-4: routed through the same `formatValidationError` the
@@ -707,7 +728,7 @@ export class GtsStore {
       }
 
       const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
-      const isValid = validate(content);
+      const isValid = this.withSelectedType(typeId, () => validate(content));
 
       if (!isValid) {
         const errors = validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
@@ -1460,7 +1481,7 @@ export class GtsStore {
     try {
       const modifiedSchema = this.removeGtsConstConstraints(toSchema);
       const validate = this.ajvForSchema(toSchema).compile(this.normalizeSchema(modifiedSchema));
-      if (!validate(casted)) {
+      if (!this.withSelectedType(toSchema?.$id, () => validate(casted))) {
         // P6-4: shared formatter, so a cast-result failure reads the same
         // way as every other validation path instead of raw Ajv wording.
         return validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
@@ -2146,7 +2167,7 @@ export class GtsStore {
       const validate = this.ajvForSchema(self?.content ?? schemaForValidation).compile(
         this.normalizeSchema(schemaForValidation)
       );
-      if (!validate(materialized)) {
+      if (!this.withSelectedType(schemaId, () => validate(materialized))) {
         const errors =
           validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
         return {
