@@ -3,6 +3,7 @@
  * Validates that string values match specified GTS ID patterns
  */
 
+import type Ajv from 'ajv';
 import { Gts } from './gts';
 import {
   EntityLookup,
@@ -15,6 +16,67 @@ import {
 } from './types';
 
 export const X_GTS_REF_SELF = '/$id';
+
+/**
+ * Whether `value`, already known to be prefixed by an exact (non-wildcard)
+ * `pattern`, matches it on a segment boundary. Type patterns (ending with `~`)
+ * admit derived identifiers; any other (exact) pattern requires a full match or
+ * a `~` boundary immediately after the pattern, so `…w.v1` does not spuriously
+ * accept `…w.v12` / `…w.v1.5`.
+ */
+function matchesAtSegmentBoundary(value: string, pattern: string): boolean {
+  return value.length === pattern.length || pattern.endsWith('~') || value[pattern.length] === '~';
+}
+
+/**
+ * Why the string `value` does not satisfy `pattern`, or `null` if it matches.
+ * Pure pattern matching (concrete id, type prefix, or single trailing wildcard);
+ * registry existence and the `/$id` self-reference are decided by
+ * {@link XGtsRefValidator}, not here. Shared by that walker and the structural
+ * `x-gts-ref` Ajv keyword so both agree on matching.
+ */
+export function gtsPatternViolation(value: string, pattern: string): string | null {
+  if (!Gts.isValidGtsID(value)) {
+    return `Value '${value}' is not a valid GTS identifier`;
+  }
+  if (pattern === GTS_PREFIX + '*') return null;
+  if (pattern.endsWith('*')) {
+    return value.startsWith(pattern.slice(0, -1))
+      ? null
+      : `Value '${value}' does not match pattern '${pattern}'`;
+  }
+  if (!value.startsWith(pattern) || !matchesAtSegmentBoundary(value, pattern)) {
+    return `Value '${value}' does not match pattern '${pattern}'`;
+  }
+  return null;
+}
+
+/**
+ * Registers `x-gts-ref` as a first-class Ajv keyword so `oneOf`/`anyOf`/`allOf`
+ * resolve correctly: branches that differ only by `x-gts-ref` stay distinct
+ * instead of collapsing to identical match-all schemas once stripped. This is
+ * the same design gts-go and gts-rust use (a registered keyword/vocabulary) and
+ * removes the need to strip x-gts-ref and rewrite `oneOf`→`anyOf`.
+ *
+ * Only concrete/wildcard patterns are enforced here. The `/$id` self-reference
+ * (needs the selected type) and registry existence stay with XGtsRefValidator.
+ */
+export function applyXGtsRefKeyword(ajv: Ajv): void {
+  // Named so it can attach a descriptive error (Ajv reads `validate.errors`
+  // straight after the call), keeping the same "does not match pattern" wording
+  // the standalone walker produces.
+  const validate = function xGtsRefValidate(refPattern: string, data: unknown): boolean {
+    if (typeof refPattern !== 'string' || refPattern === X_GTS_REF_SELF) return true;
+    if (typeof data !== 'string') return true;
+    const reason = gtsPatternViolation(data, stripUriPrefix(refPattern));
+    if (reason === null) return true;
+    (validate as unknown as { errors: unknown[] }).errors = [
+      { keyword: 'x-gts-ref', message: reason, params: { pattern: refPattern } },
+    ];
+    return false;
+  };
+  ajv.addKeyword({ keyword: 'x-gts-ref', schemaType: 'string', errors: true, validate });
+}
 
 const SCHEMA_VALUE_KEYWORDS = new Set([
   'additionalItems',
@@ -471,36 +533,10 @@ export class XGtsRefValidator {
   }
 
   private validateGtsPattern(value: string, pattern: string, fieldPath: string): XGtsRefValidationError | null {
-    // Validate it's a valid GTS ID
-    if (!Gts.isValidGtsID(value)) {
-      return {
-        fieldPath,
-        value,
-        refPattern: pattern,
-        reason: `Value '${value}' is not a valid GTS identifier`,
-      };
-    }
-
-    // Check pattern match
-    if (pattern === 'gts.*') {
-      // Any valid GTS ID matches
-    } else if (pattern.endsWith('*')) {
-      const prefix = pattern.slice(0, -1);
-      if (!value.startsWith(prefix)) {
-        return {
-          fieldPath,
-          value,
-          refPattern: pattern,
-          reason: `Value '${value}' does not match pattern '${pattern}'`,
-        };
-      }
-    } else if (!value.startsWith(pattern)) {
-      return {
-        fieldPath,
-        value,
-        refPattern: pattern,
-        reason: `Value '${value}' does not match pattern '${pattern}'`,
-      };
+    // Shared pattern matching (also used by the structural x-gts-ref keyword).
+    const reason = gtsPatternViolation(value, pattern);
+    if (reason !== null) {
+      return { fieldPath, value, refPattern: pattern, reason };
     }
 
     // The referenced value must resolve to a registered entity when a store is

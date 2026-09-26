@@ -22,7 +22,7 @@ import {
 } from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
-import { escapeJsonPointerSegment, visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
+import { applyXGtsRefKeyword, escapeJsonPointerSegment, visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
 import { GtsCompatibility, findCrossedBound, isEmptySchema } from './compatibility';
 import { GtsModifiers } from './modifiers';
 
@@ -95,6 +95,12 @@ export class GtsStore {
     applyGtsFormats(this.ajv);
     applyGtsFormats(this.ajv2019);
     applyGtsFormats(this.ajv2020);
+    // Register x-gts-ref as a real keyword so the engine evaluates it during
+    // combinator resolution (oneOf/anyOf/allOf), instead of stripping it and
+    // rewriting the schema. Existence and /$id remain in XGtsRefValidator.
+    applyXGtsRefKeyword(this.ajv);
+    applyXGtsRefKeyword(this.ajv2019);
+    applyXGtsRefKeyword(this.ajv2020);
   }
 
   // All three registries extend AjvCore, so the common base type lets callers
@@ -873,6 +879,11 @@ export class GtsStore {
     if (e.keyword === 'required') {
       return `${e.instancePath || '/'} must have required property '${(e.params as any)?.missingProperty}'`;
     }
+    // x-gts-ref is our registered keyword; name it so callers/tests can tell an
+    // x-gts-ref constraint failure apart from a plain structural mismatch.
+    if (e.keyword === 'x-gts-ref') {
+      return `${e.instancePath || '/'} x-gts-ref: ${e.message}`;
+    }
     // P6-6: the root-level path (an empty `instancePath`) must fall back to
     // '/' here too, matching the `required` branch above - otherwise a
     // root-level failure (e.g. `additionalProperties` on the document
@@ -899,9 +910,8 @@ export class GtsStore {
     const normalized: any = {};
 
     for (const [key, value] of Object.entries(obj)) {
-      // Strip x-gts-ref so Ajv never sees the unknown keyword
-      if (key === 'x-gts-ref') continue;
-
+      // x-gts-ref is kept: it is a registered Ajv keyword (see applyXGtsRefKeyword),
+      // so the engine evaluates it natively during combinator resolution.
       const newKey = key;
       let newValue = value;
       if (key === '$schema' && typeof value === 'string') {
@@ -934,25 +944,6 @@ export class GtsStore {
         writable: true,
       });
       normalized.patternProperties = patternProperties;
-    }
-
-    // Clean up combinator arrays: remove subschemas that were x-gts-ref-only (now empty after stripping)
-    for (const combinator of ['oneOf', 'anyOf', 'allOf']) {
-      if (Array.isArray(normalized[combinator])) {
-        normalized[combinator] = normalized[combinator].filter((_sub: any, idx: number) => {
-          const original = (obj as any)[combinator]?.[idx];
-          const isXGtsRefOnly =
-            original &&
-            typeof original === 'object' &&
-            !Array.isArray(original) &&
-            Object.keys(original).length === 1 &&
-            original['x-gts-ref'] !== undefined;
-          return !isXGtsRefOnly;
-        });
-        if (normalized[combinator].length === 0) {
-          delete normalized[combinator];
-        }
-      }
     }
 
     // Normalize $id values
