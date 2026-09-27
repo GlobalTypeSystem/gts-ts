@@ -65,6 +65,9 @@ const TRAIT_STRUCTURAL_KEYWORDS = ['properties', 'required', 'additionalProperti
  * mutators synchronous, or reinstate serialization if that stops being
  * possible.
  */
+/** Outcome of committing a staged entry (see {@link GtsStore.commit}). */
+export type CommitOutcome = 'added' | 'unchanged' | 'conflict';
+
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   // Entities registered but not yet committed. A staged entity is visible to
@@ -73,7 +76,16 @@ export class GtsStore {
   // entry order, but it is invisible to public reads (`getCommitted`,
   // `getAll`, `query`) until `commit`. This is how a validate=true
   // registration avoids ever exposing an entity that has not passed validation.
-  private staged: Map<string, JsonEntity> = new Map();
+  //
+  // Keyed by a unique staging TOKEN (not the entity id) so two entries that
+  // resolve to the same id - a duplicated batch entry or two concurrent
+  // registrations - never clobber each other, and commit/discard only affect
+  // the entry they name. `stagedByKey` is the by-id overlay `get` and the Ajv
+  // `$ref` pool consult; it holds the most recently staged entity per id and is
+  // recomputed when a token is committed or discarded.
+  private staged: Map<string, { key: string; entity: JsonEntity }> = new Map();
+  private stagedByKey: Map<string, JsonEntity> = new Map();
+  private stageSeq = 0;
   private config: GtsConfig;
   private ajv: Ajv;
   private ajv2019: Ajv2019;
@@ -401,7 +413,7 @@ export class GtsStore {
   // resolves its not-yet-committed siblings regardless of order. Public/API
   // reads MUST use `getCommitted` so uncommitted entities are never exposed.
   get(id: string): JsonEntity | undefined {
-    const entity = this.staged.get(id) ?? this.byId.get(id);
+    const entity = this.stagedByKey.get(id) ?? this.byId.get(id);
     return entity ? cloneJsonEntity(entity) : undefined;
   }
 
@@ -413,15 +425,43 @@ export class GtsStore {
     return entity ? cloneJsonEntity(entity) : undefined;
   }
 
+  // Point the Ajv `$ref` pool for `key` at whatever entity is currently
+  // authoritative for it: the active staged entity if one remains, otherwise
+  // the committed one (removed entirely if neither is a schema). Called whenever
+  // a token is staged, committed or discarded so the pool never dangles.
+  private refreshAjvForKey(key: string): void {
+    this.removeAjvSchema(key);
+    const active = this.stagedByKey.get(key) ?? this.byId.get(key);
+    if (active?.isSchema && active.content) {
+      try {
+        this.addAjvSchema(active);
+      } catch {
+        this.removeAjvSchema(key);
+      }
+    }
+  }
+
+  // Drop the staged entry named by `token` and rebuild the by-key overlay for
+  // its key from any other tokens that still target it, then refresh the Ajv
+  // pool for that key.
+  private removeStaged(token: string, entry: { key: string; entity: JsonEntity }): void {
+    this.staged.delete(token);
+    this.stagedByKey.delete(entry.key);
+    for (const other of this.staged.values()) {
+      if (other.key === entry.key) this.stagedByKey.set(entry.key, other.entity);
+    }
+    this.refreshAjvForKey(entry.key);
+  }
+
   /**
    * Stage an entity WITHOUT publishing it: it is visible to internal
    * validation (via {@link get} and the Ajv `$ref` pool) but invisible to
-   * public reads until {@link commit}. Throws {@link EntityConflictError} when
-   * a committed entity with different content already holds the id and updates
-   * are not allowed. Callers MUST eventually {@link commit} or {@link discard}
-   * the staged id.
+   * public reads until {@link commit}. Returns a unique staging token. Throws
+   * {@link EntityConflictError} when a committed entity with different content
+   * already holds the id and updates are not allowed. Callers MUST eventually
+   * {@link commit} or {@link discard} the returned token.
    */
-  stage(entity: JsonEntity): void {
+  stage(entity: JsonEntity): string {
     entity = cloneJsonEntity(entity);
     const hasValidId = Gts.isValidGtsID(entity.id) || (!entity.isSchema && Gts.isUuid(entity.id));
     if (!hasValidId) {
@@ -446,51 +486,55 @@ export class GtsStore {
       const declarationError = this.checkTypeSchemaRules(entity.content, entity.id, { enforceGuards: false });
       if (declarationError) throw new Error(declarationError);
       assertSafeSchemaPatterns(entity.content);
-      // Point the Ajv `$ref` pool at the staged version so a sibling being
-      // validated resolves `$ref`s to it; the committed version (if any) is
-      // restored on discard.
-      this.removeAjvSchema(entity.id);
-      try {
-        this.addAjvSchema(entity);
-      } catch {
-        this.removeAjvSchema(entity.id);
-      }
     }
-    this.staged.set(entity.id, entity);
+    const token = `stg-${++this.stageSeq}`;
+    this.staged.set(token, { key: entity.id, entity });
+    // Point the Ajv `$ref` pool at the staged version so a sibling being
+    // validated resolves `$ref`s to it; the committed version (if any) is
+    // restored on discard/commit.
+    this.stagedByKey.set(entity.id, entity);
+    this.refreshAjvForKey(entity.id);
     this.invalidateIndexes();
-  }
-
-  /** Publish a previously staged entity, making it visible to public reads. */
-  commit(id: string): void {
-    const staged = this.staged.get(id);
-    if (!staged) return;
-    this.staged.delete(id);
-    this.byId.set(id, staged);
-    this.invalidateIndexes();
+    return token;
   }
 
   /**
-   * Drop a staged entity that failed validation. The committed state is
-   * untouched: a client never observes the discarded (invalid) entity, and any
-   * prior committed version under the same id (including its Ajv `$ref` entry)
-   * is preserved/restored.
+   * Publish the entity named by `token`, making it visible to public reads.
+   * The publish is atomic with a conflict check against the committed store:
+   * `'added'` when it was inserted, `'unchanged'` when an identical entity
+   * already held the id, and `'conflict'` when a different entity already held
+   * it (nothing is published in that case). An unknown token yields
+   * `'conflict'`.
    */
-  discard(id: string): void {
-    const staged = this.staged.get(id);
-    if (!staged) return;
-    this.staged.delete(id);
-    this.invalidateIndexes();
-    if (staged.isSchema) {
-      this.removeAjvSchema(id);
-      const committed = this.byId.get(id);
-      if (committed?.isSchema && committed.content) {
-        try {
-          this.addAjvSchema(committed);
-        } catch {
-          this.removeAjvSchema(id);
-        }
-      }
+  commit(token: string): CommitOutcome {
+    const entry = this.staged.get(token);
+    if (!entry) return 'conflict';
+    this.removeStaged(token, entry);
+    const committed = this.byId.get(entry.key);
+    if (
+      committed &&
+      contentHash(committed.content) !== contentHash(entry.entity.content) &&
+      !this.config.allowEntityUpdates
+    ) {
+      return 'conflict';
     }
+    this.byId.set(entry.key, entry.entity);
+    this.invalidateIndexes();
+    this.refreshAjvForKey(entry.key);
+    return committed ? 'unchanged' : 'added';
+  }
+
+  /**
+   * Drop the staged entity named by `token` that failed validation. The
+   * committed state is untouched: a client never observes the discarded
+   * (invalid) entity, and any prior committed version under the same id
+   * (including its Ajv `$ref` entry) is preserved/restored.
+   */
+  discard(token: string): void {
+    const entry = this.staged.get(token);
+    if (!entry) return;
+    this.removeStaged(token, entry);
+    this.invalidateIndexes();
   }
 
   /**

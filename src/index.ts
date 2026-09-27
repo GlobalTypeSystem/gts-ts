@@ -22,7 +22,7 @@ export { attachSourceLocations, sourceSpanAt } from './source-location';
 
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
-import { GtsStore, createJsonEntity } from './store';
+import { GtsStore, createJsonEntity, type CommitOutcome } from './store';
 import { GtsRelationships } from './relationships';
 import { GtsCompatibility } from './compatibility';
 import { GtsQuery } from './query';
@@ -149,24 +149,24 @@ export class GTS {
   }
 
   /**
-   * Stage `content` WITHOUT publishing it. A staged entity is visible to
-   * internal validation but invisible to public reads until {@link commit},
-   * so a validate=true registration never exposes an entity that has not
-   * passed validation, and a batch can resolve intra-batch references
-   * regardless of order.
+   * Stage `content` WITHOUT publishing it, returning a unique staging token. A
+   * staged entity is visible to internal validation but invisible to public
+   * reads until {@link commit}, so a validate=true registration never exposes
+   * an entity that has not passed validation, and a batch can resolve
+   * intra-batch references regardless of order.
    */
-  stage(content: any): void {
-    this.store.stage(createJsonEntity(content));
+  stage(content: any): string {
+    return this.store.stage(createJsonEntity(content));
   }
 
-  /** Publish a previously staged entity by id. */
-  commit(id: string): void {
-    this.store.commit(id);
+  /** Publish a previously staged entity by its staging token. */
+  commit(token: string): CommitOutcome {
+    return this.store.commit(token);
   }
 
-  /** Discard a staged entity by id; the committed state is untouched. */
-  discard(id: string): void {
-    this.store.discard(id);
+  /** Discard a staged entity by its staging token; the committed state is untouched. */
+  discard(token: string): void {
+    this.store.discard(token);
   }
 
   rollbackRegistration(id: string, previous?: JsonEntity): void {

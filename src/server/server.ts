@@ -413,10 +413,10 @@ export class GtsServer {
       // failure. Instances and non-validated schemas are validated
       // (transiently) before this point, so they register directly.
       if (validate && entity.isSchema) {
-        this.store.stage(content);
+        const token = this.store.stage(content);
         const parentResult = this.store.validateSchemaAgainstParent(entity.id, refValidation);
         if (!parentResult.ok) {
-          this.store.discard(entity.id);
+          this.store.discard(token);
           reply.code(422);
           return {
             ok: false,
@@ -424,7 +424,14 @@ export class GtsServer {
             error: `Derived schema is not compatible with base: ${parentResult.error}`,
           };
         }
-        this.store.commit(entity.id);
+        if (this.store.commit(token) === 'conflict') {
+          reply.code(409);
+          return {
+            ok: false,
+            is_type_schema: true,
+            error: `Entity '${entity.id}' is already registered with different content`,
+          };
+        }
       } else {
         this.store.register(content);
       }
@@ -549,49 +556,77 @@ export class GtsServer {
     // regardless of position - and finally the entries that passed are
     // committed while the rest are discarded.
     const results: Array<{ ok: boolean; type_id: string | null; error?: string }> = new Array(schemas.length);
-    const staged: Array<{ index: number; typeId: string; content: any }> = [];
+    let survivors: Array<{ index: number; typeId: string; content: any; token: string }> = [];
+    // Track every still-staged token so a throw anywhere below discards the
+    // leftovers instead of leaking unvalidated entries into the staging overlay.
+    const pending = new Set<string>();
+    try {
+      // Phase 1: identity + content-only structural checks + stage.
+      for (let i = 0; i < schemas.length; i++) {
+        const schema = schemas[i];
+        const identity = this.typeSchemaIdentity(schema);
+        if (identity.error !== undefined) {
+          results[i] = { ok: false, type_id: identity.typeId, error: identity.error };
+          continue;
+        }
+        const typeId = identity.typeId as string;
+        const structuralError = this.schemaStructuralError(schema, typeId);
+        if (structuralError) {
+          results[i] = { ok: false, type_id: typeId, error: structuralError };
+          continue;
+        }
+        let token: string;
+        try {
+          token = this.store.stage(schema);
+        } catch (error) {
+          results[i] = { ok: false, type_id: typeId, error: error instanceof Error ? error.message : String(error) };
+          continue;
+        }
+        pending.add(token);
+        survivors.push({ index: i, typeId, content: schema, token });
+      }
 
-    // Phase 1: identity + content-only structural checks + stage.
-    for (let i = 0; i < schemas.length; i++) {
-      const schema = schemas[i];
-      const identity = this.typeSchemaIdentity(schema);
-      if (identity.error !== undefined) {
-        results[i] = { ok: false, type_id: identity.typeId, error: identity.error };
-        continue;
+      // Phase 2: reference/ancestor validation against the staged set, discarding
+      // failures and RE-validating the survivors against the now-smaller staged
+      // set until a round produces no new failures. This stops an entry that only
+      // validated because a sibling was staged (e.g. its parent or $ref target)
+      // from being committed after that sibling has itself been discarded.
+      for (;;) {
+        const stillGood: typeof survivors = [];
+        const failed: Array<{ index: number; typeId: string; token: string; error: string }> = [];
+        for (const entry of survivors) {
+          const error = this.schemaReferenceError(entry.content, entry.typeId, refValidation);
+          if (error === null) stillGood.push(entry);
+          else failed.push({ index: entry.index, typeId: entry.typeId, token: entry.token, error });
+        }
+        if (failed.length === 0) break;
+        for (const { index, typeId, token, error } of failed) {
+          this.store.discard(token);
+          pending.delete(token);
+          results[index] = { ok: false, type_id: typeId, error };
+        }
+        survivors = stillGood;
       }
-      const typeId = identity.typeId as string;
-      const structuralError = this.schemaStructuralError(schema, typeId);
-      if (structuralError) {
-        results[i] = { ok: false, type_id: typeId, error: structuralError };
-        continue;
-      }
-      try {
-        this.store.stage(schema);
-      } catch (error) {
-        results[i] = { ok: false, type_id: typeId, error: error instanceof Error ? error.message : String(error) };
-        continue;
-      }
-      staged.push({ index: i, typeId, content: schema });
-    }
 
-    // Phase 2: reference/ancestor validation against the fully-staged set.
-    const verdicts: Array<{ index: number; typeId: string; error: string | null }> = staged.map(
-      ({ index, typeId, content }) => ({
-        index,
-        typeId,
-        error: this.schemaReferenceError(content, typeId, refValidation),
-      })
-    );
-
-    // Phase 3: publish the entries that passed, discard the ones that failed.
-    for (const { index, typeId, error } of verdicts) {
-      if (error === null) {
-        this.store.commit(typeId);
-        results[index] = { ok: true, type_id: typeId };
-      } else {
-        this.store.discard(typeId);
-        results[index] = { ok: false, type_id: typeId, error };
+      // Phase 3: publish the entries that passed. A commit can still report a
+      // conflict if the same id was already committed with different content.
+      for (const { index, typeId, token } of survivors) {
+        const outcome = this.store.commit(token);
+        pending.delete(token);
+        if (outcome === 'conflict') {
+          results[index] = {
+            ok: false,
+            type_id: typeId,
+            error: `Entity '${typeId}' is already registered with different content`,
+          };
+        } else {
+          results[index] = { ok: true, type_id: typeId };
+        }
       }
+    } finally {
+      // Discard anything still staged (e.g. a validation call threw) so no
+      // unvalidated entry lingers in the staging overlay.
+      for (const token of pending) this.store.discard(token);
     }
 
     return { ok: results.every((r) => r.ok), results };
