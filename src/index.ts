@@ -148,6 +148,27 @@ export class GTS {
     return this.store.register(entity);
   }
 
+  /**
+   * Stage `content` WITHOUT publishing it. A staged entity is visible to
+   * internal validation but invisible to public reads until {@link commit},
+   * so a validate=true registration never exposes an entity that has not
+   * passed validation, and a batch can resolve intra-batch references
+   * regardless of order.
+   */
+  stage(content: any): void {
+    this.store.stage(createJsonEntity(content));
+  }
+
+  /** Publish a previously staged entity by id. */
+  commit(id: string): void {
+    this.store.commit(id);
+  }
+
+  /** Discard a staged entity by id; the committed state is untouched. */
+  discard(id: string): void {
+    this.store.discard(id);
+  }
+
   rollbackRegistration(id: string, previous?: JsonEntity): void {
     this.store.unregister(id);
     if (previous) {
@@ -166,7 +187,8 @@ export class GTS {
   }
 
   get(id: string): any {
-    const entity = this.store.get(id);
+    // Public read: never expose a staged (not-yet-committed) entity.
+    const entity = this.store.getCommitted(id);
     return entity?.content;
   }
 
@@ -181,7 +203,8 @@ export class GTS {
    * this instead of reaching past the facade at `.store`.
    */
   isRegisteredSchema(id: string): boolean | undefined {
-    const entity = this.store.get(id);
+    // Public existence check: only committed entities count.
+    const entity = this.store.getCommitted(id);
     return entity ? entity.isSchema : undefined;
   }
 

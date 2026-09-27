@@ -67,6 +67,13 @@ const TRAIT_STRUCTURAL_KEYWORDS = ['properties', 'required', 'additionalProperti
  */
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
+  // Entities registered but not yet committed. A staged entity is visible to
+  // internal validation/resolution (via `get`, chain building and the Ajv
+  // `$ref` pool) so a batch can resolve intra-batch references regardless of
+  // entry order, but it is invisible to public reads (`getCommitted`,
+  // `getAll`, `query`) until `commit`. This is how a validate=true
+  // registration avoids ever exposing an entity that has not passed validation.
+  private staged: Map<string, JsonEntity> = new Map();
   private config: GtsConfig;
   private ajv: Ajv;
   private ajv2019: Ajv2019;
@@ -389,9 +396,97 @@ export class GtsStore {
     return previous ? cloneJsonEntity(previous) : undefined;
   }
 
+  // Internal lookup used by validation and $ref/chain resolution. Consults the
+  // staging overlay first so an entity being validated as part of a batch
+  // resolves its not-yet-committed siblings regardless of order. Public/API
+  // reads MUST use `getCommitted` so uncommitted entities are never exposed.
   get(id: string): JsonEntity | undefined {
+    const entity = this.staged.get(id) ?? this.byId.get(id);
+    return entity ? cloneJsonEntity(entity) : undefined;
+  }
+
+  // Committed-only lookup: the staging overlay is never consulted, so a
+  // staged-but-not-yet-committed entity is invisible here. Read path for
+  // public/API consumers.
+  getCommitted(id: string): JsonEntity | undefined {
     const entity = this.byId.get(id);
     return entity ? cloneJsonEntity(entity) : undefined;
+  }
+
+  /**
+   * Stage an entity WITHOUT publishing it: it is visible to internal
+   * validation (via {@link get} and the Ajv `$ref` pool) but invisible to
+   * public reads until {@link commit}. Throws {@link EntityConflictError} when
+   * a committed entity with different content already holds the id and updates
+   * are not allowed. Callers MUST eventually {@link commit} or {@link discard}
+   * the staged id.
+   */
+  stage(entity: JsonEntity): void {
+    entity = cloneJsonEntity(entity);
+    const hasValidId = Gts.isValidGtsID(entity.id) || (!entity.isSchema && Gts.isUuid(entity.id));
+    if (!hasValidId) {
+      if (!entity.id) {
+        throw new Error(
+          entity.isSchema ? 'Unable to detect GTS ID in schema' : 'Unable to detect GTS ID in instance entity'
+        );
+      }
+      throw new Error(`Invalid GTS entity id: '${entity.id}'`);
+    }
+
+    const committed = this.byId.get(entity.id);
+    if (committed && contentHash(committed.content) !== contentHash(entity.content) && !this.config.allowEntityUpdates) {
+      throw new EntityConflictError(entity.id);
+    }
+
+    if (entity.isSchema && entity.content) {
+      const declarationError = this.checkTypeSchemaRules(entity.content, entity.id, { enforceGuards: false });
+      if (declarationError) throw new Error(declarationError);
+      assertSafeSchemaPatterns(entity.content);
+      // Point the Ajv `$ref` pool at the staged version so a sibling being
+      // validated resolves `$ref`s to it; the committed version (if any) is
+      // restored on discard.
+      this.removeAjvSchema(entity.id);
+      try {
+        this.addAjvSchema(entity);
+      } catch {
+        this.removeAjvSchema(entity.id);
+      }
+    }
+    this.staged.set(entity.id, entity);
+    this.invalidateIndexes();
+  }
+
+  /** Publish a previously staged entity, making it visible to public reads. */
+  commit(id: string): void {
+    const staged = this.staged.get(id);
+    if (!staged) return;
+    this.staged.delete(id);
+    this.byId.set(id, staged);
+    this.invalidateIndexes();
+  }
+
+  /**
+   * Drop a staged entity that failed validation. The committed state is
+   * untouched: a client never observes the discarded (invalid) entity, and any
+   * prior committed version under the same id (including its Ajv `$ref` entry)
+   * is preserved/restored.
+   */
+  discard(id: string): void {
+    const staged = this.staged.get(id);
+    if (!staged) return;
+    this.staged.delete(id);
+    this.invalidateIndexes();
+    if (staged.isSchema) {
+      this.removeAjvSchema(id);
+      const committed = this.byId.get(id);
+      if (committed?.isSchema && committed.content) {
+        try {
+          this.addAjvSchema(committed);
+        } catch {
+          this.removeAjvSchema(id);
+        }
+      }
+    }
   }
 
   /**

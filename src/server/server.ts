@@ -403,25 +403,20 @@ export class GtsServer {
         }
       }
 
-      // Register the entity
-      const previous = this.store.register(content);
-
-      // A derived schema (chained `$id`) must be compatible with its GTS
-      // chain parent - e.g. it cannot drop a `required` field the parent
-      // declares. A literal `$$ref`/`$$id`/`$$schema` establishes no
-      // inheritance at all (they are not JSON Schema keywords), so a schema
-      // that relies on one for derivation must restate the parent's
-      // constraints itself or be rejected here.
+      // Publish the entity. A derived schema (chained `$id`) must be compatible
+      // with its GTS chain parent - e.g. it cannot drop a `required` field the
+      // parent declares - and `validateSchemaAgainstParent` looks the entity up
+      // by id, so it can only run once the entity is in the store. Rather than
+      // register (publish) then roll back on failure - which would briefly
+      // expose an unvalidated schema - the schema is STAGED (invisible to
+      // public reads), validated, then committed on success or discarded on
+      // failure. Instances and non-validated schemas are validated
+      // (transiently) before this point, so they register directly.
       if (validate && entity.isSchema) {
-        // `validateSchemaAgainstParent` looks the entity up by id (via
-        // `store.get`), so it can only run post-registration - unlike
-        // `validateSchemaStrict` and the x-gts-ref checks above. If it
-        // rejects, roll back the `store.register()` above (both the `byId`
-        // index and the Ajv schema entry) so a 422 response restores any
-        // previous entity rather than deleting or replacing it.
+        this.store.stage(content);
         const parentResult = this.store.validateSchemaAgainstParent(entity.id, refValidation);
         if (!parentResult.ok) {
-          this.store.rollbackRegistration(entity.id, previous);
+          this.store.discard(entity.id);
           reply.code(422);
           return {
             ok: false,
@@ -429,6 +424,9 @@ export class GtsServer {
             error: `Derived schema is not compatible with base: ${parentResult.error}`,
           };
         }
+        this.store.commit(entity.id);
+      } else {
+        this.store.register(content);
       }
 
       return {
@@ -526,55 +524,141 @@ export class GtsServer {
     // A malformed gts-ref-validation is a request-level error, so reject the
     // whole batch with 422 before registering any entry - matching the
     // single-entity endpoint and the sibling implementations.
-    const refValidation = (request.query as Record<string, unknown>)?.['gts-ref-validation'];
-    if (parseGtsRefValidationMode(refValidation) === null) {
+    const refValidation = parseGtsRefValidationMode((request.query as Record<string, unknown>)?.['gts-ref-validation']);
+    if (refValidation === null) {
       reply.code(422);
       return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
     }
+    const q = request.query as Record<string, unknown>;
+    const validate = q?.['validate'] === 'true' || q?.['validation'] === 'true';
 
-    const results: Array<{ ok: boolean; type_id: string | null; error?: string }> = [];
-    for (const schema of schemas) {
-      results.push(await this.registerTypeSchema(schema, request));
+    if (!validate) {
+      // No validation: forward references are allowed and order does not
+      // matter, so each entry is registered directly.
+      const results: Array<{ ok: boolean; type_id: string | null; error?: string }> = [];
+      for (const schema of schemas) {
+        results.push(await this.registerTypeSchema(schema, request));
+      }
+      return { ok: results.every((r) => r.ok), results };
     }
 
-    return {
-      ok: results.every((r) => r.ok),
-      results,
-    };
+    // validate=true: two-phase so the outcome is order-independent and nothing
+    // invalid is ever published. Every structurally-valid entry is STAGED
+    // first (invisible to public reads), then each is validated against the
+    // fully-staged set - so an entry resolves intra-batch references/ancestors
+    // regardless of position - and finally the entries that passed are
+    // committed while the rest are discarded.
+    const results: Array<{ ok: boolean; type_id: string | null; error?: string }> = new Array(schemas.length);
+    const staged: Array<{ index: number; typeId: string; content: any }> = [];
+
+    // Phase 1: identity + content-only structural checks + stage.
+    for (let i = 0; i < schemas.length; i++) {
+      const schema = schemas[i];
+      const identity = this.typeSchemaIdentity(schema);
+      if (identity.error !== undefined) {
+        results[i] = { ok: false, type_id: identity.typeId, error: identity.error };
+        continue;
+      }
+      const typeId = identity.typeId as string;
+      const structuralError = this.schemaStructuralError(schema, typeId);
+      if (structuralError) {
+        results[i] = { ok: false, type_id: typeId, error: structuralError };
+        continue;
+      }
+      try {
+        this.store.stage(schema);
+      } catch (error) {
+        results[i] = { ok: false, type_id: typeId, error: error instanceof Error ? error.message : String(error) };
+        continue;
+      }
+      staged.push({ index: i, typeId, content: schema });
+    }
+
+    // Phase 2: reference/ancestor validation against the fully-staged set.
+    const verdicts: Array<{ index: number; typeId: string; error: string | null }> = staged.map(
+      ({ index, typeId, content }) => ({
+        index,
+        typeId,
+        error: this.schemaReferenceError(content, typeId, refValidation),
+      })
+    );
+
+    // Phase 3: publish the entries that passed, discard the ones that failed.
+    for (const { index, typeId, error } of verdicts) {
+      if (error === null) {
+        this.store.commit(typeId);
+        results[index] = { ok: true, type_id: typeId };
+      } else {
+        this.store.discard(typeId);
+        results[index] = { ok: false, type_id: typeId, error };
+      }
+    }
+
+    return { ok: results.every((r) => r.ok), results };
   }
 
-  // Registers a single GTS Type Schema, deriving its GTS Type Identifier from
-  // the embedded $id, and returns a per-item result.
+  // Validates the batch-specific requirement that an entry is an object with a
+  // canonical $schema and a gts:// $id, returning the derived GTS Type
+  // Identifier and, on failure, the per-item error.
+  private typeSchemaIdentity(schema: any): { typeId: string | null; error?: string } {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+      return { typeId: null, error: 'GTS Type Schema entry must be a JSON object' };
+    }
+    if (typeof schema['$schema'] !== 'string' || schema['$schema'].length === 0) {
+      return { typeId: null, error: 'GTS Type Schema must contain a top-level $schema field' };
+    }
+    const embeddedId = schema['$id'];
+    if (typeof embeddedId !== 'string' || !hasUriPrefix(embeddedId)) {
+      return { typeId: null, error: 'GTS Type Schema must contain a top-level $id in gts:// form' };
+    }
+    const typeId = stripUriPrefix(embeddedId);
+    if (!gts.isValidGtsID(typeId) || !typeId.endsWith('~')) {
+      return { typeId, error: `Invalid GTS Type Schema $id: '${embeddedId}'` };
+    }
+    return { typeId };
+  }
+
+  // Content-only schema checks (no dependency on other entities): modifier
+  // declaration/guards and structural $id/$ref validation. Safe to run in the
+  // batch staging phase before every sibling is staged.
+  private schemaStructuralError(content: any, id: string): string | null {
+    const ruleError = this.store.checkTypeSchemaRules(content, id, { enforceGuards: true });
+    if (ruleError) return ruleError;
+    return validateSchemaIdentityAndRefs(content);
+  }
+
+  // Reference/ancestor checks that need the rest of the batch present:
+  // x-gts-ref existence and derived-vs-parent compatibility. Run after every
+  // entry is staged so intra-batch references resolve regardless of order.
+  private schemaReferenceError(content: any, id: string, refValidation: GtsRefValidationMode): string | null {
+    const xGtsRefValidator = new XGtsRefValidator(this.store.asEntityLookup());
+    const xGtsRefErrors = xGtsRefValidator.validateSchema(content);
+    if (xGtsRefErrors.length > 0) {
+      return `x-gts-ref validation failed: ${xGtsRefErrors.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ')}`;
+    }
+    const parentResult = this.store.validateSchemaAgainstParent(id, refValidation);
+    if (!parentResult.ok) {
+      return `Derived schema is not compatible with base: ${parentResult.error}`;
+    }
+    return null;
+  }
+
+  // Registers a single GTS Type Schema WITHOUT full validation (the
+  // ?validate=false batch path), deriving its GTS Type Identifier from the
+  // embedded $id, and returns a per-item result.
   private async registerTypeSchema(
     schema: any,
     request: FastifyRequest<{ Body: any }>
   ): Promise<{ ok: boolean; type_id: string | null; error?: string }> {
-    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
-      return { ok: false, type_id: null, error: 'GTS Type Schema entry must be a JSON object' };
+    const identity = this.typeSchemaIdentity(schema);
+    if (identity.error !== undefined) {
+      return { ok: false, type_id: identity.typeId, error: identity.error };
     }
-
-    if (typeof schema['$schema'] !== 'string' || schema['$schema'].length === 0) {
-      return { ok: false, type_id: null, error: 'GTS Type Schema must contain a top-level $schema field' };
-    }
-
-    const embeddedId = schema['$id'];
-    if (typeof embeddedId !== 'string' || !hasUriPrefix(embeddedId)) {
-      return { ok: false, type_id: null, error: 'GTS Type Schema must contain a top-level $id in gts:// form' };
-    }
-
-    const typeId = stripUriPrefix(embeddedId);
-    if (!gts.isValidGtsID(typeId) || !typeId.endsWith('~')) {
-      return { ok: false, type_id: typeId, error: `Invalid GTS Type Schema $id: '${embeddedId}'` };
-    }
+    const typeId = identity.typeId as string;
 
     // Reuse the single-entity registration path (x-gts-ref checks, modifier
     // rules, store.register) via a throwaway reply that swallows status codes;
     // per-entry outcomes are surfaced through the aggregate `results` instead.
-    // Forward the request query so `?validate=true` and `?gts-ref-validation`
-    // apply to every batch entry exactly as they do on `POST /entities` - the
-    // per-entry validation failure surfaces through `result.error` rather than
-    // the swallowed status code. Dropping the query here would silently skip
-    // §9.11.5 / derived-vs-parent validation for batch registration.
     const fakeReply = { code: () => fakeReply } as unknown as FastifyReply;
     const result = await this.handleAddEntity(
       { ...request, body: { ...schema }, query: request.query } as any,

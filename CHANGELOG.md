@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Batch `POST /type-schemas` registration now forwards the request query string, so `?validate=true` and `?gts-ref-validation=…` apply to every entry exactly as on `POST /entities` (previously silently dropped, skipping validation and accepting bogus `gts-ref-validation` values).
+- `validate=true` registration now **stages** entities instead of publishing-then-rolling-back: an entity is validated in a staging area invisible to public reads (`GET /entities/{id}`, `/entities`, `/query`) and only committed once it passes, so a reader never observes an entity that has not passed (or failed) validation. Batch `POST /type-schemas?validate=true` stages the whole batch first, so an entry can resolve `$ref`s / inheritance to any other entry in the same batch regardless of order, and only the entries that pass are committed while the rest are discarded.
 - The indexed wildcard query lookup (`GtsQuery.query` / `/query` and the wildcard existence check in transitive validation) no longer misses version-flexible matches: its binary-search prefix is cut before the first version token so it returns the same results as a linear `matchIDPattern` scan.
 - `validateSchemaIdentityAndRefs` now reports a non-string `$id` (e.g. an object) as invalid instead of treating it as well-formed.
 
