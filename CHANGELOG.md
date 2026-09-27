@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `POST /type-schemas` now accepts a **JSON array** of GTS Type Schema objects (batch registration) instead of a single `{type_id, type_schema}` object. The external `type_id` field is removed — each entry's GTS Type Identifier is derived from its embedded `$id`. The endpoint returns an aggregate `{ok, results: [...]}` body (top-level `ok` is `true` only when every entry registered); each `results` entry reports `{ok, type_id, error?}`. A non-array body returns `422`.
 - Schema `pattern` / `patternProperties` regex safety is now enforced by a length bound (`MAX_REGEX_LEN`, 32 KiB) instead of the previous `safe-regex2` star-height heuristic, which false-rejected many common, genuinely linear-time patterns (ISO-8601 date-time, semver, dotted-segment ids). Patterns are compiled by Ajv with the platform `RegExp`, so ECMA-262 lookahead/backreferences remain supported, and the `safe-regex2` dependency is dropped. This mirrors gts-rust's `MAX_REGEX_LEN` bound. Registration now rejects only patterns longer than the bound (`Regular expression pattern exceeds the … character safety limit`); documents that were previously rejected with `Unsafe regular expression pattern` now register.
 
+### Fixed
+
+- Batch `POST /type-schemas` registration now forwards the request query string, so `?validate=true` and `?gts-ref-validation=…` apply to every entry exactly as on `POST /entities` (previously silently dropped, skipping validation and accepting bogus `gts-ref-validation` values).
+
 ## [0.7.0] - 2026-09-21
 
 ### Added

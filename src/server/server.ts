@@ -523,6 +523,15 @@ export class GtsServer {
       return { ok: false, error: 'Request body must be a JSON array of GTS Type Schemas' };
     }
 
+    // A malformed gts-ref-validation is a request-level error, so reject the
+    // whole batch with 422 before registering any entry - matching the
+    // single-entity endpoint and the sibling implementations.
+    const refValidation = (request.query as Record<string, unknown>)?.['gts-ref-validation'];
+    if (parseGtsRefValidationMode(refValidation) === null) {
+      reply.code(422);
+      return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
+    }
+
     const results: Array<{ ok: boolean; type_id: string | null; error?: string }> = [];
     for (const schema of schemas) {
       results.push(await this.registerTypeSchema(schema, request));
@@ -561,8 +570,16 @@ export class GtsServer {
     // Reuse the single-entity registration path (x-gts-ref checks, modifier
     // rules, store.register) via a throwaway reply that swallows status codes;
     // per-entry outcomes are surfaced through the aggregate `results` instead.
+    // Forward the request query so `?validate=true` and `?gts-ref-validation`
+    // apply to every batch entry exactly as they do on `POST /entities` - the
+    // per-entry validation failure surfaces through `result.error` rather than
+    // the swallowed status code. Dropping the query here would silently skip
+    // §9.11.5 / derived-vs-parent validation for batch registration.
     const fakeReply = { code: () => fakeReply } as unknown as FastifyReply;
-    const result = await this.handleAddEntity({ ...request, body: { ...schema }, query: {} } as any, fakeReply);
+    const result = await this.handleAddEntity(
+      { ...request, body: { ...schema }, query: request.query } as any,
+      fakeReply
+    );
     if (result.ok) {
       return { ok: true, type_id: typeId };
     }
