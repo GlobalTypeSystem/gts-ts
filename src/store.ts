@@ -434,7 +434,11 @@ export class GtsStore {
     }
 
     const committed = this.byId.get(entity.id);
-    if (committed && contentHash(committed.content) !== contentHash(entity.content) && !this.config.allowEntityUpdates) {
+    if (
+      committed &&
+      contentHash(committed.content) !== contentHash(entity.content) &&
+      !this.config.allowEntityUpdates
+    ) {
       throw new EntityConflictError(entity.id);
     }
 

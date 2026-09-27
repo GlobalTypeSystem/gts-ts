@@ -87,9 +87,9 @@ describe('validate=true batch staging never exposes uncommitted entities (concur
 
         // Final committed state: invalid absent, a valid entry present.
         expect(JSON.parse((await getInvalid()).body).ok).toBe(false);
-        expect(JSON.parse((await server.instance.inject({ method: 'GET', url: `/entities/${ns}.t0.v1~` })).body).ok).toBe(
-          true
-        );
+        expect(
+          JSON.parse((await server.instance.inject({ method: 'GET', url: `/entities/${ns}.t0.v1~` })).body).ok
+        ).toBe(true);
       }
     } finally {
       await server.stop();

@@ -1059,10 +1059,7 @@ describe('GTS Store Operations', () => {
       // Concretely: the version-flexible first segment must surface BOTH the
       // `v1` and the `v1.2` base entities, which the old prefix dropped.
       expect(store.query('gts.x.pkg.ns.base.v1~x.pkg.ns.*')).toEqual(
-        expect.arrayContaining([
-          'gts.x.pkg.ns.base.v1~x.pkg.ns.item.v1~',
-          'gts.x.pkg.ns.base.v1.2~x.pkg.ns.item.v1~',
-        ])
+        expect.arrayContaining(['gts.x.pkg.ns.base.v1~x.pkg.ns.item.v1~', 'gts.x.pkg.ns.base.v1.2~x.pkg.ns.item.v1~'])
       );
     });
   });
