@@ -9,7 +9,7 @@ import {
   idToUUID,
   extractID,
 } from '../src';
-import { MAX_SCHEMA_DEPTH } from '../src/types';
+import { MAX_REGEX_LEN, MAX_SCHEMA_DEPTH } from '../src/types';
 import { X_GTS_REF_SELF, XGtsRefValidator } from '../src/x-gts-ref';
 
 describe('GTS Core Operations', () => {
@@ -1843,7 +1843,7 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
   });
 
   describe('store hardening', () => {
-    test('rejects unsafe schema patterns without registering the schema', () => {
+    test('rejects an over-length schema pattern without registering the schema', () => {
       const store = new GtsStore();
       const id = 'gts.x.security.regex.unsafe.v1~';
       expect(() =>
@@ -1852,14 +1852,19 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
             $id: `gts://${id}`,
             $schema: 'http://json-schema.org/draft-07/schema#',
             type: 'string',
-            pattern: '(a+)+$',
+            pattern: 'a'.repeat(MAX_REGEX_LEN + 1),
           })
         )
-      ).toThrow(/Unsafe regular expression pattern/);
+      ).toThrow(/Regular expression pattern exceeds the .* character safety limit/);
       expect(store.get(id)).toBeUndefined();
     });
 
-    test('rolls AJV registration back when a replacement cannot be compiled', () => {
+    test('does not clobber a registered schema when a replacement trips the safety check', () => {
+      // The over-length-pattern replacement is rejected by
+      // `assertSafeSchemaPatterns` BEFORE any Ajv call and before `byId` is
+      // mutated, so the previously registered content survives intact. (This
+      // does NOT reach the Ajv compile-failure catch branch - that path is
+      // covered by the test below.)
       const id = 'gts.x.security.regex.rollback.v1~';
       const store = new GtsStore({ allowEntityUpdates: true });
       store.register(
@@ -1876,10 +1881,10 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
             $id: `gts://${id}`,
             $schema: 'http://json-schema.org/draft-07/schema#',
             type: 'string',
-            pattern: '(a+)+$',
+            pattern: 'a'.repeat(MAX_REGEX_LEN + 1),
           })
         )
-      ).toThrow(/Unsafe regular expression pattern/);
+      ).toThrow(/Regular expression pattern exceeds the .* character safety limit/);
       expect(store.get(id)?.content.pattern).toBe('^a+$');
     });
 

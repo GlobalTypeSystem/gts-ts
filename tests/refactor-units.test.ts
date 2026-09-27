@@ -11,6 +11,7 @@ import {
   GTS,
   Gts,
   GTS_URI_PREFIX,
+  MAX_REGEX_LEN,
   MAX_SCHEMA_DEPTH,
   hasUriPrefix,
   stripUriPrefix,
@@ -157,18 +158,39 @@ describe('schema $id / $ref validation', () => {
   });
 });
 
-describe('schema safety (ReDoS / resource bounds)', () => {
+describe('schema safety (regex length / resource bounds)', () => {
   it('accepts a benign pattern', () => {
     expect(() => assertSafeSchemaPatterns({ type: 'string', pattern: '^[a-z]+$' })).not.toThrow();
   });
 
-  it('rejects a catastrophic-backtracking pattern', () => {
-    expect(() => assertSafeSchemaPatterns({ type: 'string', pattern: '(a+)+$' })).toThrow(/Unsafe regular expression/);
+  // Regression: the previous star-height heuristic rejected these common,
+  // genuinely linear-time patterns. They must register without complaint now
+  // that the guard is a length bound. `(a+)+$` is likewise accepted - Ajv
+  // compiles it with the platform `RegExp`, and it is well under the length
+  // bound; catastrophic backtracking is not what this guard protects against.
+  it('accepts common linear-time patterns the star-height heuristic falsely rejected', () => {
+    const patterns = [
+      '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$',
+      '^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$',
+      '^[a-z]+(\\.[a-z]+)*$',
+      '(a+)+$',
+    ];
+    for (const pattern of patterns) {
+      expect(() => assertSafeSchemaPatterns({ type: 'string', pattern })).not.toThrow();
+    }
   });
 
-  it('rejects unsafe patternProperties keys', () => {
-    expect(() => assertSafeSchemaPatterns({ patternProperties: { '(a+)+$': {} } })).toThrow(
-      /Unsafe regular expression/
+  it('rejects a pattern longer than the length bound', () => {
+    const tooLong = 'a'.repeat(MAX_REGEX_LEN + 1);
+    expect(() => assertSafeSchemaPatterns({ type: 'string', pattern: tooLong })).toThrow(
+      /Regular expression pattern exceeds the .* character safety limit/
+    );
+  });
+
+  it('rejects an over-length patternProperties key', () => {
+    const tooLong = 'a'.repeat(MAX_REGEX_LEN + 1);
+    expect(() => assertSafeSchemaPatterns({ patternProperties: { [tooLong]: {} } })).toThrow(
+      /Regular expression pattern exceeds the .* character safety limit/
     );
   });
 });
