@@ -41,24 +41,30 @@ export function validateSchemaIdentityAndRefs(content: unknown): string | null {
     return 'Unable to detect GTS ID in schema';
   }
 
-  if (typeof schemaId === 'string') {
-    let normalizedId = schemaId;
-    if (hasUriPrefix(normalizedId)) {
-      normalizedId = stripUriPrefix(normalizedId);
-    } else if (normalizedId.startsWith(GTS_PREFIX)) {
-      // Plain gts. prefix without gts:// is not allowed for JSON Schema $id
-      return 'Schema $id with GTS identifier must use gts:// URI format (e.g., gts://gts.vendor.pkg.ns.type.v1~)';
-    } else {
-      return 'Schema $id must be a valid GTS identifier with gts:// URI format';
-    }
+  // A non-string `$id` (e.g. an object or number) is not a valid GTS
+  // identifier. Guarding only the string case would let any truthy non-string
+  // fall through as "valid" - a gap that matters now that this is a public
+  // library export, not just an internal HTTP-handler helper.
+  if (typeof schemaId !== 'string') {
+    return 'Schema $id must be a valid GTS identifier with gts:// URI format';
+  }
 
-    if (normalizedId.includes('*')) {
-      return 'Schema $id cannot contain wildcards';
-    }
+  let normalizedId = schemaId;
+  if (hasUriPrefix(normalizedId)) {
+    normalizedId = stripUriPrefix(normalizedId);
+  } else if (normalizedId.startsWith(GTS_PREFIX)) {
+    // Plain gts. prefix without gts:// is not allowed for JSON Schema $id
+    return 'Schema $id with GTS identifier must use gts:// URI format (e.g., gts://gts.vendor.pkg.ns.type.v1~)';
+  } else {
+    return 'Schema $id must be a valid GTS identifier with gts:// URI format';
+  }
 
-    if (!Gts.isValidGtsID(normalizedId)) {
-      return `Schema $id is not a valid GTS identifier: ${normalizedId}`;
-    }
+  if (normalizedId.includes('*')) {
+    return 'Schema $id cannot contain wildcards';
+  }
+
+  if (!Gts.isValidGtsID(normalizedId)) {
+    return `Schema $id is not a valid GTS identifier: ${normalizedId}`;
   }
 
   const refErrors = validateSchemaRefs(schema, '');
