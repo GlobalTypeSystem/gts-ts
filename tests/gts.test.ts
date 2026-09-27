@@ -1928,6 +1928,37 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
       expect(store.get(id)?.content.pattern).toBe('^a+$');
     });
 
+    test('rolls the Ajv registration back when a replacement passes the safety check but fails to compile', () => {
+      // Exercises the `try { addAjvSchema } catch { removeAjvSchema }` branch:
+      // the replacement carries no `pattern`/`patternProperties` (so it clears
+      // `assertSafeSchemaPatterns`) but declares an unsupported `$schema`
+      // dialect, which makes `addAjvSchema` throw. Registration must NOT throw
+      // - the failure is swallowed so the entity is still stored in `byId` -
+      // and the aborted Ajv registration must be rolled back rather than left
+      // half-added (`validateSchema` recompiles and surfaces the failure on
+      // demand).
+      const id = 'gts.x.security.dialect.rollback.v1~';
+      const store = new GtsStore({ allowEntityUpdates: true });
+      store.register(
+        createJsonEntity({
+          $id: `gts://${id}`,
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'string',
+        })
+      );
+      expect(() =>
+        store.register(
+          createJsonEntity({
+            $id: `gts://${id}`,
+            $schema: 'https://example.com/not-a-json-schema-dialect',
+            type: 'string',
+          })
+        )
+      ).not.toThrow();
+      // The entity is retained (only the Ajv compile was rolled back).
+      expect(store.get(id)?.content.$schema).toBe('https://example.com/not-a-json-schema-dialect');
+    });
+
     test('exposes cloned entries through the store abstraction', () => {
       const store = new GtsStore();
       const id = 'gts.x.query.entries.item.v1~x.query._.instance.v1.0';

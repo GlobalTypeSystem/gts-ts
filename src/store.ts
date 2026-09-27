@@ -76,7 +76,6 @@ export class GtsStore {
   // for the duration of a single synchronous `validate(...)` call.
   private currentSelectedTypeId: string | undefined;
   private sortedIds: string[] | undefined;
-  private schemaCompileErrors: Map<string, string> = new Map();
 
   constructor(config?: Partial<GtsConfig>) {
     this.config = {
@@ -303,8 +302,6 @@ export class GtsStore {
     const normalizedUri = stripUriPrefix(uri);
 
     if (Gts.isValidGtsID(normalizedUri)) {
-      const compileError = this.schemaCompileErrors.get(normalizedUri);
-      if (compileError) throw new Error(`Unresolvable invalid GTS schema '${normalizedUri}': ${compileError}`);
       const entity = this.get(normalizedUri);
       if (entity && entity.isSchema) {
         return entity.content;
@@ -376,12 +373,15 @@ export class GtsStore {
     if (!schemaUnchanged) {
       if (entity.isSchema && entity.content) assertSafeSchemaPatterns(entity.content);
       if (previous?.isSchema) this.removeAjvSchema(entity.id);
-      this.schemaCompileErrors.delete(entity.id);
       try {
         if (entity.isSchema && entity.content) this.addAjvSchema(entity);
-      } catch (error) {
+      } catch {
+        // A document that clears `assertSafeSchemaPatterns` but still fails Ajv
+        // compilation (e.g. an unsupported `$schema` dialect) must not leave a
+        // half-added schema behind; roll the Ajv registration back. The entity
+        // itself is still stored in `byId` - `validateSchema(id)` recompiles
+        // and surfaces the failure on demand.
         this.removeAjvSchema(entity.id);
-        this.schemaCompileErrors.set(entity.id, error instanceof Error ? error.message : String(error));
       }
     }
     this.byId.set(entity.id, entity);
@@ -407,7 +407,6 @@ export class GtsStore {
       return;
     }
     this.byId.delete(id);
-    this.schemaCompileErrors.delete(id);
     this.invalidateIndexes();
     if (entity.isSchema) {
       try {
