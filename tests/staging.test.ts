@@ -35,7 +35,9 @@ describe('store staging isolation', () => {
     store.register(createJsonEntity({ $id: `gts://${id}`, $schema: DRAFT7, type: 'object', title: 'committed' }));
 
     // Stage a different version, then discard it: the committed one survives.
-    const token = store.stage(createJsonEntity({ $id: `gts://${id}`, $schema: DRAFT7, type: 'object', title: 'staged' }));
+    const token = store.stage(
+      createJsonEntity({ $id: `gts://${id}`, $schema: DRAFT7, type: 'object', title: 'staged' })
+    );
     expect(store.getCommitted(id)?.content.title).toBe('committed');
     store.discard(token);
     expect(store.getCommitted(id)?.content.title).toBe('committed');
@@ -70,8 +72,12 @@ describe('store staging isolation', () => {
   test('discarding one token leaves another staged entry for the same id', () => {
     const store = new GtsStore();
     const id = 'gts.x.unit.staging.iso.v1~';
-    const tokenA = store.stage(createJsonEntity({ $id: `gts://${id}`, $schema: DRAFT7, type: 'object', title: 'keep' }));
-    const tokenB = store.stage(createJsonEntity({ $id: `gts://${id}`, $schema: DRAFT7, type: 'object', title: 'drop' }));
+    const tokenA = store.stage(
+      createJsonEntity({ $id: `gts://${id}`, $schema: DRAFT7, type: 'object', title: 'keep' })
+    );
+    const tokenB = store.stage(
+      createJsonEntity({ $id: `gts://${id}`, $schema: DRAFT7, type: 'object', title: 'drop' })
+    );
     store.discard(tokenB);
     expect(store.commit(tokenA)).toBe('added');
     expect(store.getCommitted(id)?.content.title).toBe('keep');
@@ -164,7 +170,9 @@ describe('validate=true batch staging commit integrity', () => {
           properties: { x: { type: 'string', 'x-gts-ref': 'gts.x.tsdep._.a.v1~' } },
         },
       ];
-      const body = JSON.parse((await post(server, '/type-schemas?validate=true&gts-ref-validation=any-present', batch)).body);
+      const body = JSON.parse(
+        (await post(server, '/type-schemas?validate=true&gts-ref-validation=any-present', batch)).body
+      );
       expect(body.ok).toBe(false);
       expect(body.results[0].ok).toBe(false);
       expect(body.results[1].ok).toBe(false);
