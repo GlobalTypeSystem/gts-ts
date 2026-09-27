@@ -1025,6 +1025,46 @@ describe('GTS Store Operations', () => {
       expect(ids).toContain('gts.a.b.c.d.v1~a.b.c.d.v1.0');
       expect(ids).toContain('gts.a.b.c.e.v1~a.b.c.e.v1.0');
     });
+
+    // Regression for the indexed wildcard lookup: its binary-search prefix
+    // used to be cut at a literal string boundary, so a version token in a
+    // non-final segment made it miss version-flexible matches that the
+    // authoritative `matchIDPattern` scan accepts (a major-only segment
+    // matches any minor). The indexed result MUST equal a brute-force linear
+    // scan for every pattern, especially these version-flexible ones.
+    test('indexed wildcard query matches a linear matchIDPattern scan for version-flexible patterns', () => {
+      const store = new GtsStore();
+      const ids = [
+        'gts.x.pkg.ns.base.v1~x.pkg.ns.item.v1~',
+        'gts.x.pkg.ns.base.v1.2~x.pkg.ns.item.v1~',
+        'gts.x.pkg.ns.base.v1.5~x.pkg.ns.other.v2~',
+        'gts.x.pkg.ns.base.v2~x.pkg.ns.item.v1~',
+        'gts.x.pkg.ns.other.v1~x.pkg.ns.item.v1~',
+      ];
+      for (const id of ids) store.register(createJsonEntity({ $id: `gts://${id}` }));
+
+      const patterns = [
+        'gts.x.pkg.ns.base.v1~x.pkg.ns.*',
+        'gts.x.pkg.ns.base.v1.2~x.pkg.ns.*',
+        'gts.x.pkg.ns.base.v1~x.pkg.ns.item.v1~*',
+        'gts.x.pkg.ns.*',
+        'gts.x.pkg.ns.base.v2~*',
+      ];
+      for (const pattern of patterns) {
+        const indexed = store.query(pattern).sort();
+        const linear = ids.filter((id) => matchIDPattern(id, pattern).match).sort();
+        expect(indexed).toEqual(linear);
+      }
+
+      // Concretely: the version-flexible first segment must surface BOTH the
+      // `v1` and the `v1.2` base entities, which the old prefix dropped.
+      expect(store.query('gts.x.pkg.ns.base.v1~x.pkg.ns.*')).toEqual(
+        expect.arrayContaining([
+          'gts.x.pkg.ns.base.v1~x.pkg.ns.item.v1~',
+          'gts.x.pkg.ns.base.v1.2~x.pkg.ns.item.v1~',
+        ])
+      );
+    });
   });
 
   describe('OP#11 - Attribute Access', () => {

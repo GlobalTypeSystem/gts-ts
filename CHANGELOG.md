@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Batch `POST /type-schemas` registration now forwards the request query string, so `?validate=true` and `?gts-ref-validation=…` apply to every entry exactly as on `POST /entities` (previously silently dropped, skipping validation and accepting bogus `gts-ref-validation` values).
+- The indexed wildcard query lookup (`GtsQuery.query` / `/query` and the wildcard existence check in transitive validation) no longer misses version-flexible matches: its binary-search prefix is cut before the first version token so it returns the same results as a linear `matchIDPattern` scan.
 
 ## [0.7.0] - 2026-09-21
 

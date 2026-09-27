@@ -161,7 +161,22 @@ export class GtsStore {
     if (!wildcard) {
       return ids.filter((id) => Gts.matchIDPattern(id, pattern, { chainSuffixMatchesSelf }).match);
     }
-    const prefix = pattern.slice(0, -1).replace(/~$/, '');
+    // The binary search only narrows the scan window; `matchIDPattern` remains
+    // the authority on which candidates match. For that narrowing to be sound
+    // the search prefix MUST be a literal prefix of every matching id, or
+    // matches get silently dropped. Version tokens break the naive
+    // `pattern.slice(0, -1)` prefix: `matchIDPattern` is version-flexible - a
+    // major-only pattern segment (`type.v1`) matches any minor (`type.v1.2`),
+    // and `type.v0` matches a version-omitted candidate - so the characters at
+    // and after a version token are not guaranteed to appear verbatim in a
+    // match. Everything before the first version token (the exact-match
+    // vendor.package.namespace.type of each fully-specified leading segment)
+    // IS required literally, so cut the prefix there; when no version token
+    // precedes the `*`, the de-starred pattern (sans any trailing `~`) is
+    // itself a safe literal prefix.
+    const deStarred = pattern.slice(0, -1);
+    const versionIndex = deStarred.search(/\.v\d/);
+    const prefix = versionIndex >= 0 ? deStarred.slice(0, versionIndex) : deStarred.replace(/~$/, '');
     let low = 0;
     let high = ids.length;
     while (low < high) {
