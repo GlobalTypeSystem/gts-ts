@@ -3,6 +3,7 @@ import AjvCore from 'ajv/dist/core';
 import Ajv2019 from 'ajv/dist/2019';
 import Ajv2020 from 'ajv/dist/2020';
 import { applyGtsFormats } from './formats';
+import { createLinearRegExp } from './regex-engine';
 import { isPlainSchemaObject, contentHash, cloneJsonEntity } from './json-canonical';
 import { dialectOf, canonicalDialectUri } from './schema-dialect';
 import { assertSafeSchemaPatterns } from './schema-safety';
@@ -110,6 +111,10 @@ export class GtsStore {
       loadSchema: this.loadSchema.bind(this),
       validateFormats: true,
       allErrors: true,
+      // Compile `pattern` / `patternProperties` with RE2's linear-time engine
+      // so an untrusted schema cannot cause catastrophic backtracking (ReDoS);
+      // see regex-engine.ts.
+      code: { regExp: createLinearRegExp },
     };
     this.ajv = new Ajv(options);
     this.ajv2019 = new Ajv2019(options);

@@ -1956,6 +1956,33 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
       expect(store.get(id)?.content.$schema).toBe('https://example.com/not-a-json-schema-dialect');
     });
 
+    test('matches a catastrophic-backtracking pattern in linear time (ReDoS immunity)', () => {
+      // `pattern` / `patternProperties` are compiled by Ajv with RE2's
+      // linear-time engine, so a classic catastrophic pattern resolves fast on
+      // an adversarial input instead of hanging - the guarantee gts-go and
+      // gts-python get from a match timeout. On the backtracking platform
+      // `RegExp` this input would pin a CPU for many seconds; a generous budget
+      // keeps the test about algorithmic blow-up (a hang), not micro-timing.
+      const store = new GtsStore();
+      const id = 'gts.x.security.regex.redos.v1~';
+      store.register(
+        createJsonEntity({
+          $id: `gts://${id}`,
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'string',
+          pattern: '(a+)+$',
+        })
+      );
+      const adversarial = 'a'.repeat(50_000) + '!';
+      const start = Date.now();
+      const result = store.validateTransientInstance(adversarial, id, null);
+      const elapsedMs = Date.now() - start;
+      // The trailing '!' means it does not match, so validation fails - but the
+      // point is that it *returns* quickly rather than backtracking forever.
+      expect(result.ok).toBe(false);
+      expect(elapsedMs).toBeLessThan(2000);
+    });
+
     test('exposes cloned entries through the store abstraction', () => {
       const store = new GtsStore();
       const id = 'gts.x.query.entries.item.v1~x.query._.instance.v1.0';

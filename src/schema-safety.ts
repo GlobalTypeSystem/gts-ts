@@ -8,14 +8,15 @@
  * `store.ts` to keep the security seam self-contained and testable (parallels
  * the dedicated safety checks in the sibling implementations).
  *
- * Regex safety is a length bound rather than a static-analysis heuristic: a
- * star-height style check (previously via `safe-regex2`) rejected many common,
+ * ReDoS protection itself does NOT live here: `pattern` / `patternProperties`
+ * are compiled by Ajv with RE2's linear-time engine (see regex-engine.ts), so
+ * catastrophic backtracking is impossible by construction — the same guarantee
+ * gts-go/gts-python get from a match timeout. The `MAX_REGEX_LEN` bound below
+ * is only a cheap resource cap on the pattern source (a length bound alone
+ * would not stop backtracking on a backtracking engine); it replaced an earlier
+ * `safe-regex2` star-height heuristic that false-rejected many common,
  * genuinely linear-time patterns (ISO-8601 date-time, semver, dotted-segment
- * ids), while a bound on the source length caps what an attacker can feed the
- * compiler without penalizing well-formed patterns. This mirrors gts-rust's
- * `MAX_REGEX_LEN`; gts-go instead runs patterns through a match-timeout
- * engine. Ajv compiles the pattern with the platform `RegExp`, so ECMA-262
- * features (lookahead, backreferences) remain supported.
+ * ids).
  */
 
 import { MAX_REGEX_LEN, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS, EntityContentDepthError } from './types';
