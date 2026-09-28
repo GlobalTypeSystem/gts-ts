@@ -1071,6 +1071,41 @@ export class GtsStore {
     return `${e.instancePath || '/'} ${e.message}`;
   }
 
+  /**
+   * Trait-aware rendering of a single Ajv error from the OP#13 completeness
+   * check. Unlike {@link formatValidationError}, which leaks Ajv's bare root
+   * path (`/`) and generic "property" wording, this names the offending
+   * *trait* and states the constraint in trait terms, so the author knows to
+   * look in `x-gts-traits` rather than the type's own `properties`.
+   */
+  private formatTraitValidationError(e: import('ajv').ErrorObject): string {
+    // The materialized traits object is what Ajv validated, so a leaf's
+    // instancePath (minus the leading `/`) is the trait name/path.
+    const traitPath = e.instancePath.replace(/^\//, '').replace(/\//g, '.');
+    const traitName = traitPath ? `trait '${traitPath}'` : 'traits';
+
+    if (e.keyword === 'required') {
+      return `missing required trait '${(e.params as any)?.missingProperty}'`;
+    }
+    if (e.keyword === 'type') {
+      const types = Array.isArray(e.params?.type) ? e.params.type : [e.params?.type];
+      return `${traitName} must be of type ${types.map((t: string) => `'${t}'`).join(', ')}`;
+    }
+    if (e.keyword === 'const') {
+      return `${traitName} must equal ${JSON.stringify((e.params as any)?.allowedValue)}`;
+    }
+    if (e.keyword === 'enum') {
+      return `${traitName} must be one of ${JSON.stringify((e.params as any)?.allowedValues)}`;
+    }
+    // Keep the registered x-gts-ref keyword named so an x-gts-ref trait failure
+    // is distinguishable from a plain structural mismatch (parity with
+    // formatValidationError).
+    if (e.keyword === 'x-gts-ref') {
+      return `${traitName} x-gts-ref: ${e.message}`;
+    }
+    return `${traitName} ${e.message}`;
+  }
+
   private normalizeSchema(schema: any): any {
     assertSafeSchemaPatterns(schema);
     return this.normalizeSchemaRecursive(schema);
@@ -2325,12 +2360,18 @@ export class GtsStore {
         this.normalizeSchema(schemaForValidation)
       );
       if (!this.withSelectedType(schemaId, () => validate(materialized))) {
-        const errors =
-          validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Trait validation failed';
+        const details =
+          validate.errors?.map((e) => this.formatTraitValidationError(e)).join('; ') ||
+          'trait values do not satisfy the effective trait schema';
+        // A single, trait-specific hint (not repeated per error) telling the
+        // author the three ways to satisfy the completeness check.
+        const hint =
+          'a non-abstract type must satisfy every trait its x-gts-traits-schema requires ' +
+          '(supply values via x-gts-traits, add a default in the trait schema, or mark the type x-gts-abstract)';
         return {
           id: schemaId,
           ok: false,
-          error: `trait validation: ${errors}`,
+          error: `trait validation: ${details} — ${hint}`,
           errors: this.validationIssuesFromAjv(validate.errors, '/x-gts-traits'),
         };
       }
