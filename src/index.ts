@@ -164,6 +164,15 @@ export class GTS {
     return this.store.commit(token);
   }
 
+  /**
+   * Atomically publish a set of staged tokens all-or-nothing: if any target
+   * conflicts, nothing is published. Returns one outcome per token, positionally
+   * aligned with `tokens`. See {@link GtsStore.commitBatch}.
+   */
+  commitBatch(tokens: string[]): CommitOutcome[] {
+    return this.store.commitBatch(tokens);
+  }
+
   /** Discard a staged entity by its staging token; the committed state is untouched. */
   discard(token: string): void {
     this.store.discard(token);

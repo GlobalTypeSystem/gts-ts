@@ -608,18 +608,25 @@ export class GtsServer {
         survivors = stillGood;
       }
 
-      // Phase 3: publish the entries that passed. A commit can still report a
-      // conflict if the same id was already committed with different content.
-      for (const { index, typeId, token } of survivors) {
-        const outcome = this.store.commit(token);
-        pending.delete(token);
-        if (outcome === 'conflict') {
+      // Phase 3: publish the survivors AS ONE ATOMIC UNIT. A per-entry commit
+      // loop could publish a dependent schema after its parent or $ref target id
+      // was won with different content than the dependent was validated against;
+      // the store-level batch compare-and-swap publishes none if any target
+      // conflicts.
+      const survivorTokens = survivors.map((s) => s.token);
+      const outcomes = this.store.commitBatch(survivorTokens);
+      for (let s = 0; s < survivors.length; s++) {
+        const { index, typeId, token } = survivors[s];
+        if (outcomes[s] === 'conflict') {
+          // Nothing was published for a conflicting entry; leave its token in
+          // `pending` so the finally discards it.
           results[index] = {
             ok: false,
             type_id: typeId,
             error: `Entity '${typeId}' is already registered with different content`,
           };
         } else {
+          pending.delete(token);
           results[index] = { ok: true, type_id: typeId };
         }
       }

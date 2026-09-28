@@ -530,6 +530,60 @@ export class GtsStore {
   }
 
   /**
+   * Atomically publish a whole set of staged `tokens` as one all-or-nothing
+   * unit. Every token's target is checked against the committed store (and
+   * against its batch siblings); if ANY would conflict - a committed entity
+   * holds the id with different content, an intra-batch duplicate disagrees, or
+   * a token is unknown - NOTHING is published. This closes the gap where a
+   * per-entry commit loop could publish a dependent schema against a target
+   * whose content changed after the dependent was validated. Returns one
+   * outcome per token, positionally aligned with `tokens`; on a batch conflict
+   * the whole set reports `'conflict'` and the tokens remain staged for the
+   * caller to discard.
+   */
+  commitBatch(tokens: string[]): CommitOutcome[] {
+    const entries: Array<{ key: string; entity: JsonEntity } | undefined> = [];
+    const outcomes: CommitOutcome[] = [];
+    const pendingByKey = new Map<string, JsonEntity>();
+    let anyConflict = false;
+    for (const token of tokens) {
+      const entry = this.staged.get(token);
+      if (!entry) {
+        entries.push(undefined);
+        outcomes.push('conflict');
+        anyConflict = true;
+        continue;
+      }
+      entries.push(entry);
+      const existing = pendingByKey.get(entry.key) ?? this.byId.get(entry.key);
+      if (existing) {
+        const identical = contentHash(existing.content) === contentHash(entry.entity.content);
+        const outcome: CommitOutcome = identical || this.config.allowEntityUpdates ? 'unchanged' : 'conflict';
+        if (outcome === 'conflict') anyConflict = true;
+        outcomes.push(outcome);
+      } else {
+        outcomes.push('added');
+      }
+      pendingByKey.set(entry.key, entry.entity);
+    }
+
+    // All-or-nothing: if any target conflicts, publish none and report every
+    // entry as a conflict. The tokens stay staged for the caller to discard.
+    if (anyConflict) return tokens.map(() => 'conflict');
+
+    for (let i = 0; i < tokens.length; i++) {
+      const entry = entries[i]!;
+      this.removeStaged(tokens[i], entry);
+      if (outcomes[i] === 'added') {
+        this.byId.set(entry.key, entry.entity);
+        this.refreshAjvForKey(entry.key);
+      }
+    }
+    this.invalidateIndexes();
+    return outcomes;
+  }
+
+  /**
    * Drop the staged entity named by `token` that failed validation. The
    * committed state is untouched: a client never observes the discarded
    * (invalid) entity, and any prior committed version under the same id

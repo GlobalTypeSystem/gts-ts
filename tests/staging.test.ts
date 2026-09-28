@@ -29,6 +29,40 @@ describe('store staging isolation', () => {
     expect(store.getCommitted(id)).toBeDefined();
   });
 
+  // Atomic batch publication (regression for the non-atomic commit loop): if a
+  // survivor's target was committed with different content after staging, the
+  // whole batch publishes nothing rather than committing the dependent against
+  // changed content.
+  test('commitBatch publishes nothing when a target conflicts with committed content', () => {
+    const store = new GtsStore();
+    const parent = 'gts.x.tsatomic._.parent.v1~';
+    const child = 'gts.x.tsatomic._.child.v1~';
+    const cToken = store.stage(
+      createJsonEntity({ $id: `gts://${child}`, $schema: DRAFT7, type: 'object', title: 'ok' })
+    );
+    const pToken = store.stage(
+      createJsonEntity({ $id: `gts://${parent}`, $schema: DRAFT7, type: 'object', title: 'staged' })
+    );
+    // A concurrent writer commits the parent id with different content after staging.
+    store.register(createJsonEntity({ $id: `gts://${parent}`, $schema: DRAFT7, type: 'object', title: 'committed' }));
+
+    expect(store.commitBatch([cToken, pToken])).toEqual(['conflict', 'conflict']);
+    // Nothing from the batch was published; the parent keeps its committed content.
+    expect(store.getCommitted(child)).toBeUndefined();
+    expect(store.getCommitted(parent)?.content.title).toBe('committed');
+  });
+
+  test('commitBatch publishes the whole set when no target conflicts', () => {
+    const store = new GtsStore();
+    const idA = 'gts.x.tsatomic2._.a.v1~';
+    const idB = 'gts.x.tsatomic2._.b.v1~';
+    const a = store.stage(createJsonEntity({ $id: `gts://${idA}`, $schema: DRAFT7, type: 'object', title: 'a' }));
+    const b = store.stage(createJsonEntity({ $id: `gts://${idB}`, $schema: DRAFT7, type: 'object', title: 'b' }));
+    expect(store.commitBatch([a, b])).toEqual(['added', 'added']);
+    expect(store.getCommitted(idA)).toBeDefined();
+    expect(store.getCommitted(idB)).toBeDefined();
+  });
+
   test('discarding a staged replacement preserves the committed version', () => {
     const store = new GtsStore({ allowEntityUpdates: true });
     const id = 'gts.x.unit.staging.replace.v1~';
@@ -183,10 +217,10 @@ describe('validate=true batch staging commit integrity', () => {
     }
   });
 
-  // A batch that carries the same $id twice with different content must not
-  // silently keep only the last entry: exactly one commits and the conflicting
-  // duplicate is reported as not-ok.
-  test('a conflicting duplicate id within a batch is reported, not silently overwritten', async () => {
+  // A batch that carries the same $id twice with different content is internally
+  // inconsistent, so the atomic publish must keep NEITHER entry (no silent
+  // last-wins): the batch is rejected as a whole and nothing is committed.
+  test('a conflicting duplicate id within a batch is rejected atomically, not silently overwritten', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
     try {
       const batch = [
@@ -195,7 +229,10 @@ describe('validate=true batch staging commit integrity', () => {
       ];
       const body = JSON.parse((await post(server, '/type-schemas?validate=true', batch)).body);
       expect(body.ok).toBe(false);
-      expect(body.results[0].ok).not.toBe(body.results[1].ok);
+      expect(body.results[0].ok).toBe(false);
+      expect(body.results[1].ok).toBe(false);
+      // All-or-nothing: nothing from the inconsistent batch is published.
+      expect(JSON.parse((await get(server, '/entities/gts.x.tsdup._.t.v1~')).body).ok).toBe(false);
     } finally {
       await server.stop();
     }
