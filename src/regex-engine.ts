@@ -262,10 +262,12 @@ export function compileSafePattern(pattern: string, flags: string): PatternMatch
   }
   const split = compileSplitLookarounds(pattern, flags);
   if (split) return split;
+  // No "; " inside the message: callers join several validation errors with
+  // "; " (and consumers split on it), so it must stay one unit.
   throw new Error(
     `Unsupported pattern /${pattern}/: it cannot be matched in guaranteed linear time (${re2Error}). ` +
       'Lookarounds are supported directly after a leading `^` and fixed-width atoms, or directly before a ' +
-      'trailing `$` and fixed-width atoms; backreferences are not supported.'
+      'trailing `$` and fixed-width atoms. Backreferences are not supported.'
   );
 }
 
