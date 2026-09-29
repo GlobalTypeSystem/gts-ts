@@ -1132,7 +1132,7 @@ export class GtsCompatibility {
       // can reach the engine. That makes the check inconclusive - it must not
       // take the caller down with it.
       const reason = `Compatibility check failed: ${error instanceof Error ? error.message : String(error)}`;
-      return this.buildResult(normalizedOld, normalizedNew, 'unknown', 'unknown', [reason], []);
+      return this.buildResult(normalizedOld, normalizedNew, 'unknown', 'unknown', [reason], [reason]);
     }
   }
 

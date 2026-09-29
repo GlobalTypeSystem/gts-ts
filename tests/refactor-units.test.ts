@@ -10,6 +10,7 @@
 import {
   GTS,
   Gts,
+  GtsCompatibility,
   GTS_URI_PREFIX,
   MAX_REGEX_LEN,
   MAX_SCHEMA_DEPTH,
@@ -279,5 +280,24 @@ describe('compatibility diagnostics', () => {
       expect(['backward', 'forward']).toContain(d.direction);
       expect(d.message.length).toBeGreaterThan(0);
     }
+  });
+
+  it('keeps both unknown verdicts recoverable when schema comparison throws', () => {
+    const gts = new GTS({ validateRefs: false });
+    const draft7 = 'http://json-schema.org/draft-07/schema#';
+    const oldId = 'gts.x.unit.diag.error.v1.0~';
+    const newId = 'gts.x.unit.diag.error.v1.1~';
+    gts.register({ $id: oldId, $schema: draft7, type: 'object' });
+    gts.register({ $id: newId, $schema: draft7, type: 'object' });
+    jest.spyOn(GtsCompatibility, 'compareSchemas').mockImplementation(() => {
+      throw new Error('forced failure');
+    });
+
+    const result = gts.checkCompatibility(oldId, newId);
+    expect(result.backward_compatibility).toBe(verdictFromDiagnostics(result.diagnostics, 'backward'));
+    expect(result.forward_compatibility).toBe(verdictFromDiagnostics(result.diagnostics, 'forward'));
+    expect(result.full_compatibility).toBe(verdictFromDiagnostics(result.diagnostics));
+    expect(result.backward_errors).toEqual(['Compatibility check failed: forced failure']);
+    expect(result.forward_errors).toEqual(['Compatibility check failed: forced failure']);
   });
 });

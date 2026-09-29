@@ -565,7 +565,7 @@ export class GtsStore {
       const existing = pendingByKey.get(entry.key) ?? this.byId.get(entry.key);
       if (existing) {
         const identical = contentHash(existing.content) === contentHash(entry.entity.content);
-        const outcome: CommitOutcome = identical || this.config.allowEntityUpdates ? 'unchanged' : 'conflict';
+        const outcome: CommitOutcome = identical ? 'unchanged' : this.config.allowEntityUpdates ? 'added' : 'conflict';
         if (outcome === 'conflict') anyConflict = true;
         outcomes.push(outcome);
       } else {

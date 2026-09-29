@@ -63,6 +63,16 @@ describe('store staging isolation', () => {
     expect(store.getCommitted(idB)).toBeDefined();
   });
 
+  test('commitBatch publishes changed content when updates are enabled', () => {
+    const store = new GtsStore({ allowEntityUpdates: true });
+    const id = 'gts.x.tsatomic3._.updated.v1~';
+    store.register(createJsonEntity({ $id: `gts://${id}`, $schema: DRAFT7, type: 'object', title: 'old' }));
+    const token = store.stage(createJsonEntity({ $id: `gts://${id}`, $schema: DRAFT7, type: 'object', title: 'new' }));
+
+    expect(store.commitBatch([token])).toEqual(['added']);
+    expect(store.getCommitted(id)?.content.title).toBe('new');
+  });
+
   test('discarding a staged replacement preserves the committed version', () => {
     const store = new GtsStore({ allowEntityUpdates: true });
     const id = 'gts.x.unit.staging.replace.v1~';
