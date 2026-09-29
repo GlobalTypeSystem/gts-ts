@@ -1,9 +1,8 @@
 /**
- * ReDoS-safe `pattern` engine (src/regex-engine.ts): every accepted pattern is
- * matched in linear time via RE2, including the common ECMA-262 lookaround
- * idioms, which are split into RE2 checks with exactly the semantics of the
- * platform RegExp. Patterns that can't be matched in guaranteed linear time
- * are rejected.
+ * ReDoS-safe `pattern` engine (src/regex-engine.ts): patterns use linear-time
+ * RE2 where possible, including common ECMA-262 lookaround idioms split into
+ * RE2 checks. Remaining ECMA-262 constructs use the native engine inside a
+ * bounded VM execution.
  */
 
 import { GtsStore, createJsonEntity } from '../src';
@@ -81,11 +80,16 @@ describe('compileSafePattern', () => {
   });
 
   test.each([
-    ['a lookaround after a quantifier', '^(a+)+(?=b)'],
-    ['an unanchored lookaround', '(a+)+(?=b)'],
-    ['a backreference', '^(a+)\\1$'],
-  ])('rejects %s, which cannot be matched in guaranteed linear time', (_name, pattern) => {
-    expect(() => compileSafePattern(pattern, 'u')).toThrow(/Unsupported pattern .*guaranteed linear time/);
+    ['a lookaround after a quantifier', '^(a+)+(?=b)', 'abx'],
+    ['an unanchored lookaround', 'a(?=b)', 'zabx'],
+    ['a lookbehind', '(?<=\\d{3})px', '123pxa'],
+    ['a backreference', '^(a+)\\1$', 'aaab'],
+    ['a word boundary in a lookahead', '^(?=a\\b)', 'ab!'],
+  ])('matches %s with bounded native ECMA-262 semantics', (_name, pattern, alphabet) => {
+    const safe = compileSafePattern(pattern, 'u');
+    const native = new RegExp(pattern, 'u');
+    const mismatches = allStrings(alphabet, 5).filter((s) => safe.test(s) !== native.test(s));
+    expect(mismatches).toEqual([]);
   });
 });
 
@@ -105,9 +109,9 @@ describe('schema patterns with lookaround', () => {
     expect(store.validateTransientInstance('P', id, null).ok).toBe(false);
   });
 
-  test('an unsupported lookaround surfaces as a validation error, not a hang', () => {
+  test('a backtracking ECMA-262 pattern is bounded', () => {
     const store = new GtsStore();
-    const id = 'gts.x.security.regex.unsupported.v1~';
+    const id = 'gts.x.security.regex.bounded.v1~';
     store.register(
       createJsonEntity({
         $id: `gts://${id}`,
@@ -116,8 +120,10 @@ describe('schema patterns with lookaround', () => {
         pattern: '^(a+)+(?=b)',
       })
     );
+    const start = Date.now();
     const result = store.validateTransientInstance('a'.repeat(50_000), id, null);
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/Unsupported pattern/);
+    expect(result.error).toContain('regular expression match timed out');
+    expect(Date.now() - start).toBeLessThan(2000);
   });
 });

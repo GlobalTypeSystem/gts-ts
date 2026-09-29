@@ -8,27 +8,19 @@
  * but does NOT bound match time on a backtracking engine, so a short pattern
  * such as `(a+)+$` can still hang validation.
  *
- * Every pattern is therefore matched with RE2 (via `re2-wasm`), whose matching
- * time is guaranteed linear, so catastrophic backtracking is impossible by
- * construction — the protection the sibling implementations get at runtime
- * (gts-go via `regexp2`'s `MatchTimeout`, gts-python via the `regex` module's
- * match `timeout`), achieved without making validation asynchronous.
- * `MAX_REGEX_LEN` is retained purely as a cheap resource cap.
+ * Patterns supported by RE2 are matched with `re2-wasm`, whose matching time
+ * is guaranteed linear. Common anchored lookaround idioms are split into RE2
+ * checks so they retain exact ECMA-262 semantics without backtracking.
  *
- * JSON Schema (and the GTS spec) define `pattern` in the ECMA-262 dialect,
- * which has lookaround; RE2 does not. The common lookaround idioms are still
- * supported, exactly and in linear time, by splitting them into RE2 checks:
- * lookarounds that sit directly after a `^` anchor and a fixed-width prefix
- * (e.g. `^P(?!$).+`, `^(?=.*[A-Z])(?=.*\d).{8,}$`), or directly before a
- * final `$` and a fixed-width suffix (e.g. `^[a-z0-9-]+(?<!-)$`). A lookaround
- * elsewhere, or a backreference, cannot be matched in guaranteed linear time
- * and is rejected when the schema is compiled, with an explanatory error.
- *
- * (Static ReDoS analysers were evaluated as a fallback for the remaining
- * patterns and rejected: `redos-detector` 6.1.4 reports the exponential
- * `^(a+)+(?=b)` as safe, so its verdict cannot serve as a safety guarantee.)
+ * JSON Schema requires the rest of ECMA-262 as well, including arbitrary
+ * lookarounds and backreferences. Those patterns use V8's native `RegExp`
+ * inside a bounded `node:vm` execution. The VM timeout interrupts catastrophic
+ * backtracking while preserving the platform's exact ECMA-262 behavior. This
+ * is the same synchronous timeout mechanism used by the established
+ * `super-regex` package. `MAX_REGEX_LEN` remains a cheap compilation cap.
  */
 
+import { Script, createContext, type Context } from 'node:vm';
 import { RE2 } from 're2-wasm';
 import { parse, type AstNode as RegexAstNode } from 'regjsparser';
 
@@ -39,6 +31,39 @@ type AstNode = RegexAstNode<typeof PARSE_FEATURES>;
 interface PatternMatcher {
   test(input: string): boolean;
   toString(): string;
+}
+
+const NATIVE_MATCH_TIMEOUT_MS = 250;
+const NATIVE_TEST_SCRIPT = new Script('result = regex.test(input)');
+
+class BoundedNativePattern implements PatternMatcher {
+  private readonly regex: RegExp;
+  private readonly state: { regex: RegExp; input: string; result: boolean };
+  private readonly context: Context;
+
+  constructor(pattern: string, flags: string) {
+    this.regex = new RegExp(pattern, flags);
+    this.state = { regex: this.regex, input: '', result: false };
+    this.context = createContext(this.state);
+  }
+
+  test(input: string): boolean {
+    this.state.input = input;
+    this.state.result = false;
+    try {
+      NATIVE_TEST_SCRIPT.runInContext(this.context, { timeout: NATIVE_MATCH_TIMEOUT_MS });
+      return this.state.result;
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
+        throw new Error('regular expression match timed out');
+      }
+      throw error;
+    }
+  }
+
+  toString(): string {
+    return this.regex.toString();
+  }
 }
 
 type LookaroundBehavior = 'lookahead' | 'negativeLookahead' | 'lookbehind' | 'negativeLookbehind';
@@ -249,26 +274,17 @@ function compileSplitLookarounds(pattern: string, flags: string): PatternMatcher
 }
 
 /**
- * Compile a JSON Schema `pattern` for linear-time matching; see the module
- * comment. Throws for a pattern that can't be matched in guaranteed linear
- * time (a lookaround outside the supported positions, or a backreference).
+ * Compile a JSON Schema `pattern` with bounded matching time; see the module
+ * comment. RE2 is preferred, with native ECMA-262 as the bounded fallback.
  */
 export function compileSafePattern(pattern: string, flags: string): PatternMatcher {
-  let re2Error: string;
   try {
     return compileRe2(pattern, flags) as unknown as PatternMatcher;
-  } catch (e) {
-    re2Error = e instanceof Error ? e.message : String(e);
+  } catch {
+    const split = compileSplitLookarounds(pattern, flags);
+    if (split) return split;
+    return new BoundedNativePattern(pattern, withUnicode(flags));
   }
-  const split = compileSplitLookarounds(pattern, flags);
-  if (split) return split;
-  // No "; " inside the message: callers join several validation errors with
-  // "; " (and consumers split on it), so it must stay one unit.
-  throw new Error(
-    `Unsupported pattern /${pattern}/: it cannot be matched in guaranteed linear time (${re2Error}). ` +
-      'Lookarounds are supported directly after a leading `^` and fixed-width atoms, or directly before a ' +
-      'trailing `$` and fixed-width atoms. Backreferences are not supported.'
-  );
 }
 
 /**

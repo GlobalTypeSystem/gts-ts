@@ -8,6 +8,8 @@ GTS [Global Type System](https://github.com/globaltypesystem/gts-spec) is a simp
 
 **Targets gts-spec [v0.14.4](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.14.4)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for breaking changes.
 
+The package targets Node.js 18 and later. Its bounded ECMA-262 regular-expression fallback uses the Node.js `vm` runtime and is not available in browser-only environments.
+
 ## Roadmap
 
 Featureset:

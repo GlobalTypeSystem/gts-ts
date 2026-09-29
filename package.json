@@ -32,6 +32,9 @@
   ],
   "author": "Global Type System",
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
   "devDependencies": {
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.30",

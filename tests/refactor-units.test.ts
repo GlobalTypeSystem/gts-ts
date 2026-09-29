@@ -95,8 +95,8 @@ describe('json canonicalization', () => {
 });
 
 describe('dialect detection', () => {
-  it('defaults to draft-07 when $schema is absent', () => {
-    expect(dialectOf({})).toBe('draft-07');
+  it('rejects a missing $schema', () => {
+    expect(() => dialectOf({})).toThrow(/\$schema/);
   });
 
   it('classifies supported dialects', () => {
@@ -105,10 +105,13 @@ describe('dialect detection', () => {
     expect(dialectOf({ $schema: 'https://json-schema.org/draft/2020-12/schema' })).toBe('2020-12');
   });
 
-  it('rejects an unsupported or spoofed dialect host', () => {
+  it('rejects old, future, malformed, or spoofed dialects', () => {
+    expect(() => dialectOf({ $schema: 'http://json-schema.org/draft-06/schema#' })).toThrow();
+    expect(() => dialectOf({ $schema: 'https://json-schema.org/draft/2025-01/schema' })).toThrow();
     expect(() => dialectOf({ $schema: 'https://evil.example/draft-07/schema' })).toThrow();
     expect(() => dialectOf({ $schema: 'not-a-uri' })).toThrow();
     expect(() => dialectOf({ $schema: '' })).toThrow();
+    expect(() => canonicalDialectUri('2025-01')).toThrow();
   });
 
   it('round-trips a dialect to its canonical URI bucket', () => {

@@ -343,6 +343,10 @@ export class GTS {
     return this.store.validateSchema(schemaId, refValidation);
   }
 
+  validateSchemaDocument(content: any, schemaId: string): ValidationResult {
+    return this.store.validateSchemaDocument(content, schemaId);
+  }
+
   validateSchemaAsync(
     schemaId: string,
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid

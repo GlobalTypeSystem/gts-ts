@@ -154,9 +154,16 @@ export class GtsStore {
   // detection lives in `schema-dialect.ts`.
   private ajvForSchema(schema: any): AjvCore {
     const dialect = dialectOf(schema);
-    if (dialect === '2020-12') return this.ajv2020;
-    if (dialect === '2019-09') return this.ajv2019;
-    return this.ajv;
+    switch (dialect) {
+      case 'draft-07':
+        return this.ajv;
+      case '2019-09':
+        return this.ajv2019;
+      case '2020-12':
+        return this.ajv2020;
+      default:
+        throw new Error(`Unsupported JSON Schema dialect: ${dialect}`);
+    }
   }
 
   private removeAjvSchema(id: string): void {
@@ -1811,12 +1818,11 @@ export class GtsStore {
     return unique.sort();
   }
 
-  private validateSchemaDocument(content: any, schemaId: string): ValidationResult {
+  private validateSchemaStructure(content: any, schemaId: string): ValidationResult {
     try {
       const normalized = this.normalizeSchema(content);
       const ajv = this.ajvForSchema(normalized);
-      const metaOk = ajv.validateSchema(normalized);
-      if (metaOk) return { id: schemaId, ok: true, error: '' };
+      if (ajv.validateSchema(normalized)) return { id: schemaId, ok: true, error: '' };
       const issues = this.validationIssuesFromAjv(ajv.errors);
       const error = (ajv.errors || []).map((item) => this.formatValidationError(item)).join('; ');
       return {
@@ -1825,6 +1831,24 @@ export class GtsStore {
         error: `JSON Schema validation failed: ${error}`,
         errors: issues,
       };
+    } catch (error) {
+      const message = `JSON Schema validation failed: ${error instanceof Error ? error.message : String(error)}`;
+      return {
+        id: schemaId,
+        ok: false,
+        error: message,
+        errors: [this.validationIssue(message, '/$schema', 'schema')],
+      };
+    }
+  }
+
+  validateSchemaDocument(content: any, schemaId: string): ValidationResult {
+    const structural = this.validateSchemaStructure(content, schemaId);
+    if (!structural.ok) return structural;
+    try {
+      const normalized = this.normalizeSchema(content);
+      this.ajvForSchema(normalized).compile(normalized);
+      return structural;
     } catch (error) {
       const message = `JSON Schema validation failed: ${error instanceof Error ? error.message : String(error)}`;
       return {

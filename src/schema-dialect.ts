@@ -11,8 +11,7 @@ import { JSON_SCHEMA_HOST } from './types';
 export type SchemaDialect = 'draft-07' | '2019-09' | '2020-12';
 
 /**
- * Classify a schema document's declared `$schema` dialect, defaulting to
- * `draft-07` when absent.
+ * Classify a schema document's declared `$schema` dialect.
  *
  * The Ajv registries are dialect-specific (each holds only its own dialect's
  * vocabulary), and instance validation compiles synchronously, so a `$ref`
@@ -32,7 +31,6 @@ export type SchemaDialect = 'draft-07' | '2019-09' | '2020-12';
  */
 export function dialectOf(schema: any): SchemaDialect {
   const dialect = schema?.$schema;
-  if (dialect === undefined) return 'draft-07';
   if (typeof dialect !== 'string' || dialect.length === 0) {
     throw new Error('$schema must declare a supported JSON Schema dialect');
   }
@@ -67,7 +65,14 @@ export function dialectOf(schema: any): SchemaDialect {
 
 /** Canonical meta-schema URI for a dialect bucket. */
 export function canonicalDialectUri(dialect: SchemaDialect | string): string {
-  if (dialect === '2019-09') return 'https://json-schema.org/draft/2019-09/schema';
-  if (dialect === '2020-12') return 'https://json-schema.org/draft/2020-12/schema';
-  return 'http://json-schema.org/draft-07/schema#';
+  switch (dialect) {
+    case 'draft-07':
+      return 'http://json-schema.org/draft-07/schema#';
+    case '2019-09':
+      return 'https://json-schema.org/draft/2019-09/schema';
+    case '2020-12':
+      return 'https://json-schema.org/draft/2020-12/schema';
+    default:
+      throw new Error(`Unsupported JSON Schema dialect: ${dialect}`);
+  }
 }

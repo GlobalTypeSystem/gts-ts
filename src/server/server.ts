@@ -311,7 +311,7 @@ export class GtsServer {
       }
 
       if (validate && entity.isSchema) {
-        const validationError = validateSchemaIdentityAndRefs(content);
+        const validationError = this.schemaStructuralError(content, entity.id);
         if (validationError) {
           reply.code(422);
           return {
@@ -414,6 +414,12 @@ export class GtsServer {
       // (transiently) before this point, so they register directly.
       if (validate && entity.isSchema) {
         const token = this.store.stage(content);
+        const documentResult = this.store.validateSchemaDocument(content, entity.id);
+        if (!documentResult.ok) {
+          this.store.discard(token);
+          reply.code(422);
+          return { ok: false, is_type_schema: true, error: documentResult.error };
+        }
         const parentResult = this.store.validateSchemaAgainstParent(entity.id, refValidation);
         if (!parentResult.ok) {
           this.store.discard(token);
@@ -673,15 +679,15 @@ export class GtsServer {
   // x-gts-ref existence and derived-vs-parent compatibility. Run after every
   // entry is staged so intra-batch references resolve regardless of order.
   private schemaReferenceError(content: any, id: string, refValidation: GtsRefValidationMode): string | null {
+    const documentResult = this.store.validateSchemaDocument(content, id);
+    if (!documentResult.ok) return documentResult.error;
     const xGtsRefValidator = new XGtsRefValidator(this.store.asEntityLookup());
     const xGtsRefErrors = xGtsRefValidator.validateSchema(content);
     if (xGtsRefErrors.length > 0) {
       return `x-gts-ref validation failed: ${xGtsRefErrors.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ')}`;
     }
     const parentResult = this.store.validateSchemaAgainstParent(id, refValidation);
-    if (!parentResult.ok) {
-      return `Derived schema is not compatible with base: ${parentResult.error}`;
-    }
+    if (!parentResult.ok) return `Derived schema is not compatible with base: ${parentResult.error}`;
     return null;
   }
 
