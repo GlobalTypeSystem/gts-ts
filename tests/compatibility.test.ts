@@ -514,6 +514,44 @@ describe('OP#8 - inconclusive checks report `unknown`', () => {
     expect(result.is_fully_compatible).toBe(false);
   });
 
+  test('a catastrophic base pattern matched against a pinned const stays bounded (ReDoS guard, CWE-1333)', () => {
+    // The const/enum-vs-base-pattern carve-out matches an untrusted schema
+    // `pattern` against a concrete value. Doing so with a raw `RegExp` lets a
+    // pattern such as `^(a+)+$` backtrack catastrophically against a long
+    // non-matching string and hang compatibility checking. The carve-out must
+    // route through the ReDoS-safe engine (regex-engine.ts) instead, so this
+    // resolves in linear time to the definitive `incompatible` verdict the
+    // provable mismatch warrants.
+    const gts = new GTS({ validateRefs: false });
+    const oldId = 'gts.x.unit.redos.patternconst.v1.0~';
+    const newId = 'gts.x.unit.redos.patternconst.v1.1~';
+
+    gts.register({
+      $id: oldId,
+      $schema: DRAFT7,
+      type: 'object',
+      required: ['a'],
+      properties: { a: { type: 'string', pattern: '^(a+)+$' } },
+      additionalProperties: false,
+    });
+    gts.register({
+      $id: newId,
+      $schema: DRAFT7,
+      type: 'object',
+      required: ['a'],
+      properties: { a: { type: 'string', const: 'a'.repeat(50_000) + '!' } },
+      additionalProperties: false,
+    });
+
+    const started = Date.now();
+    const result = gts.checkCompatibility(oldId, newId);
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThan(2000);
+    expect(result.forward_compatibility).toBe('incompatible');
+    expect(result.is_fully_compatible).toBe(false);
+  });
+
   test('an unresolvable type identifier is unknown rather than incompatible', () => {
     const gts = new GTS({ validateRefs: false });
 
