@@ -1,8 +1,19 @@
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { GTS, createJsonEntity, EntityConflictError, EntityContentDepthError, GtsRefValidationMode } from '../index';
+import {
+  GTS,
+  createJsonEntity,
+  EntityConflictError,
+  EntityContentDepthError,
+  GtsRefValidationMode,
+  GTS_PREFIX,
+  hasUriPrefix,
+  stripUriPrefix,
+  validateSchemaIdentityAndRefs,
+} from '../index';
 import { XGtsRefValidator } from '../x-gts-ref';
 import {
   ServerConfig,
+  DEFAULT_BODY_LIMIT_BYTES,
   EntityResponse,
   OperationResult,
   ListResult,
@@ -14,7 +25,6 @@ import {
   CastBody,
   QueryParams,
   ValidateTypeSchemaBody,
-  TypeSchemaRegisterBody,
   ValidateEntityBody,
   ValidateJsonResult,
 } from './types';
@@ -55,6 +65,11 @@ export class GtsServer {
       routerOptions: {
         maxParamLength: 2048,
       },
+      // Cap the request body explicitly rather than relying on Fastify's
+      // implicit 1 MiB default. Fastify buffers the whole body before a
+      // handler runs, so this bounds the memory a single request - including
+      // the array-bodied bulk routes - can force the server to allocate.
+      bodyLimit: config.bodyLimit ?? DEFAULT_BODY_LIMIT_BYTES,
       forceCloseConnections: true,
     });
 
@@ -155,7 +170,7 @@ export class GtsServer {
     this.fastify.get('/entities/:id', this.handleGetEntity.bind(this));
     this.fastify.post('/entities', this.handleAddEntity.bind(this));
     this.fastify.post('/entities/bulk', this.handleAddEntities.bind(this));
-    this.fastify.post('/type-schemas', this.handleAddTypeSchema.bind(this));
+    this.fastify.post('/type-schemas', this.handleAddTypeSchemas.bind(this));
 
     // OP#1 - Validate ID
     this.fastify.get('/validate-id', this.handleValidateID.bind(this));
@@ -270,8 +285,7 @@ export class GtsServer {
       Body: any;
       Querystring: { validate?: string; validation?: string; 'gts-ref-validation'?: string };
     }>,
-    reply: FastifyReply,
-    options?: { forceIsSchema?: boolean }
+    reply: FastifyReply
   ): Promise<OperationResult> {
     try {
       const content = request.body;
@@ -281,11 +295,7 @@ export class GtsServer {
         reply.code(422);
         return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
       }
-      // `forceIsSchema` (P6-2/P6-3): `POST /type-schemas` calls through here
-      // with the caller's declared intent - the registered entity IS a GTS
-      // Type Schema by construction, regardless of whether `content` embeds
-      // a `$schema`/root-type keyword the shape heuristic would key off.
-      const entity = createJsonEntity(content, undefined, options?.forceIsSchema);
+      const entity = createJsonEntity(content);
 
       // §9.11.1 - a malformed modifier declaration is always rejected: the
       // document cannot be interpreted, so there is nothing to register.
@@ -301,7 +311,7 @@ export class GtsServer {
       }
 
       if (validate && entity.isSchema) {
-        const validationError = this.validateSchemaStrict(content);
+        const validationError = this.schemaStructuralError(content, entity.id);
         if (validationError) {
           reply.code(422);
           return {
@@ -393,25 +403,26 @@ export class GtsServer {
         }
       }
 
-      // Register the entity
-      const previous = this.store.register(content, options?.forceIsSchema);
-
-      // A derived schema (chained `$id`) must be compatible with its GTS
-      // chain parent - e.g. it cannot drop a `required` field the parent
-      // declares. A literal `$$ref`/`$$id`/`$$schema` establishes no
-      // inheritance at all (they are not JSON Schema keywords), so a schema
-      // that relies on one for derivation must restate the parent's
-      // constraints itself or be rejected here.
+      // Publish the entity. A derived schema (chained `$id`) must be compatible
+      // with its GTS chain parent - e.g. it cannot drop a `required` field the
+      // parent declares - and `validateSchemaAgainstParent` looks the entity up
+      // by id, so it can only run once the entity is in the store. Rather than
+      // register (publish) then roll back on failure - which would briefly
+      // expose an unvalidated schema - the schema is STAGED (invisible to
+      // public reads), validated, then committed on success or discarded on
+      // failure. Instances and non-validated schemas are validated
+      // (transiently) before this point, so they register directly.
       if (validate && entity.isSchema) {
-        // `validateSchemaAgainstParent` looks the entity up by id (via
-        // `store.get`), so it can only run post-registration - unlike
-        // `validateSchemaStrict` and the x-gts-ref checks above. If it
-        // rejects, roll back the `store.register()` above (both the `byId`
-        // index and the Ajv schema entry) so a 422 response restores any
-        // previous entity rather than deleting or replacing it.
+        const token = this.store.stage(content);
+        const documentResult = this.store.validateSchemaDocument(content, entity.id);
+        if (!documentResult.ok) {
+          this.store.discard(token);
+          reply.code(422);
+          return { ok: false, is_type_schema: true, error: documentResult.error };
+        }
         const parentResult = this.store.validateSchemaAgainstParent(entity.id, refValidation);
         if (!parentResult.ok) {
-          this.store.rollbackRegistration(entity.id, previous);
+          this.store.discard(token);
           reply.code(422);
           return {
             ok: false,
@@ -419,6 +430,16 @@ export class GtsServer {
             error: `Derived schema is not compatible with base: ${parentResult.error}`,
           };
         }
+        if (this.store.commit(token) === 'conflict') {
+          reply.code(409);
+          return {
+            ok: false,
+            is_type_schema: true,
+            error: `Entity '${entity.id}' is already registered with different content`,
+          };
+        }
+      } else {
+        this.store.register(content);
       }
 
       return {
@@ -441,103 +462,6 @@ export class GtsServer {
         error: error instanceof Error ? error.message : String(error),
       };
     }
-  }
-
-  private validateSchemaStrict(content: any): string | null {
-    // Check for $id
-    const schemaId = content['$id'];
-    if (!schemaId) {
-      return 'Unable to detect GTS ID in schema';
-    }
-
-    // Normalize the ID
-    let normalizedId = schemaId;
-    if (typeof normalizedId === 'string') {
-      // Check if it starts with gts:// prefix
-      if (normalizedId.startsWith('gts://')) {
-        normalizedId = normalizedId.substring(6);
-      } else if (normalizedId.startsWith('gts.')) {
-        // Plain gts. prefix without gts:// is not allowed for JSON Schema $id
-        return 'Schema $id with GTS identifier must use gts:// URI format (e.g., gts://gts.vendor.pkg.ns.type.v1~)';
-      } else {
-        // Non-GTS $id is not allowed
-        return 'Schema $id must be a valid GTS identifier with gts:// URI format';
-      }
-
-      // Check for wildcards in schema ID
-      if (normalizedId.includes('*')) {
-        return 'Schema $id cannot contain wildcards';
-      }
-
-      // Validate the GTS ID
-      if (!gts.isValidGtsID(normalizedId)) {
-        return `Schema $id is not a valid GTS identifier: ${normalizedId}`;
-      }
-    }
-
-    // Validate $ref fields
-    const refErrors = this.validateSchemaRefs(content, '');
-    if (refErrors.length > 0) {
-      return refErrors[0];
-    }
-
-    return null;
-  }
-
-  private validateSchemaRefs(obj: any, path: string): string[] {
-    const errors: string[] = [];
-
-    if (!obj || typeof obj !== 'object') {
-      return errors;
-    }
-
-    // Check $ref
-    const ref = obj['$ref'];
-    if (typeof ref === 'string') {
-      const refPath = path ? `${path}/$ref` : '$ref';
-
-      // Local refs (#/...) are allowed
-      if (ref.startsWith('#')) {
-        // OK - local ref
-      } else if (ref.startsWith('gts://')) {
-        // gts:// URI is allowed - validate the GTS ID
-        const normalizedRef = ref.substring(6);
-
-        // Check for wildcards
-        if (normalizedRef.includes('*')) {
-          errors.push(`Invalid $ref at ${refPath}: wildcards are not allowed in $ref`);
-        } else if (!gts.isValidGtsID(normalizedRef)) {
-          errors.push(`Invalid $ref at ${refPath}: ${normalizedRef} is not a valid GTS identifier`);
-        }
-      } else if (ref.startsWith('gts.')) {
-        // Plain gts. prefix without gts:// is not allowed
-        errors.push(`Invalid $ref at ${refPath}: GTS references must use gts:// URI format`);
-      } else if (ref.startsWith('http://') || ref.startsWith('https://')) {
-        // External HTTP refs are not allowed (except json-schema.org for $schema)
-        if (!ref.includes('json-schema.org')) {
-          errors.push(`Invalid $ref at ${refPath}: external HTTP references are not allowed`);
-        }
-      }
-    }
-
-    // Recurse into nested objects
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === '$ref') continue;
-      if (value && typeof value === 'object') {
-        const nestedPath = path ? `${path}/${key}` : key;
-        if (Array.isArray(value)) {
-          value.forEach((item, idx) => {
-            if (item && typeof item === 'object') {
-              errors.push(...this.validateSchemaRefs(item, `${nestedPath}[${idx}]`));
-            }
-          });
-        } else {
-          errors.push(...this.validateSchemaRefs(value, nestedPath));
-        }
-      }
-    }
-
-    return errors;
   }
 
   private async handleAddEntities(
@@ -595,39 +519,203 @@ export class GtsServer {
     }
   }
 
-  // Register a GTS Type Schema under an explicit type_id
-  private async handleAddTypeSchema(
-    request: FastifyRequest<{ Body: TypeSchemaRegisterBody }>,
+  // Register a batch of GTS Type Schemas. The request body is a JSON array of
+  // GTS Type Schema objects; each entry's GTS Type Identifier is derived from
+  // its embedded $id (there is no external type_id field). The response is an
+  // aggregate { ok, results: [...] } body where the top-level ok is true only
+  // when every entry registered successfully.
+  private async handleAddTypeSchemas(
+    request: FastifyRequest<{ Body: any }>,
     reply: FastifyReply
   ): Promise<OperationResult> {
-    const { type_id, type_schema } = request.body || ({} as TypeSchemaRegisterBody);
-
-    if (!type_id || !type_schema || typeof type_schema !== 'object') {
+    const schemas = request.body;
+    if (!Array.isArray(schemas)) {
       reply.code(422);
-      return { ok: false, error: 'Missing required fields: type_id, type_schema' };
+      return { ok: false, error: 'Request body must be a JSON array of GTS Type Schemas' };
     }
 
-    // §2.1 / §11.1 Rule C.1 - a GTS Type Identifier MUST end with `~`.
-    if (!gts.isValidGtsID(type_id) || !type_id.endsWith('~')) {
+    // A malformed gts-ref-validation is a request-level error, so reject the
+    // whole batch with 422 before registering any entry - matching the
+    // single-entity endpoint and the sibling implementations.
+    const refValidation = parseGtsRefValidationMode((request.query as Record<string, unknown>)?.['gts-ref-validation']);
+    if (refValidation === null) {
       reply.code(422);
-      return {
-        ok: false,
-        error: `Invalid type_id: must be a well-formed GTS Type Identifier ending with '~', got '${type_id}'`,
-      };
+      return { ok: false, error: 'gts-ref-validation must be one of: none, any-present, any-valid' };
+    }
+    const q = request.query as Record<string, unknown>;
+    const validate = q?.['validate'] === 'true' || q?.['validation'] === 'true';
+
+    if (!validate) {
+      // No validation: forward references are allowed and order does not
+      // matter, so each entry is registered directly.
+      const results: Array<{ ok: boolean; type_id: string | null; error?: string }> = [];
+      for (const schema of schemas) {
+        results.push(await this.registerTypeSchema(schema, request));
+      }
+      return { ok: results.every((r) => r.ok), results };
     }
 
-    // The explicit type_id wins over any identifier carried inside the body, so
-    // an embedded $id must be dropped rather than left to shadow it.
-    const content: Record<string, any> = { ...type_schema };
-    content['$id'] = type_id;
+    // validate=true: two-phase so the outcome is order-independent and nothing
+    // invalid is ever published. Every structurally-valid entry is STAGED
+    // first (invisible to public reads), then each is validated against the
+    // fully-staged set - so an entry resolves intra-batch references/ancestors
+    // regardless of position - and finally the entries that passed are
+    // committed while the rest are discarded.
+    const results: Array<{ ok: boolean; type_id: string | null; error?: string }> = new Array(schemas.length);
+    let survivors: Array<{ index: number; typeId: string; content: any; token: string }> = [];
+    // Track every still-staged token so a throw anywhere below discards the
+    // leftovers instead of leaking unvalidated entries into the staging overlay.
+    const pending = new Set<string>();
+    try {
+      // Phase 1: identity + content-only structural checks + stage.
+      for (let i = 0; i < schemas.length; i++) {
+        const schema = schemas[i];
+        const identity = this.typeSchemaIdentity(schema);
+        if (identity.error !== undefined) {
+          results[i] = { ok: false, type_id: identity.typeId, error: identity.error };
+          continue;
+        }
+        const typeId = identity.typeId as string;
+        const structuralError = this.schemaStructuralError(schema, typeId);
+        if (structuralError) {
+          results[i] = { ok: false, type_id: typeId, error: structuralError };
+          continue;
+        }
+        let token: string;
+        try {
+          token = this.store.stage(schema);
+        } catch (error) {
+          results[i] = { ok: false, type_id: typeId, error: error instanceof Error ? error.message : String(error) };
+          continue;
+        }
+        pending.add(token);
+        survivors.push({ index: i, typeId, content: schema, token });
+      }
 
-    // P6-2/P6-3: the caller declared `type_id` explicitly, so this document
-    // IS a GTS Type Schema by construction - stamp `isSchema` authoritatively
-    // rather than leaving it to `GtsExtractor.isJsonSchema`'s document-shape
-    // heuristic, which would misclassify a schema with no embedded
-    // `$schema`/root-type keyword as a plain instance (see
-    // `TestCaseOp6ValidateJson_ExplicitSchemaWithoutEmbeddedIdentity`).
-    return this.handleAddEntity({ ...request, body: content } as any, reply, { forceIsSchema: true });
+      // Phase 2: reference/ancestor validation against the staged set, discarding
+      // failures and RE-validating the survivors against the now-smaller staged
+      // set until a round produces no new failures. This stops an entry that only
+      // validated because a sibling was staged (e.g. its parent or $ref target)
+      // from being committed after that sibling has itself been discarded.
+      for (;;) {
+        const stillGood: typeof survivors = [];
+        const failed: Array<{ index: number; typeId: string; token: string; error: string }> = [];
+        for (const entry of survivors) {
+          const error = this.schemaReferenceError(entry.content, entry.typeId, refValidation);
+          if (error === null) stillGood.push(entry);
+          else failed.push({ index: entry.index, typeId: entry.typeId, token: entry.token, error });
+        }
+        if (failed.length === 0) break;
+        for (const { index, typeId, token, error } of failed) {
+          this.store.discard(token);
+          pending.delete(token);
+          results[index] = { ok: false, type_id: typeId, error };
+        }
+        survivors = stillGood;
+      }
+
+      // Phase 3: publish the survivors AS ONE ATOMIC UNIT. A per-entry commit
+      // loop could publish a dependent schema after its parent or $ref target id
+      // was won with different content than the dependent was validated against;
+      // the store-level batch compare-and-swap publishes none if any target
+      // conflicts.
+      const survivorTokens = survivors.map((s) => s.token);
+      const outcomes = this.store.commitBatch(survivorTokens);
+      for (let s = 0; s < survivors.length; s++) {
+        const { index, typeId, token } = survivors[s];
+        if (outcomes[s] === 'conflict') {
+          // Nothing was published for a conflicting entry; leave its token in
+          // `pending` so the finally discards it.
+          results[index] = {
+            ok: false,
+            type_id: typeId,
+            error: `Entity '${typeId}' is already registered with different content`,
+          };
+        } else {
+          pending.delete(token);
+          results[index] = { ok: true, type_id: typeId };
+        }
+      }
+    } finally {
+      // Discard anything still staged (e.g. a validation call threw) so no
+      // unvalidated entry lingers in the staging overlay.
+      for (const token of pending) this.store.discard(token);
+    }
+
+    return { ok: results.every((r) => r.ok), results };
+  }
+
+  // Validates the batch-specific requirement that an entry is an object with a
+  // canonical $schema and a gts:// $id, returning the derived GTS Type
+  // Identifier and, on failure, the per-item error.
+  private typeSchemaIdentity(schema: any): { typeId: string | null; error?: string } {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+      return { typeId: null, error: 'GTS Type Schema entry must be a JSON object' };
+    }
+    if (typeof schema['$schema'] !== 'string' || schema['$schema'].length === 0) {
+      return { typeId: null, error: 'GTS Type Schema must contain a top-level $schema field' };
+    }
+    const embeddedId = schema['$id'];
+    if (typeof embeddedId !== 'string' || !hasUriPrefix(embeddedId)) {
+      return { typeId: null, error: 'GTS Type Schema must contain a top-level $id in gts:// form' };
+    }
+    const typeId = stripUriPrefix(embeddedId);
+    if (!gts.isValidGtsID(typeId) || !typeId.endsWith('~')) {
+      return { typeId, error: `Invalid GTS Type Schema $id: '${embeddedId}'` };
+    }
+    return { typeId };
+  }
+
+  // Content-only schema checks (no dependency on other entities): modifier
+  // declaration/guards and structural $id/$ref validation. Safe to run in the
+  // batch staging phase before every sibling is staged.
+  private schemaStructuralError(content: any, id: string): string | null {
+    const ruleError = this.store.checkTypeSchemaRules(content, id, { enforceGuards: true });
+    if (ruleError) return ruleError;
+    return validateSchemaIdentityAndRefs(content);
+  }
+
+  // Reference/ancestor checks that need the rest of the batch present:
+  // x-gts-ref existence and derived-vs-parent compatibility. Run after every
+  // entry is staged so intra-batch references resolve regardless of order.
+  private schemaReferenceError(content: any, id: string, refValidation: GtsRefValidationMode): string | null {
+    const documentResult = this.store.validateSchemaDocument(content, id);
+    if (!documentResult.ok) return documentResult.error;
+    const xGtsRefValidator = new XGtsRefValidator(this.store.asEntityLookup());
+    const xGtsRefErrors = xGtsRefValidator.validateSchema(content);
+    if (xGtsRefErrors.length > 0) {
+      return `x-gts-ref validation failed: ${xGtsRefErrors.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ')}`;
+    }
+    const parentResult = this.store.validateSchemaAgainstParent(id, refValidation);
+    if (!parentResult.ok) return `Derived schema is not compatible with base: ${parentResult.error}`;
+    return null;
+  }
+
+  // Registers a single GTS Type Schema WITHOUT full validation (the
+  // ?validate=false batch path), deriving its GTS Type Identifier from the
+  // embedded $id, and returns a per-item result.
+  private async registerTypeSchema(
+    schema: any,
+    request: FastifyRequest<{ Body: any }>
+  ): Promise<{ ok: boolean; type_id: string | null; error?: string }> {
+    const identity = this.typeSchemaIdentity(schema);
+    if (identity.error !== undefined) {
+      return { ok: false, type_id: identity.typeId, error: identity.error };
+    }
+    const typeId = identity.typeId as string;
+
+    // Reuse the single-entity registration path (x-gts-ref checks, modifier
+    // rules, store.register) via a throwaway reply that swallows status codes;
+    // per-entry outcomes are surfaced through the aggregate `results` instead.
+    const fakeReply = { code: () => fakeReply } as unknown as FastifyReply;
+    const result = await this.handleAddEntity(
+      { ...request, body: { ...schema }, query: request.query } as any,
+      fakeReply
+    );
+    if (result.ok) {
+      return { ok: true, type_id: typeId };
+    }
+    return { ok: false, type_id: typeId, error: result.error };
   }
 
   // OP#1 - Validate ID
@@ -984,7 +1072,7 @@ export class GtsServer {
     const content = request.body;
 
     // A well-formed GTS Type Identifier MUST end with `~` (§2.1/§11.1 Rule
-    // C.1, mirroring `handleAddTypeSchema` above). Unlike that handler,
+    // C.1, mirroring `registerTypeSchema` above). Unlike that handler,
     // the two ways a path segment can fail this are reported with distinct
     // messages here: a string that is not GTS-shaped at all ("not-a-gts-
     // type") versus one that is a syntactically ordinary GTS identifier but
@@ -993,7 +1081,7 @@ export class GtsServer {
     // (`TestCaseOp6ValidateJson_MalformedExplicitType` vs.
     // `_ExplicitNonSchemaType`).
     if (!pathType.endsWith('~')) {
-      if (!pathType.startsWith('gts.')) {
+      if (!pathType.startsWith(GTS_PREFIX)) {
         return {
           ok: false,
           id: null,
@@ -1020,15 +1108,11 @@ export class GtsServer {
       };
     }
 
-    // Existence AND `isSchema` check (P6-2/P6-3). Before the registration-
-    // time fix (`POST /type-schemas` now stamps `isSchema` from the caller's
-    // declared `type_id` intent, not from `GtsExtractor.isJsonSchema`'s
-    // document-shape heuristic), this was an existence-only check: a junk
-    // document with zero schema keywords, registered via `POST
-    // /type-schemas`, would compile here as a constraint-free schema
-    // accepting anything. `TestCaseOp6ValidateJson_ExplicitSchemaWithoutEmbeddedIdentity`
-    // still passes because that type IS now correctly stamped `isSchema:
-    // true` at registration.
+    // Existence AND `isSchema` check (P6-2/P6-3). A GTS Type Schema registered
+    // via `POST /type-schemas` carries a canonical embedded `$id`/`$schema`,
+    // so it is classified as a schema at registration; this guards against a
+    // junk document with zero schema keywords compiling here as a
+    // constraint-free schema that would accept anything.
     const isRegisteredSchema = this.store.isRegisteredSchema(pathType);
     if (isRegisteredSchema === undefined) {
       return {
@@ -1261,34 +1345,22 @@ export class GtsServer {
       },
       '/type-schemas': {
         post: {
-          summary: 'Register a GTS Type Schema under an explicit type_id',
-          operationId: 'addTypeSchema',
+          summary: 'Register a batch of GTS Type Schemas',
+          operationId: 'addTypeSchemas',
           requestBody: {
             required: true,
             content: {
               'application/json': {
                 schema: {
-                  type: 'object',
-                  properties: {
-                    type_id: { type: 'string' },
-                    type_schema: { type: 'object' },
-                  },
-                  required: ['type_id', 'type_schema'],
+                  type: 'array',
+                  items: { type: 'object' },
                 },
               },
             },
           },
           responses: {
             200: {
-              description: 'Operation result',
-              content: {
-                'application/json': {
-                  schema: { $ref: '#/components/schemas/OperationResult' },
-                },
-              },
-            },
-            409: {
-              description: 'Entity conflict',
+              description: 'Aggregate batch registration result',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/OperationResult' },

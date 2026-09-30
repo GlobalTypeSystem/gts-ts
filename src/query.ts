@@ -1,4 +1,4 @@
-import { QueryResult } from './types';
+import { QueryResult, GTS_PREFIX } from './types';
 import { GtsStore } from './store';
 import { Gts } from './gts';
 
@@ -21,20 +21,11 @@ export class GtsQuery {
       const results: any[] = [];
 
       // Iterate through all entities in the store
-      for (const [id, entity] of store['byId']) {
+      for (const id of store.query(basePattern, undefined, false)) {
         if (results.length >= limit) break;
-
-        // Check if ID matches the pattern
-        if (!this.matchesIDPattern(id, basePattern)) {
-          continue;
-        }
-
-        // Check filters
-        if (!this.matchesFilters(entity.content, filters)) {
-          continue;
-        }
-
-        results.push(entity.content);
+        const entity = store.get(id);
+        if (!entity || !this.matchesFilters(entity.content, filters)) continue;
+        results.push(structuredClone(entity.content));
       }
 
       return {
@@ -124,8 +115,8 @@ export class GtsQuery {
       // Validate as wildcard pattern
       try {
         // Just check it's a valid pattern format
-        if (!basePattern.startsWith('gts.')) {
-          return "Invalid query: pattern must start with 'gts.'";
+        if (!basePattern.startsWith(GTS_PREFIX)) {
+          return `Invalid query: pattern must start with '${GTS_PREFIX}'`;
         }
       } catch (err) {
         return `Invalid query: ${err}`;
@@ -155,14 +146,6 @@ export class GtsQuery {
     }
 
     return undefined;
-  }
-
-  private static matchesIDPattern(entityID: string, basePattern: string): boolean {
-    // Always use the proper matchIDPattern function which handles wildcards and version matching.
-    // A collection query with a chain-suffix wildcard returns the identifiers
-    // derived from the type, not the type itself (spec §10 examples).
-    const matchResult = Gts.matchIDPattern(entityID, basePattern, { chainSuffixMatchesSelf: false });
-    return matchResult.match;
   }
 
   private static matchesFilters(entityContent: any, filters: Map<string, string>): boolean {

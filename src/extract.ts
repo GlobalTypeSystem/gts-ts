@@ -1,4 +1,4 @@
-import { ExtractResult, GTS_URI_PREFIX } from './types';
+import { ExtractResult, stripUriPrefix } from './types';
 import { Gts } from './gts';
 
 export interface GtsConfig {
@@ -14,17 +14,11 @@ export function getDefaultConfig(): GtsConfig {
 }
 
 export class GtsExtractor {
-  private static normalizeValue(value: string, fieldName?: string): string {
-    let normalized = value.trim();
-
-    // Strip the "gts://" URI prefix for $id field (JSON Schema compatibility)
-    if (fieldName === '$id' && normalized.startsWith(GTS_URI_PREFIX)) {
-      normalized = normalized.substring(GTS_URI_PREFIX.length);
-    } else if (normalized.startsWith(GTS_URI_PREFIX)) {
-      normalized = normalized.substring(GTS_URI_PREFIX.length);
-    }
-
-    return normalized;
+  private static normalizeValue(value: string, _fieldName?: string): string {
+    // Strip the "gts://" URI prefix (JSON Schema compatibility). Applied to
+    // every id-shaped field, not just `$id`: the URI form is legal wherever a
+    // GTS identifier is embedded in JSON Schema.
+    return stripUriPrefix(value.trim());
   }
 
   private static findFirstValidField(
@@ -66,22 +60,13 @@ export class GtsExtractor {
     return Object.prototype.hasOwnProperty.call(content, '$schema');
   }
 
-  /**
-   * @param forceIsSchema - When provided, overrides the `$schema`-keyword
-   * shape heuristic (`isJsonSchema`) with the caller's own declared intent.
-   * Used by `POST /type-schemas` (and the underlying explicit-`type_id`
-   * register path): a document registered there is authoritatively a GTS
-   * Type Schema regardless of whether it happens to embed a `$schema`/root
-   * -type keyword (P6-2/P6-3) - the heuristic alone cannot tell a
-   * schema-less-looking-but-declared schema from ordinary instance JSON.
-   */
-  static extractID(content: any, schemaContent?: any, forceIsSchema?: boolean): ExtractResult {
+  static extractID(content: any, schemaContent?: any): ExtractResult {
     const config = getDefaultConfig();
     let id = '';
     let schemaId: string | null = null;
     let selectedEntityField: string | undefined;
     let selectedSchemaIdField: string | undefined;
-    const isSchema = forceIsSchema ?? this.isJsonSchema(content);
+    const isSchema = this.isJsonSchema(content);
 
     if (typeof content === 'object' && content !== null) {
       // Extract entity ID (look for any non-empty value, preferring valid GTS IDs)

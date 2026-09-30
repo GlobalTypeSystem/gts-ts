@@ -1121,6 +1121,15 @@ describe('OP#8 - SchemaResolver.resolve() is bounded by a path-count budget', ()
   // unresolved so the verdict fails closed to `unknown`, never a false
   // `compatible` *or* a false, definitive `incompatible`.
 
+  // Wall-clock guard against an *algorithmic* regression, not a micro-benchmark.
+  // The pathological doubling shape below measured in the tens of seconds before
+  // the path-count budget; the budget makes it fail in milliseconds. The bound is
+  // deliberately generous (several seconds) so it still trips on a genuine
+  // exponential/OOM regression while tolerating the timing jitter of a loaded,
+  // shared CI runner - a strict sub-second bound flaked on Windows CI (~700ms).
+  // Constant-factor slowness is explicitly not what these tests protect against.
+  const RESOLVE_BUDGET_MS = 2000;
+
   const baseType = (id: string, extra: Record<string, unknown> = {}) => ({
     $id: id,
     $schema: DRAFT7,
@@ -1160,7 +1169,7 @@ describe('OP#8 - SchemaResolver.resolve() is bounded by a path-count budget', ()
     expect(result.backward_compatibility).toBe('unknown');
     expect(result.forward_compatibility).toBe('unknown');
     // Well under a second - this must fail fast, not hang.
-    expect(elapsedMs).toBeLessThan(500);
+    expect(elapsedMs).toBeLessThan(RESOLVE_BUDGET_MS);
   });
 
   test('a legitimate, well under-budget doubling chain still resolves to a genuine compatible verdict', () => {
@@ -1185,7 +1194,7 @@ describe('OP#8 - SchemaResolver.resolve() is bounded by a path-count budget', ()
 
     expect(result.backward_compatibility).toBe('compatible');
     expect(result.forward_compatibility).toBe('compatible');
-    expect(elapsedMs).toBeLessThan(500);
+    expect(elapsedMs).toBeLessThan(RESOLVE_BUDGET_MS);
   });
 
   test('a legitimate, realistic two-ancestor diamond chain resolves correctly and quickly', () => {
@@ -1218,7 +1227,7 @@ describe('OP#8 - SchemaResolver.resolve() is bounded by a path-count budget', ()
 
     expect(result.backward_compatibility).toBe('compatible');
     expect(result.forward_compatibility).toBe('compatible');
-    expect(elapsedMs).toBeLessThan(500);
+    expect(elapsedMs).toBeLessThan(RESOLVE_BUDGET_MS);
   });
 });
 

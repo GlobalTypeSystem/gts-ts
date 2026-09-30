@@ -1,6 +1,6 @@
 {
   "name": "@globaltypesystem/gts-ts",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "TypeScript library for working with GTS (Global Type System) identifiers and JSON/JSON Schema artifacts",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -32,6 +32,9 @@
   ],
   "author": "Global Type System",
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
   "devDependencies": {
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.30",
@@ -50,6 +53,8 @@
     "commander": "^12.0.0",
     "fastify": "^5.12.2",
     "jsonc-parser": "^3.3.1",
+    "re2-wasm": "^1.0.2",
+    "regjsparser": "^0.13.3",
     "uuid": "^11.1.1",
     "yaml": "^2.9.1"
   }

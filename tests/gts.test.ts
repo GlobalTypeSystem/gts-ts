@@ -9,7 +9,7 @@ import {
   idToUUID,
   extractID,
 } from '../src';
-import { MAX_SCHEMA_DEPTH } from '../src/types';
+import { MAX_REGEX_LEN, MAX_SCHEMA_DEPTH } from '../src/types';
 import { X_GTS_REF_SELF, XGtsRefValidator } from '../src/x-gts-ref';
 
 describe('GTS Core Operations', () => {
@@ -591,6 +591,45 @@ describe('GTS Store Operations', () => {
       expect(result.ok).toBe(false);
       expect(result.error).toContain('mixes JSON Schema dialects');
     });
+
+    test('a cross-dialect $ref on an ancestor is rejected even when the descendant does not reference it', () => {
+      // Issue C: the ancestor `base` (draft-07) references a 2020-12 schema; the
+      // descendant `child` derives by re-declaration and references neither the
+      // ancestor nor the 2020-12 target. A leaf-only reference walk accepts the
+      // child; validating the whole chain closure must reject it.
+      gts.register({
+        $id: 'gts.test.pkg.ns.ancforeign.v1~',
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        type: 'object',
+        properties: { note: { type: 'string' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.ancbase.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { ext: { $ref: 'gts://gts.test.pkg.ns.ancforeign.v1~' } },
+      });
+      gts.register({
+        $id: 'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { label: { type: 'string' } },
+      });
+      gts.register({
+        gtsId: 'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~test.pkg._.item.v1.0',
+        $schema: 'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~',
+        label: 'ok',
+      });
+
+      const schemaResult = gts.validateEntity('gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~');
+      const instanceResult = gts.validateInstance(
+        'gts.test.pkg.ns.ancbase.v1~test.pkg._.ancchild.v1~test.pkg._.item.v1.0'
+      );
+      expect(schemaResult.ok).toBe(false);
+      expect(schemaResult.error).toContain('mixes JSON Schema dialects');
+      expect(instanceResult.ok).toBe(false);
+      expect(instanceResult.error).toContain('mixes JSON Schema dialects');
+    });
   });
 
   describe('OP#9 - a cast succeeds only if its result fits the target', () => {
@@ -985,6 +1024,43 @@ describe('GTS Store Operations', () => {
       const ids = result.items.map((item: any) => item.gtsId);
       expect(ids).toContain('gts.a.b.c.d.v1~a.b.c.d.v1.0');
       expect(ids).toContain('gts.a.b.c.e.v1~a.b.c.e.v1.0');
+    });
+
+    // Regression for the indexed wildcard lookup: its binary-search prefix
+    // used to be cut at a literal string boundary, so a version token in a
+    // non-final segment made it miss version-flexible matches that the
+    // authoritative `matchIDPattern` scan accepts (a major-only segment
+    // matches any minor). The indexed result MUST equal a brute-force linear
+    // scan for every pattern, especially these version-flexible ones.
+    test('indexed wildcard query matches a linear matchIDPattern scan for version-flexible patterns', () => {
+      const store = new GtsStore();
+      const ids = [
+        'gts.x.pkg.ns.base.v1~x.pkg.ns.item.v1~',
+        'gts.x.pkg.ns.base.v1.2~x.pkg.ns.item.v1~',
+        'gts.x.pkg.ns.base.v1.5~x.pkg.ns.other.v2~',
+        'gts.x.pkg.ns.base.v2~x.pkg.ns.item.v1~',
+        'gts.x.pkg.ns.other.v1~x.pkg.ns.item.v1~',
+      ];
+      for (const id of ids) store.register(createJsonEntity({ $id: `gts://${id}` }));
+
+      const patterns = [
+        'gts.x.pkg.ns.base.v1~x.pkg.ns.*',
+        'gts.x.pkg.ns.base.v1.2~x.pkg.ns.*',
+        'gts.x.pkg.ns.base.v1~x.pkg.ns.item.v1~*',
+        'gts.x.pkg.ns.*',
+        'gts.x.pkg.ns.base.v2~*',
+      ];
+      for (const pattern of patterns) {
+        const indexed = store.query(pattern).sort();
+        const linear = ids.filter((id) => matchIDPattern(id, pattern).match).sort();
+        expect(indexed).toEqual(linear);
+      }
+
+      // Concretely: the version-flexible first segment must surface BOTH the
+      // `v1` and the `v1.2` base entities, which the old prefix dropped.
+      expect(store.query('gts.x.pkg.ns.base.v1~x.pkg.ns.*')).toEqual(
+        expect.arrayContaining(['gts.x.pkg.ns.base.v1~x.pkg.ns.item.v1~', 'gts.x.pkg.ns.base.v1.2~x.pkg.ns.item.v1~'])
+      );
     });
   });
 
@@ -1802,6 +1878,120 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
       expect(result.error).toMatch(new RegExp(`nests deeper than ${MAX_SCHEMA_DEPTH} levels`));
     });
   });
+
+  describe('store hardening', () => {
+    test('rejects an over-length schema pattern without registering the schema', () => {
+      const store = new GtsStore();
+      const id = 'gts.x.security.regex.unsafe.v1~';
+      expect(() =>
+        store.register(
+          createJsonEntity({
+            $id: `gts://${id}`,
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'string',
+            pattern: 'a'.repeat(MAX_REGEX_LEN + 1),
+          })
+        )
+      ).toThrow(/Regular expression pattern exceeds the .* character safety limit/);
+      expect(store.get(id)).toBeUndefined();
+    });
+
+    test('does not clobber a registered schema when a replacement trips the safety check', () => {
+      // The over-length-pattern replacement is rejected by
+      // `assertSafeSchemaPatterns` BEFORE any Ajv call and before `byId` is
+      // mutated, so the previously registered content survives intact. (This
+      // does NOT reach the Ajv compile-failure catch branch - that path is
+      // covered by the test below.)
+      const id = 'gts.x.security.regex.rollback.v1~';
+      const store = new GtsStore({ allowEntityUpdates: true });
+      store.register(
+        createJsonEntity({
+          $id: `gts://${id}`,
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'string',
+          pattern: '^a+$',
+        })
+      );
+      expect(() =>
+        store.register(
+          createJsonEntity({
+            $id: `gts://${id}`,
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'string',
+            pattern: 'a'.repeat(MAX_REGEX_LEN + 1),
+          })
+        )
+      ).toThrow(/Regular expression pattern exceeds the .* character safety limit/);
+      expect(store.get(id)?.content.pattern).toBe('^a+$');
+    });
+
+    test('rolls the Ajv registration back when a replacement passes the safety check but fails to compile', () => {
+      // Exercises the `try { addAjvSchema } catch { removeAjvSchema }` branch:
+      // the replacement carries no `pattern`/`patternProperties` (so it clears
+      // `assertSafeSchemaPatterns`) but declares an unsupported `$schema`
+      // dialect, which makes `addAjvSchema` throw. Registration must NOT throw
+      // - the failure is swallowed so the entity is still stored in `byId` -
+      // and the aborted Ajv registration must be rolled back rather than left
+      // half-added (`validateSchema` recompiles and surfaces the failure on
+      // demand).
+      const id = 'gts.x.security.dialect.rollback.v1~';
+      const store = new GtsStore({ allowEntityUpdates: true });
+      store.register(
+        createJsonEntity({
+          $id: `gts://${id}`,
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'string',
+        })
+      );
+      expect(() =>
+        store.register(
+          createJsonEntity({
+            $id: `gts://${id}`,
+            $schema: 'https://example.com/not-a-json-schema-dialect',
+            type: 'string',
+          })
+        )
+      ).not.toThrow();
+      // The entity is retained (only the Ajv compile was rolled back).
+      expect(store.get(id)?.content.$schema).toBe('https://example.com/not-a-json-schema-dialect');
+    });
+
+    test('matches a catastrophic-backtracking pattern in linear time (ReDoS immunity)', () => {
+      // `pattern` / `patternProperties` are compiled by Ajv with RE2's
+      // linear-time engine, so a classic catastrophic pattern resolves fast on
+      // an adversarial input instead of hanging - the guarantee gts-go and
+      // gts-python get from a match timeout. On the backtracking platform
+      // `RegExp` this input would pin a CPU for many seconds; a generous budget
+      // keeps the test about algorithmic blow-up (a hang), not micro-timing.
+      const store = new GtsStore();
+      const id = 'gts.x.security.regex.redos.v1~';
+      store.register(
+        createJsonEntity({
+          $id: `gts://${id}`,
+          $schema: 'http://json-schema.org/draft-07/schema#',
+          type: 'string',
+          pattern: '(a+)+$',
+        })
+      );
+      const adversarial = 'a'.repeat(50_000) + '!';
+      const start = Date.now();
+      const result = store.validateTransientInstance(adversarial, id, null);
+      const elapsedMs = Date.now() - start;
+      // The trailing '!' means it does not match, so validation fails - but the
+      // point is that it *returns* quickly rather than backtracking forever.
+      expect(result.ok).toBe(false);
+      expect(elapsedMs).toBeLessThan(2000);
+    });
+
+    test('exposes cloned entries through the store abstraction', () => {
+      const store = new GtsStore();
+      const id = 'gts.x.query.entries.item.v1~x.query._.instance.v1.0';
+      store.register(createJsonEntity({ gtsId: id, value: 1 }));
+      const entries = store.entries();
+      entries[0][1].content.value = 2;
+      expect(store.get(id)?.content.value).toBe(1);
+    });
+  });
 });
 
 describe('x-gts-ref schema existence traversal', () => {
@@ -1966,26 +2156,28 @@ describe('x-gts-ref array tuple traversal', () => {
 });
 
 describe('entity content identity', () => {
-  test('accepts content matching a stored entity mutated through get()', () => {
+  test('does not retain caller-owned or returned content', () => {
     const gts = new GTS();
     const id = 'gts.x.unit.hash.mutable.v1~x.unit._.item.v1';
-    gts.register({ id, value: 1 });
-    gts.register({ id, value: 1 });
-    gts.get(id).value = 2;
+    const content = { id, value: 1 };
+    gts.register(content);
+    content.value = 2;
+    gts.get(id).value = 3;
 
-    expect(() => gts.register({ id, value: 2 })).not.toThrow();
-    expect(gts.get(id).value).toBe(2);
+    expect(gts.get(id).value).toBe(1);
+    expect(() => gts.register({ id, value: 2 })).toThrow(/already registered with different content/);
   });
 
-  test('rejects content differing from a stored entity mutated through get()', () => {
-    const gts = new GTS();
+  test('returns defensive copies from store collections', () => {
+    const store = new GtsStore();
     const id = 'gts.x.unit.hash.mutable_conflict.v1~x.unit._.item.v1';
-    gts.register({ id, value: 1 });
-    gts.register({ id, value: 1 });
-    gts.get(id).value = 2;
+    store.register(createJsonEntity({ id, value: 1 }));
+    const all = store.getAll();
+    all[0].content.value = 2;
+    all[0].references.add('gts.x.unit.hash.other.v1~');
 
-    expect(() => gts.register({ id, value: 1 })).toThrow(/already registered with different content/);
-    expect(gts.get(id).value).toBe(2);
+    expect(store.get(id)?.content.value).toBe(1);
+    expect(store.get(id)?.references.size).toBe(0);
   });
 
   test('does not add an identical schema to Ajv twice', () => {

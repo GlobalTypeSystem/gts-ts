@@ -1721,6 +1721,13 @@ describe('OP#13 - a diamond-shaped x-gts-traits-schema chain is bounded by a pat
   // rejection instead of a full algorithmic fix" already used elsewhere in
   // this file for `MAX_SCHEMA_DEPTH`.
 
+  // These tests protect against algorithmic blow-up (a hang/OOM), not
+  // constant-factor slowness. A strict sub-second bound flaked on a loaded,
+  // shared Windows CI runner (it hit exactly 500ms), so the budget is kept
+  // generous - the same value and rationale as `compatibility.test.ts`'s
+  // `RESOLVE_BUDGET_MS`.
+  const RESOLVE_BUDGET_MS = 2000;
+
   test('a chain where every level doubles its composition paths exceeds the budget and fails fast, not with a hang', () => {
     // Each level's `x-gts-traits-schema` is `{allOf: [{$ref: prev}, {$ref:
     // prev}]}` - the same ancestor referenced twice - so the number of
@@ -1754,7 +1761,7 @@ describe('OP#13 - a diamond-shaped x-gts-traits-schema chain is bounded by a pat
     expect(result.error).toMatch(/too many composition paths/);
     expect(result.error).toMatch(/exceeds 10000/);
     // Well under a second - this must fail fast, not hang.
-    expect(elapsedMs).toBeLessThan(500);
+    expect(elapsedMs).toBeLessThan(RESOLVE_BUDGET_MS);
   });
 
   test('a legitimate, shallow (well under-budget) diamond chain still resolves and validates correctly', () => {
@@ -1799,7 +1806,7 @@ describe('OP#13 - a diamond-shaped x-gts-traits-schema chain is bounded by a pat
     expect(result.ok).toBe(false);
     expect(result.error).not.toMatch(/too many composition paths/);
     expect(result.error).not.toMatch(/nests deeper than/);
-    expect(elapsedMs).toBeLessThan(500);
+    expect(elapsedMs).toBeLessThan(RESOLVE_BUDGET_MS);
   });
 
   test('a legitimate, non-branching trait-schema chain resolves correctly and quickly regardless of depth', () => {
@@ -1835,7 +1842,7 @@ describe('OP#13 - a diamond-shaped x-gts-traits-schema chain is bounded by a pat
 
     expect(result.error).not.toMatch(/too many composition paths/);
     expect(result.error).not.toMatch(/nests deeper than/);
-    expect(elapsedMs).toBeLessThan(500);
+    expect(elapsedMs).toBeLessThan(RESOLVE_BUDGET_MS);
   });
 });
 
@@ -2062,6 +2069,25 @@ describe("OP#13 - trait schemas use their root type's dialect", () => {
     gts.register(traitType(id, ['ok']));
 
     expect(gts.validateEntity(id).ok).toBe(true);
+  });
+
+  test('an embedded trait resource cannot declare a different dialect', () => {
+    const gts = new GTS({ validateRefs: false });
+    const id = 'gts.x.unit.tr.resourcedialect.v1~';
+    gts.register({
+      $id: id,
+      $schema: DRAFT2020,
+      type: 'object',
+      'x-gts-traits-schema': {
+        $id: 'https://example.com/gts/legacy-traits',
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+      },
+    });
+
+    const result = gts.validateEntity(id);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('differs from host dialect');
   });
 
   test('a draft-07 child cannot inherit a 2020-12 trait schema through a mixed-dialect chain', () => {

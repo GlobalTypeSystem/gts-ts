@@ -8,6 +8,7 @@ export { GtsQuery } from './query';
 export { GtsModifiers, DOCUMENT_LEVEL_KEYWORDS } from './modifiers';
 export { XGtsRefValidator, X_GTS_REF_SELF } from './x-gts-ref';
 export type { XGtsRefValidationError } from './x-gts-ref';
+export { validateSchemaIdentityAndRefs, validateSchemaRefs } from './schema-refs';
 export {
   parseJSONC,
   tryParseJSONC,
@@ -21,7 +22,7 @@ export { attachSourceLocations, sourceSpanAt } from './source-location';
 
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
-import { GtsStore, createJsonEntity } from './store';
+import { GtsStore, createJsonEntity, type CommitOutcome } from './store';
 import { GtsRelationships } from './relationships';
 import { GtsCompatibility } from './compatibility';
 import { GtsQuery } from './query';
@@ -142,17 +143,39 @@ export class GTS {
     return { ok: results.every((entry) => entry.result.ok), entities: results, errors };
   }
 
-  /**
-   * @param forceIsSchema - Passed through to `createJsonEntity` (P6-2/P6-3):
-   * lets a caller that already knows an entity is a GTS Type Schema by its
-   * own declared intent (e.g. `POST /type-schemas`'s explicit `type_id`)
-   * stamp `isSchema` authoritatively, rather than leaving it to
-   * `GtsExtractor`'s document-shape heuristic, which cannot detect a schema
-   * that embeds no `$schema`/root-type keyword at all.
-   */
-  register(content: any, forceIsSchema?: boolean): JsonEntity | undefined {
-    const entity = createJsonEntity(content, undefined, forceIsSchema);
+  register(content: any): JsonEntity | undefined {
+    const entity = createJsonEntity(content);
     return this.store.register(entity);
+  }
+
+  /**
+   * Stage `content` WITHOUT publishing it, returning a unique staging token. A
+   * staged entity is visible to internal validation but invisible to public
+   * reads until {@link commit}, so a validate=true registration never exposes
+   * an entity that has not passed validation, and a batch can resolve
+   * intra-batch references regardless of order.
+   */
+  stage(content: any): string {
+    return this.store.stage(createJsonEntity(content));
+  }
+
+  /** Publish a previously staged entity by its staging token. */
+  commit(token: string): CommitOutcome {
+    return this.store.commit(token);
+  }
+
+  /**
+   * Atomically publish a set of staged tokens all-or-nothing: if any target
+   * conflicts, nothing is published. Returns one outcome per token, positionally
+   * aligned with `tokens`. See {@link GtsStore.commitBatch}.
+   */
+  commitBatch(tokens: string[]): CommitOutcome[] {
+    return this.store.commitBatch(tokens);
+  }
+
+  /** Discard a staged entity by its staging token; the committed state is untouched. */
+  discard(token: string): void {
+    this.store.discard(token);
   }
 
   rollbackRegistration(id: string, previous?: JsonEntity): void {
@@ -173,7 +196,8 @@ export class GTS {
   }
 
   get(id: string): any {
-    const entity = this.store.get(id);
+    // Public read: never expose a staged (not-yet-committed) entity.
+    const entity = this.store.getCommitted(id);
     return entity?.content;
   }
 
@@ -188,7 +212,8 @@ export class GTS {
    * this instead of reaching past the facade at `.store`.
    */
   isRegisteredSchema(id: string): boolean | undefined {
-    const entity = this.store.get(id);
+    // Public existence check: only committed entities count.
+    const entity = this.store.getCommitted(id);
     return entity ? entity.isSchema : undefined;
   }
 
@@ -316,6 +341,10 @@ export class GTS {
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
   ): ValidationResult {
     return this.store.validateSchema(schemaId, refValidation);
+  }
+
+  validateSchemaDocument(content: any, schemaId: string): ValidationResult {
+    return this.store.validateSchemaDocument(content, schemaId);
   }
 
   validateSchemaAsync(

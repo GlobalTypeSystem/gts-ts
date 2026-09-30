@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-25
+
+### Breaking
+
+- `POST /type-schemas` now accepts a **JSON array** of GTS Type Schema objects (batch registration) instead of a single `{type_id, type_schema}` object. The external `type_id` field is removed — each entry's GTS Type Identifier is derived from its embedded `$id`. The endpoint returns an aggregate `{ok, results: [...]}` body (top-level `ok` is `true` only when every entry registered); each `results` entry reports `{ok, type_id, error?}`. A non-array body returns `422`.
+- Schema `pattern` / `patternProperties` are now compiled by Ajv with **RE2** (`re2-wasm`), a linear-time regular-expression engine, so an untrusted schema can no longer trigger catastrophic backtracking (ReDoS, CWE-1333) — the same class of protection gts-go and gts-python get from a match timeout, achieved by construction so validation stays synchronous. This replaces the earlier `safe-regex2` star-height heuristic (which false-rejected many common, genuinely linear-time patterns such as ISO-8601 date-time, semver, and dotted-segment ids) and drops the `safe-regex2` dependency; the `MAX_REGEX_LEN` (32 KiB) bound is retained only as a cheap resource cap on the pattern source. RE2 has no ECMA-262 lookaround or backreferences, so the common lookaround idioms are split into RE2 checks with exactly the ECMA-262 semantics: lookarounds directly after a leading `^` and fixed-width atoms (e.g. `^P(?!$).+`, `^(?=.*[A-Z])(?=.*\d).{8,}$`) or directly before a trailing `$` and fixed-width atoms (e.g. `^[a-z0-9-]+(?<!-)$`) stay supported and linear-time. **A lookaround anywhere else, or a backreference, cannot be matched in guaranteed linear time and is rejected** when the schema is compiled, with an explanatory error; the `regex` string *format* check is unaffected and still accepts those constructs.
+
+### Fixed
+
+- Batch `POST /type-schemas` registration now forwards the request query string, so `?validate=true` and `?gts-ref-validation=…` apply to every entry exactly as on `POST /entities` (previously silently dropped, skipping validation and accepting bogus `gts-ref-validation` values).
+- `validate=true` registration now **stages** entities instead of publishing-then-rolling-back: an entity is validated in a staging area invisible to public reads (`GET /entities/{id}`, `/entities`, `/query`) and only committed once it passes, so a reader never observes an entity that has not passed (or failed) validation. Batch `POST /type-schemas?validate=true` stages the whole batch first, so an entry can resolve `$ref`s / inheritance to any other entry in the same batch regardless of order, and only the entries that pass are committed while the rest are discarded.
+- The indexed wildcard query lookup (`GtsQuery.query` / `/query` and the wildcard existence check in transitive validation) no longer misses version-flexible matches: its binary-search prefix is cut before the first version token so it returns the same results as a linear `matchIDPattern` scan.
+- `validateSchemaIdentityAndRefs` now reports a non-string `$id` (e.g. an object) as invalid instead of treating it as well-formed.
+
 ## [0.7.0] - 2026-09-21
 
 ### Added

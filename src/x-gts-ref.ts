@@ -3,10 +3,89 @@
  * Validates that string values match specified GTS ID patterns
  */
 
+import type Ajv from 'ajv';
 import { Gts } from './gts';
-import { EntityLookup, MAX_SCHEMA_DEPTH, MAX_SCHEMA_PATHS, GtsRefValidationMode } from './types';
+import {
+  EntityLookup,
+  MAX_SCHEMA_DEPTH,
+  MAX_SCHEMA_PATHS,
+  GtsRefValidationMode,
+  GTS_PREFIX,
+  hasUriPrefix,
+  stripUriPrefix,
+} from './types';
 
 export const X_GTS_REF_SELF = '/$id';
+
+/**
+ * Whether `value`, already known to be prefixed by an exact (non-wildcard)
+ * `pattern`, matches it on a segment boundary. Type patterns (ending with `~`)
+ * admit derived identifiers; any other (exact) pattern requires a full match or
+ * a `~` boundary immediately after the pattern, so `…w.v1` does not spuriously
+ * accept `…w.v12` / `…w.v1.5`.
+ */
+function matchesAtSegmentBoundary(value: string, pattern: string): boolean {
+  return value.length === pattern.length || pattern.endsWith('~') || value[pattern.length] === '~';
+}
+
+/**
+ * Why the string `value` does not satisfy `pattern`, or `null` if it matches.
+ * Pure pattern matching (concrete id, type prefix, or single trailing wildcard);
+ * registry existence and the `/$id` self-reference are decided by
+ * {@link XGtsRefValidator}, not here. Shared by that walker and the structural
+ * `x-gts-ref` Ajv keyword so both agree on matching.
+ */
+export function gtsPatternViolation(value: string, pattern: string): string | null {
+  if (!Gts.isValidGtsID(value)) {
+    return `Value '${value}' is not a valid GTS identifier`;
+  }
+  if (pattern === GTS_PREFIX + '*') return null;
+  if (pattern.endsWith('*')) {
+    return value.startsWith(pattern.slice(0, -1)) ? null : `Value '${value}' does not match pattern '${pattern}'`;
+  }
+  if (!value.startsWith(pattern) || !matchesAtSegmentBoundary(value, pattern)) {
+    return `Value '${value}' does not match pattern '${pattern}'`;
+  }
+  return null;
+}
+
+/**
+ * Registers `x-gts-ref` as a first-class Ajv keyword so `oneOf`/`anyOf`/`allOf`
+ * resolve correctly: branches that differ only by `x-gts-ref` stay distinct
+ * instead of collapsing to identical match-all schemas once stripped. This is
+ * the same design gts-go and gts-rust use (a registered keyword/vocabulary) and
+ * removes the need to strip x-gts-ref and rewrite `oneOf`→`anyOf`.
+ *
+ * Concrete/wildcard patterns are enforced here. The `/$id` self-reference is
+ * resolved through `getSelectedTypeId` (the type currently being validated) so
+ * it participates in `oneOf`/`anyOf` branch selection like any other pattern
+ * instead of matching unconditionally; without a selected type it defers to
+ * XGtsRefValidator. Registry existence always stays with XGtsRefValidator.
+ */
+export function applyXGtsRefKeyword(ajv: Ajv, getSelectedTypeId?: () => string | undefined): void {
+  // Named so it can attach a descriptive error (Ajv reads `validate.errors`
+  // straight after the call), keeping the same "does not match pattern" wording
+  // the standalone walker produces.
+  const validate = function xGtsRefValidate(refPattern: string, data: unknown): boolean {
+    if (typeof refPattern !== 'string') return true;
+    if (typeof data !== 'string') return true;
+    let pattern = refPattern;
+    if (refPattern === X_GTS_REF_SELF) {
+      // Resolve /$id to the selected type so a /$id branch matches only that
+      // type, not every value. If it is unknown here, defer to XGtsRefValidator.
+      const selected = getSelectedTypeId?.();
+      if (!selected) return true;
+      pattern = selected;
+    }
+    const reason = gtsPatternViolation(data, stripUriPrefix(pattern));
+    if (reason === null) return true;
+    (validate as unknown as { errors: unknown[] }).errors = [
+      { keyword: 'x-gts-ref', message: reason, params: { pattern: refPattern } },
+    ];
+    return false;
+  };
+  ajv.addKeyword({ keyword: 'x-gts-ref', schemaType: 'string', errors: true, validate });
+}
 
 const SCHEMA_VALUE_KEYWORDS = new Set([
   'additionalItems',
@@ -94,7 +173,7 @@ export class XGtsRefValidator {
 
   private getSelectedTypeId(schema: any, selectedTypeId?: string): string | undefined {
     const candidate = selectedTypeId ?? schema?.$id;
-    return typeof candidate === 'string' ? this.stripGtsURIPrefix(candidate) : undefined;
+    return typeof candidate === 'string' ? stripUriPrefix(candidate) : undefined;
   }
 
   /**
@@ -111,7 +190,7 @@ export class XGtsRefValidator {
     // The id of the entity being validated. A reference to it is satisfied by
     // that entity itself, so it must bypass the registry-existence check (the
     // entity may not be registered yet under validate-before-register).
-    this.selfId = typeof selfId === 'string' ? this.stripGtsURIPrefix(selfId) : undefined;
+    this.selfId = typeof selfId === 'string' ? stripUriPrefix(selfId) : undefined;
     const errors: XGtsRefValidationError[] = [];
     this.visitInstance(instance, schema, instancePath, schema, errors);
     return errors;
@@ -154,7 +233,7 @@ export class XGtsRefValidator {
     // a validation failure is preferable to hiding it.
     if (
       typeof schema.$ref === 'string' &&
-      (schema.$ref === '#' || schema.$ref.startsWith('#/') || schema.$ref.startsWith('gts://'))
+      (schema.$ref === '#' || schema.$ref.startsWith('#/') || hasUriPrefix(schema.$ref))
     ) {
       if (depth >= MAX_SCHEMA_DEPTH) {
         errors.push({
@@ -177,7 +256,7 @@ export class XGtsRefValidator {
       }
       const resolved = this.resolveSchemaRef(rootSchema, schema.$ref);
       if (resolved && typeof resolved === 'object' && !Array.isArray(resolved)) {
-        const resolvedRoot = schema.$ref.startsWith('gts://') ? resolved : rootSchema;
+        const resolvedRoot = hasUriPrefix(schema.$ref) ? resolved : rootSchema;
         this.visitInstance(instance, resolved, path, resolvedRoot, errors, depth + 1, pathBudget);
       } else {
         // The pointer either resolves nowhere (`resolveSchemaRef` returned
@@ -341,8 +420,8 @@ export class XGtsRefValidator {
   /** Resolve local and GTS `$ref` targets for x-gts-ref traversal. */
   private resolveSchemaRef(rootSchema: any, ref: string): any {
     if (ref === '#') return rootSchema;
-    if (ref.startsWith('gts://')) {
-      return this.store?.get(ref.slice('gts://'.length))?.content ?? null;
+    if (hasUriPrefix(ref)) {
+      return this.store?.get(stripUriPrefix(ref))?.content ?? null;
     }
     if (!ref.startsWith('#/')) return null;
 
@@ -415,7 +494,7 @@ export class XGtsRefValidator {
     }
 
     // Case 1: Absolute GTS pattern
-    if (refPattern.startsWith('gts.')) {
+    if (refPattern.startsWith(GTS_PREFIX)) {
       return this.validateGtsIDOrPattern(refPattern, fieldPath);
     }
 
@@ -432,14 +511,14 @@ export class XGtsRefValidator {
   }
 
   private validateGtsIDOrPattern(pattern: string, fieldPath: string): XGtsRefValidationError | null {
-    if (pattern === 'gts.*') {
+    if (pattern === GTS_PREFIX + '*') {
       return null; // Valid wildcard
     }
 
     if (pattern.includes('*')) {
       // Wildcard pattern - validate prefix
       const prefix = pattern.replace('*', '');
-      if (!prefix.startsWith('gts.')) {
+      if (!prefix.startsWith(GTS_PREFIX)) {
         return {
           fieldPath,
           value: pattern,
@@ -463,36 +542,10 @@ export class XGtsRefValidator {
   }
 
   private validateGtsPattern(value: string, pattern: string, fieldPath: string): XGtsRefValidationError | null {
-    // Validate it's a valid GTS ID
-    if (!Gts.isValidGtsID(value)) {
-      return {
-        fieldPath,
-        value,
-        refPattern: pattern,
-        reason: `Value '${value}' is not a valid GTS identifier`,
-      };
-    }
-
-    // Check pattern match
-    if (pattern === 'gts.*') {
-      // Any valid GTS ID matches
-    } else if (pattern.endsWith('*')) {
-      const prefix = pattern.slice(0, -1);
-      if (!value.startsWith(prefix)) {
-        return {
-          fieldPath,
-          value,
-          refPattern: pattern,
-          reason: `Value '${value}' does not match pattern '${pattern}'`,
-        };
-      }
-    } else if (!value.startsWith(pattern)) {
-      return {
-        fieldPath,
-        value,
-        refPattern: pattern,
-        reason: `Value '${value}' does not match pattern '${pattern}'`,
-      };
+    // Shared pattern matching (also used by the structural x-gts-ref keyword).
+    const reason = gtsPatternViolation(value, pattern);
+    if (reason !== null) {
+      return { fieldPath, value, refPattern: pattern, reason };
     }
 
     // The referenced value must resolve to a registered entity when a store is
@@ -550,7 +603,7 @@ export class XGtsRefValidator {
     const ref = schema['x-gts-ref'];
     const refPath = appendJsonPointer(path, 'x-gts-ref');
     const resolvedRef = this.isSelfReference(ref) ? selectedTypeId : ref;
-    if (typeof resolvedRef === 'string' && resolvedRef.startsWith('gts.')) {
+    if (typeof resolvedRef === 'string' && resolvedRef.startsWith(GTS_PREFIX)) {
       if (resolvedRef.includes('*')) {
         const matches =
           this.store?.getAll?.().filter((entity) => Gts.matchIDPattern(entity.id, resolvedRef).match) ?? [];
@@ -592,12 +645,5 @@ export class XGtsRefValidator {
       }
     }
     return false;
-  }
-
-  /**
-   * Strip the "gts://" prefix from a value if present
-   */
-  private stripGtsURIPrefix(value: string): string {
-    return value.replace(/^gts:\/\//, '');
   }
 }
