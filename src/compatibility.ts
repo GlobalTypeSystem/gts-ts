@@ -9,6 +9,7 @@ import {
   stripUriPrefix,
 } from './types';
 import { Gts } from './gts';
+import { compileSafePattern } from './regex-engine';
 
 /**
  * Type Schema Evolution Compatibility (GTS spec 0.13 §4.2 - §4.5).
@@ -1018,14 +1019,28 @@ class SubsumptionChecker {
       if (key === 'pattern' && typeof outer.pattern === 'string') {
         const innerValues = fixedValues(inner);
         if (innerValues !== null && innerValues.length > 0 && innerValues.every((v) => typeof v === 'string')) {
-          let regex: RegExp | null = null;
+          // Match with the ReDoS-safe engine (see regex-engine.ts), not a raw
+          // `RegExp`: `outer.pattern` is untrusted schema content, so a
+          // backtracking match against a pinned-down value could otherwise hang
+          // derivation validation (CWE-1333).
+          let matcher: { test(input: string): boolean } | null = null;
           try {
-            regex = new RegExp(outer.pattern);
+            matcher = compileSafePattern(outer.pattern, '');
           } catch {
-            regex = null;
+            matcher = null;
           }
-          if (regex !== null) {
-            if (innerValues.every((v) => regex!.test(v))) continue;
+          if (matcher !== null) {
+            try {
+              if (innerValues.every((v) => matcher!.test(v))) continue;
+            } catch {
+              // A bounded match that exceeds the engine's time budget leaves
+              // inclusion undecided rather than hanging or being silently
+              // treated as a match; mirror the "regular expression match timed
+              // out" outcome the sibling runtimes surface elsewhere by falling
+              // through to an inconclusive verdict.
+              verdict = worst(verdict, 'unknown');
+              continue;
+            }
             // Every inner value is a concrete string and at least one of them
             // demonstrably fails outer's pattern - a real, proven conflict,
             // not merely inconclusive narrowing.
