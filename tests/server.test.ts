@@ -14,6 +14,26 @@ describe('HTTP connection lifecycle', () => {
   });
 });
 
+describe('unsupported schema regex', () => {
+  test.each([true, false])('returns 422 without publishing (validate=%s)', async (validate) => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const id = 'gts.x.unit.srv.regex.v1~';
+    try {
+      const response = await server.instance.inject({
+        method: 'POST',
+        url: `/entities?validate=${validate}`,
+        payload: { $id: `gts://${id}`, $schema: DRAFT7, type: 'string', pattern: 'a(?=b)' },
+      });
+      expect(response.statusCode).toBe(422);
+      expect(response.json()).toMatchObject({ ok: false, error: expect.stringMatching(/regular expression/i) });
+      const stored = await server.instance.inject({ method: 'GET', url: `/entities/${encodeURIComponent(id)}` });
+      expect(stored.json().ok).toBe(false);
+    } finally {
+      await server.stop();
+    }
+  });
+});
+
 describe('POST /type-schemas', () => {
   test('rejects a non-array body with 422', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });

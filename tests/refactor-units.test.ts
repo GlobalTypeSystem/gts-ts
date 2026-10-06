@@ -12,7 +12,6 @@ import {
   Gts,
   GtsCompatibility,
   GTS_URI_PREFIX,
-  MAX_REGEX_LEN,
   MAX_SCHEMA_DEPTH,
   hasUriPrefix,
   stripUriPrefix,
@@ -31,6 +30,7 @@ import {
 } from '../src/json-canonical';
 import { dialectOf, canonicalDialectUri } from '../src/schema-dialect';
 import { assertSafeSchemaPatterns } from '../src/schema-safety';
+import { MAX_REGEX_EXPANDED_LENGTH } from '../src/regex-profile';
 
 describe('prefix helpers', () => {
   it('detects and strips the gts:// URI prefix', () => {
@@ -170,7 +170,7 @@ describe('schema safety (regex length / resource bounds)', () => {
   // Regression: the previous star-height heuristic rejected these common,
   // genuinely linear-time patterns. They must register without complaint now
   // that the guard is a length bound. `(a+)+$` is likewise accepted - Ajv
-  // compiles it with the platform `RegExp`, and it is well under the length
+  // compiles it with RE2, and it is well under the length
   // bound; catastrophic backtracking is not what this guard protects against.
   it('accepts common linear-time patterns the star-height heuristic falsely rejected', () => {
     const patterns = [
@@ -184,17 +184,15 @@ describe('schema safety (regex length / resource bounds)', () => {
     }
   });
 
-  it('rejects a pattern longer than the length bound', () => {
-    const tooLong = 'a'.repeat(MAX_REGEX_LEN + 1);
-    expect(() => assertSafeSchemaPatterns({ type: 'string', pattern: tooLong })).toThrow(
-      /Regular expression pattern exceeds the .* character safety limit/
-    );
+  it('rejects a pattern beyond the expanded-length bound', () => {
+    const tooLong = 'a'.repeat(MAX_REGEX_EXPANDED_LENGTH + 1);
+    expect(() => assertSafeSchemaPatterns({ type: 'string', pattern: tooLong })).toThrow(/expanded length above 4096/);
   });
 
   it('rejects an over-length patternProperties key', () => {
-    const tooLong = 'a'.repeat(MAX_REGEX_LEN + 1);
+    const tooLong = 'a'.repeat(MAX_REGEX_EXPANDED_LENGTH + 1);
     expect(() => assertSafeSchemaPatterns({ patternProperties: { [tooLong]: {} } })).toThrow(
-      /Regular expression pattern exceeds the .* character safety limit/
+      /expanded length above 4096/
     );
   });
 });

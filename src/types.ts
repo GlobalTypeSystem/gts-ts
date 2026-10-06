@@ -62,19 +62,6 @@ export const MAX_SCHEMA_DEPTH = 64;
  */
 export const MAX_SCHEMA_PATHS = 10_000;
 
-/**
- * Longest `pattern` / `patternProperties` regular expression a registered
- * schema may carry, in characters. A ReDoS guard that relied on a
- * static-analysis heuristic (e.g. star-height) rejected many common,
- * genuinely linear-time patterns (ISO-8601, semver, dotted-segment ids), so
- * the guard is instead a simple length bound - matching gts-rust's
- * `MAX_REGEX_LEN`. It bounds the source text an attacker can hand the regex
- * compiler while leaving well-formed patterns alone; ECMA-262 features such
- * as lookahead and backreferences stay supported because Ajv compiles the
- * pattern with the platform `RegExp` engine.
- */
-export const MAX_REGEX_LEN = 32 * 1024;
-
 export interface GtsIDSegment {
   num: number;
   offset: number;

@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - Planned
+
+### Breaking
+
+- Adopt the GTS 0.15 regular-expression profile (spec README §11.0.1, ADR-0006 Option 4). Schema expressions, `format: "regex"`, casting, and compatibility checks accept only the closed profile shared by ECMA-262 `u` and RE2, within its support bounds: expanded length 4096 code points, 32 nested groups, repetition counts and nested products of 1000. Lookaround, backreferences, named groups, inline modifiers, `\b`, `\p{...}`, `\uXXXX`, `\x{...}`, `\Q...\E`, and ambiguous class spellings are rejected, including in inactive schema positions and local `$ref` targets. See the README declaration.
+- Matching follows RE2 semantics with no declared deviation: `.` also matches CR, U+2028 and U+2029, and `\s` matches only `[\t\n\f\r ]`.
+- `format: "regex"` checks profile membership without compiling the value.
+- Remove the exported `MAX_REGEX_LEN` (32 KiB); the profile's support bounds replace it.
+
+### Changed
+
+- Pin the conformance suite and `.gts-spec` submodule to gts-spec `v0.15.0`.
+- Replace `re2-wasm` with `re2js` (pure JavaScript). Remove the `regjsparser` dependency and the `node:vm` fallback.
+- Check schema expressions in the subschema keywords of the declared dialect and in local `$ref` targets. Keywords a dialect does not define, such as `prefixItems` or `dependentSchemas` in Draft-07, are no longer scanned. Synthesized trait schemas are checked under their host schema's dialect.
+- Registration of a schema with an unsupported expression returns HTTP 422.
+
+### Security
+
+- Remove native backtracking and the per-match timeout fallback, and fix unbounded `re2-wasm` memory growth under repeated validation.
+- The profile's support bounds also bound each compiled program, so a short expression can no longer compile to a very large one.
+- Engine failures other than unsupported syntax fail the whole validation instead of being reported as an invalid `regex` format; OP#8 reports them as an `unknown` verdict with the error as the reason.
+- Linear search bounds each search, not the total cost of a validation; limit input sizes and validation time at the deployment level for untrusted schemas or instances.
+
 ## [0.8.0] - 2026-09-25
 
 ### Breaking

@@ -6,9 +6,17 @@ A complete TypeScript implementation of the Global Type System (GTS)
 
 GTS [Global Type System](https://github.com/globaltypesystem/gts-spec) is a simple, human-readable, globally unique identifier and referencing system for data type definitions (e.g., JSON Schemas) and data instances (e.g., JSON objects). This TypeScript implementation provides type-safe operations for working with GTS identifiers.
 
-**Targets gts-spec [v0.14.5](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.14.5)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for breaking changes.
+**Targets gts-spec [v0.15.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.15.0)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for breaking changes.
 
-The package targets Node.js 18 and later. Its bounded ECMA-262 regular-expression fallback uses the Node.js `vm` runtime and is not available in browser-only environments.
+Regular expressions follow the GTS 0.15 [safe regular-expression profile](#regular-expressions) (spec README §11.0.1, ADR-0006), a breaking change from the full ECMA-262 support of 0.14. The conformance tests run against the released `v0.15.0` pinned above.
+
+### Regular expressions
+
+`pattern`, `patternProperties`, `propertyNames` and `format: "regex"`, including trait, casting and OP#8 checks, follow the GTS [safe regular-expression profile](https://github.com/GlobalTypeSystem/gts-spec/blob/main/README.md#1101-regular-expression-execution-safety) (spec §11.0.1, version 0.15).
+
+- **Engine:** [re2js](https://github.com/le0pard/re2js) 2.8 (tested with 2.8.6), `RE2JS.compile(source)` without flags; no native `RegExp` fallback.
+- **Declared behavior:** reference for `digit`, `word` and `space`; no permitted deviation is used.
+- **Unpaired surrogates** (no result defined by GTS): rejected in expressions; read as one code point in matched strings.
 
 ## Roadmap
 
