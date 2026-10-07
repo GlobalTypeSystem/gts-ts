@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Update Fastify to `5.12.5` to fix the HTTP/2 response trailer denial of service (GHSA-4mh8-r7rc-xpvc).
 - Remove native backtracking and the per-match timeout fallback, and fix unbounded `re2-wasm` memory growth under repeated validation.
 - The profile's support bounds also bound each compiled program, so a short expression can no longer compile to a very large one.
 - Engine failures other than unsupported syntax fail the whole validation instead of being reported as an invalid `regex` format; OP#8 reports them as an `unknown` verdict with the error as the reason.
