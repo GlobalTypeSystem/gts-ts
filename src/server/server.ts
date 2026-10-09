@@ -11,6 +11,7 @@ import {
   validateSchemaIdentityAndRefs,
 } from '../index';
 import { XGtsRefValidator } from '../x-gts-ref';
+import { RegexCompilationError } from '../regex-engine';
 import {
   ServerConfig,
   DEFAULT_BODY_LIMIT_BYTES,
@@ -449,12 +450,11 @@ export class GtsServer {
         type_id: entity.schemaId,
       };
     } catch (error) {
-      // A changed re-registration is a conflict, while content too deeply
-      // nested to compare safely is an unprocessable entity. Other errors keep
-      // the default status.
+      // Conflicts return 409; unsafe depth and unsupported schema regexes
+      // are unprocessable entities. Other errors keep the default status.
       if (error instanceof EntityConflictError) {
         reply.code(409);
-      } else if (error instanceof EntityContentDepthError) {
+      } else if (error instanceof EntityContentDepthError || error instanceof RegexCompilationError) {
         reply.code(422);
       }
       return {

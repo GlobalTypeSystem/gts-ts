@@ -4,7 +4,7 @@ import { GTS } from '../src';
  * Phase 2 - JSON Schema format assertions (ADR-0005, README §9.2).
  *
  * OP#6 and OP#13 MUST enforce `uuid`, `email`, `date-time`, `date`, `time`,
- * `uri`, `hostname`, `ipv4`, `ipv6` and `regex` (ECMA 262 dialect) as
+ * `uri`, `hostname`, `ipv4`, `ipv6` and `regex` (RE2 dialect) as
  * *assertions*, not annotations, on string values.
  *
  * `src/store.ts` currently constructs its Ajv instance with
@@ -72,13 +72,13 @@ const STANDARD_FORMATS: ReadonlyArray<[field: string, format: string, valid: str
 ];
 
 /**
- * Canonical ECMA 262 regex fixtures, ported verbatim from
+ * Canonical RE2 regex fixtures, ported verbatim from
  * `.gts-spec/tests/test_op6_schema_validation.py:943-966` (OP#6) - the OP#13
  * mirror at `test_op13_schema_traits_validation.py:5120-5140` uses a subset
  * (drops `optional_escaped_slash` and `unmatched_paren`), reproduced below as
- * `REGEX_ECMA262_TRAIT_VALID` / `REGEX_ECMA262_TRAIT_INVALID`.
+ * `REGEX_SAFE_TRAIT_VALID` / `REGEX_SAFE_TRAIT_INVALID`.
  */
-const REGEX_ECMA262_VALID: ReadonlyArray<[label: string, pattern: string]> = [
+const REGEX_SAFE_VALID: ReadonlyArray<[label: string, pattern: string]> = [
   ['anchored_class', '^[A-Za-z0-9]+$'],
   ['shorthand_bounded', '\\d{3}-\\d{4}'],
   ['group_alternation', '(foo|bar)+'],
@@ -90,7 +90,7 @@ const REGEX_ECMA262_VALID: ReadonlyArray<[label: string, pattern: string]> = [
   ['escaped_metachar', '\\(\\d+\\)'],
 ];
 
-const REGEX_ECMA262_INVALID: ReadonlyArray<[label: string, pattern: string]> = [
+const REGEX_SAFE_INVALID: ReadonlyArray<[label: string, pattern: string]> = [
   ['unterminated_class', '[unclosed'],
   ['unterminated_group', '(unclosed'],
   ['reversed_quantifier', 'a{3,2}'],
@@ -100,7 +100,7 @@ const REGEX_ECMA262_INVALID: ReadonlyArray<[label: string, pattern: string]> = [
   ['dangling_quantifier', 'a**'],
 ];
 
-const REGEX_ECMA262_TRAIT_VALID: ReadonlyArray<[label: string, pattern: string]> = [
+const REGEX_SAFE_TRAIT_VALID: ReadonlyArray<[label: string, pattern: string]> = [
   ['anchored_class', '^[A-Za-z0-9]+$'],
   ['shorthand_bounded', '\\d{3}-\\d{4}'],
   ['group_alternation', '(foo|bar)+'],
@@ -109,7 +109,7 @@ const REGEX_ECMA262_TRAIT_VALID: ReadonlyArray<[label: string, pattern: string]>
   ['class_shorthand', '[\\s\\S]*'],
 ];
 
-const REGEX_ECMA262_TRAIT_INVALID: ReadonlyArray<[label: string, pattern: string]> = [
+const REGEX_SAFE_TRAIT_INVALID: ReadonlyArray<[label: string, pattern: string]> = [
   ['unterminated_class', '[unclosed'],
   ['unterminated_group', '(unclosed'],
   ['reversed_quantifier', 'a{3,2}'],
@@ -173,8 +173,8 @@ describe('Phase 2 - ADR-0005 JSON Schema format assertions', () => {
     );
   });
 
-  describe('OP#6 - regex format asserts the ECMA 262 dialect (test_op6_schema_validation.py:968)', () => {
-    const TYPE_ID = 'gts.x.unit.fmt6.regexecma.v1~';
+  describe('OP#6 - regex format asserts the RE2 dialect (test_op6_schema_validation.py:968)', () => {
+    const TYPE_ID = 'gts.x.unit.fmt6.regexsafe.v1~';
 
     function setup() {
       const gts = new GTS();
@@ -188,7 +188,7 @@ describe('Phase 2 - ADR-0005 JSON Schema format assertions', () => {
       return gts;
     }
 
-    test.each(REGEX_ECMA262_VALID)('accepts a valid ECMA 262 regex (%s)', (label, pattern) => {
+    test.each(REGEX_SAFE_VALID)('accepts a valid RE2 regex (%s)', (label, pattern) => {
       // NOTE: passes vacuously today - see the block-level comment above.
       const gts = setup();
       const id = `${TYPE_ID}x.unit._.valid_${label}.v1.0`;
@@ -198,7 +198,7 @@ describe('Phase 2 - ADR-0005 JSON Schema format assertions', () => {
       expect(result.ok).toBe(true);
     });
 
-    test.each(REGEX_ECMA262_INVALID)('rejects a string that is not a valid ECMA 262 regex (%s)', (label, pattern) => {
+    test.each(REGEX_SAFE_INVALID)('rejects a string that is not a valid RE2 regex (%s)', (label, pattern) => {
       const gts = setup();
       const id = `${TYPE_ID}x.unit._.invalid_${label}.v1.0`;
       gts.register({ gtsId: id, $schema: TYPE_ID, regexValue: pattern });
@@ -293,8 +293,8 @@ describe('Phase 2 - ADR-0005 JSON Schema format assertions', () => {
     );
   });
 
-  describe('OP#13 - trait regex format asserts the ECMA 262 dialect (test_op13_schema_traits_validation.py: TestCaseOp13_Traits_RegexEcma262)', () => {
-    const BASE_ID = 'gts.x.unit.fmt13.regexecma.v1~';
+  describe('OP#13 - trait regex format asserts the RE2 dialect (test_op13_schema_traits_validation.py: TestCaseOp13_Traits_RegexSafeProfile)', () => {
+    const BASE_ID = 'gts.x.unit.fmt13.regexsafe.v1~';
 
     function baseType() {
       return {
@@ -321,7 +321,7 @@ describe('Phase 2 - ADR-0005 JSON Schema format assertions', () => {
       };
     }
 
-    test.each(REGEX_ECMA262_TRAIT_VALID)('accepts a valid ECMA 262 regex trait (%s)', (label, pattern) => {
+    test.each(REGEX_SAFE_TRAIT_VALID)('accepts a valid RE2 regex trait (%s)', (label, pattern) => {
       // NOTE: passes vacuously today - see the block-level comment above.
       const gts = new GTS({ validateRefs: false });
       gts.register(baseType());
@@ -332,8 +332,8 @@ describe('Phase 2 - ADR-0005 JSON Schema format assertions', () => {
       expect(result.ok).toBe(true);
     });
 
-    test.each(REGEX_ECMA262_TRAIT_INVALID)(
-      'rejects a trait value that is not a valid ECMA 262 regex (%s)',
+    test.each(REGEX_SAFE_TRAIT_INVALID)(
+      'rejects a trait value that is not a valid RE2 regex (%s)',
       (label, pattern) => {
         const gts = new GTS({ validateRefs: false });
         gts.register(baseType());

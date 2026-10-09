@@ -111,9 +111,7 @@ export class GtsStore {
       loadSchema: this.loadSchema.bind(this),
       validateFormats: true,
       allErrors: true,
-      // Compile `pattern` / `patternProperties` with RE2's linear-time engine
-      // so an untrusted schema cannot cause catastrophic backtracking (ReDoS);
-      // see regex-engine.ts.
+      // Enforce the GTS profile and linear-time matching for schema patterns.
       code: { regExp: createLinearRegExp },
     };
     this.ajv = new Ajv(options);
@@ -1172,8 +1170,8 @@ export class GtsStore {
     return `${traitName} ${e.message}`;
   }
 
-  private normalizeSchema(schema: any): any {
-    assertSafeSchemaPatterns(schema);
+  private normalizeSchema(schema: any, dialectSource: any = schema): any {
+    assertSafeSchemaPatterns(schema, dialectSource);
     return this.normalizeSchemaRecursive(schema);
   }
 
@@ -1738,7 +1736,7 @@ export class GtsStore {
   validateCastResult(toSchema: any, casted: any): string | null {
     try {
       const modifiedSchema = this.removeGtsConstConstraints(toSchema);
-      const validate = this.ajvForSchema(toSchema).compile(this.normalizeSchema(modifiedSchema));
+      const validate = this.ajvForSchema(toSchema).compile(this.normalizeSchema(modifiedSchema, toSchema));
       if (!this.withSelectedType(toSchema?.$id, () => validate(casted))) {
         // P6-4: shared formatter, so a cast-result failure reads the same
         // way as every other validation path instead of raw Ajv wording.
@@ -2439,9 +2437,8 @@ export class GtsStore {
 
     try {
       const schemaForValidation = isAbstract ? this.withoutRequired(effectiveSchema) : effectiveSchema;
-      const validate = this.ajvForSchema(self?.content ?? schemaForValidation).compile(
-        this.normalizeSchema(schemaForValidation)
-      );
+      const host = self?.content ?? schemaForValidation;
+      const validate = this.ajvForSchema(host).compile(this.normalizeSchema(schemaForValidation, host));
       if (!this.withSelectedType(schemaId, () => validate(materialized))) {
         const details =
           validate.errors?.map((e) => this.formatTraitValidationError(e)).join('; ') ||

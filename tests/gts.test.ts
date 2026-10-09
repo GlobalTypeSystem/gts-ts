@@ -9,7 +9,8 @@ import {
   idToUUID,
   extractID,
 } from '../src';
-import { MAX_REGEX_LEN, MAX_SCHEMA_DEPTH } from '../src/types';
+import { MAX_SCHEMA_DEPTH } from '../src/types';
+import { MAX_REGEX_EXPANDED_LENGTH } from '../src/regex-profile';
 import { X_GTS_REF_SELF, XGtsRefValidator } from '../src/x-gts-ref';
 
 describe('GTS Core Operations', () => {
@@ -1889,10 +1890,10 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
             $id: `gts://${id}`,
             $schema: 'http://json-schema.org/draft-07/schema#',
             type: 'string',
-            pattern: 'a'.repeat(MAX_REGEX_LEN + 1),
+            pattern: 'a'.repeat(MAX_REGEX_EXPANDED_LENGTH + 1),
           })
         )
-      ).toThrow(/Regular expression pattern exceeds the .* character safety limit/);
+      ).toThrow(/expanded length above 4096/);
       expect(store.get(id)).toBeUndefined();
     });
 
@@ -1918,10 +1919,10 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
             $id: `gts://${id}`,
             $schema: 'http://json-schema.org/draft-07/schema#',
             type: 'string',
-            pattern: 'a'.repeat(MAX_REGEX_LEN + 1),
+            pattern: 'a'.repeat(MAX_REGEX_EXPANDED_LENGTH + 1),
           })
         )
-      ).toThrow(/Regular expression pattern exceeds the .* character safety limit/);
+      ).toThrow(/expanded length above 4096/);
       expect(store.get(id)?.content.pattern).toBe('^a+$');
     });
 
@@ -1959,8 +1960,7 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
     test('matches a catastrophic-backtracking pattern in linear time (ReDoS immunity)', () => {
       // `pattern` / `patternProperties` are compiled by Ajv with RE2's
       // linear-time engine, so a classic catastrophic pattern resolves fast on
-      // an adversarial input instead of hanging - the guarantee gts-go and
-      // gts-python get from a match timeout. On the backtracking platform
+      // an adversarial input instead of hanging. On the backtracking platform
       // `RegExp` this input would pin a CPU for many seconds; a generous budget
       // keeps the test about algorithmic blow-up (a hang), not micro-timing.
       const store = new GtsStore();

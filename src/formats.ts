@@ -1,36 +1,12 @@
 /**
- * JSON Schema format assertions - ADR-0005 (`.gts-spec/adr/0005-json-schema-format-assertions.md`)
- * and README §9.2.
- *
- * OP#6 (`GtsStore.validateInstance`) and OP#13 (`GtsStore.validateSchemaTraits`,
- * reached via `validateSchemaAgainstParent`) both compile schemas through the
- * single shared Ajv instance built in `GtsStore`'s constructor (`src/store.ts`).
- * ADR-0005 requires `uuid`, `email`, `date-time`, `date`, `time`, `uri`,
- * `hostname`, `ipv4`, `ipv6` and `regex` to be enforced as *assertions* (not
- * merely annotated/ignored) on that instance.
- *
- * `ajv-formats` (mode: 'full') supplies correct implementations for most of
- * these out of the box, but three are stricter under the canonical GTS test
- * suite (`.gts-spec/tests/test_op6_schema_validation.py`,
- * `test_op13_schema_traits_validation.py`) than `ajv-formats`' defaults:
- *
- *  - `date-time` MUST require a timezone offset (`ajv-formats` treats it as
- *    optional in a way that lets a bare `"2011-07-22T10:30:00"` through).
- *  - `time` MUST require a timezone offset for the same reason
- *    (`"10:30:00"` must be rejected).
- *  - Both MUST reject an out-of-range offset (`+25:00` is not a valid
- *    RFC 3339 `time-numoffset`, whose `time-hour` is bounded to `00`-`23`).
- *  - `regex` MUST assert that the string is a syntactically valid regular
- *    expression under the ECMA-262 dialect, not merely that it is a string
- *    (which is all `ajv-formats`' `regex` format checks).
- *
- * These four overrides are registered on top of `addFormats(ajv, { mode:
- * 'full' })` by `applyGtsFormats` below, which is the single place callers
- * should use to get ADR-0005-compliant format assertions.
+ * GTS format assertions (ADR-0005/0006). Standard formats use ajv-formats;
+ * date/time require timezone offsets, and regex checks the same GTS profile
+ * as pattern and patternProperties.
  */
 
 import type Ajv from 'ajv';
 import addFormats from 'ajv-formats';
+import { regexProfileViolation } from './regex-profile';
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -102,20 +78,12 @@ function isValidDateTime(value: string): boolean {
 }
 
 /**
- * `format: regex` MUST assert that the value is a syntactically valid
- * regular expression under the ECMA-262 dialect (ADR-0005) - `ajv-formats`'
- * built-in `regex` format only checks that the value is a string. A regular
- * expression is ECMA-262-valid precisely when the JS engine's own `RegExp`
- * constructor (which implements ECMA-262) accepts it.
+ * A regex-valued string is valid when it belongs to the GTS profile and its
+ * support bounds, the same check as for schema patterns. The expression is
+ * not compiled or executed.
  */
-function isValidEcma262Regex(value: string): boolean {
-  try {
-    // eslint-disable-next-line no-new
-    new RegExp(value);
-    return true;
-  } catch {
-    return false;
-  }
+function isValidRegex(value: string): boolean {
+  return regexProfileViolation(value) === undefined;
 }
 
 /**
@@ -128,6 +96,6 @@ export function applyGtsFormats(ajv: Ajv): Ajv {
   addFormats(ajv, { mode: 'full' });
   ajv.addFormat('date-time', isValidDateTime);
   ajv.addFormat('time', isValidTimePart);
-  ajv.addFormat('regex', isValidEcma262Regex);
+  ajv.addFormat('regex', isValidRegex);
   return ajv;
 }
