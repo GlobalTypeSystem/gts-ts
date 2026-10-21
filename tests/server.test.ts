@@ -334,10 +334,10 @@ describe('POST /entities?validate=true accepts a self-referencing new instance (
     $schema: DRAFT7,
     type: 'object',
     required: ['self'],
-    properties: { self: { type: 'string', 'x-gts-ref': 'gts.*' } },
+    properties: { self: { type: 'string', 'x-gts-instance-ref': 'gts.*' } },
   };
 
-  test("an x-gts-ref value equal to the instance's own id validates before registration", async () => {
+  test("an x-gts-instance-ref value equal to the instance's own id validates before registration", async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
     expect((await server.instance.inject({ method: 'POST', url: '/entities', payload: schema })).statusCode).toBe(200);
 
@@ -1498,7 +1498,7 @@ describe('configurable entity update mode (mirrors gts-go --allow-entity-updates
       $id: `gts://${id}`,
       $schema: DRAFT7,
       type: 'object',
-      properties: { ref: { type: 'string', 'x-gts-ref': 'gts.x.unit.srv.missing.v1~' } },
+      properties: { ref: { type: 'string', 'x-gts-type-ref': 'gts.x.unit.srv.missing.v1~' } },
     };
 
     expect((await postEntity(server, content)).statusCode).toBe(200);
@@ -1522,7 +1522,7 @@ describe('configurable entity update mode (mirrors gts-go --allow-entity-updates
     const replacement = {
       ...original,
       title: 'replacement',
-      properties: { ref: { type: 'string', 'x-gts-ref': 'gts.x.unit.srv.missing.v1~' } },
+      properties: { ref: { type: 'string', 'x-gts-type-ref': 'gts.x.unit.srv.missing.v1~' } },
     };
 
     expect((await postEntity(server, original)).statusCode).toBe(200);

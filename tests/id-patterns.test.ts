@@ -16,25 +16,69 @@ describe('OP#4 - wildcard version matching', () => {
     expect(matchIDPattern('gts.x.pkg.ns.type.v1.5~', 'gts.x.pkg.ns.type.v1~').match).toBe(true);
     expect(matchIDPattern('gts.x.pkg.ns.type.v2~', 'gts.x.pkg.ns.type.v1~').match).toBe(false);
   });
+
+  test('a minor wildcard requires an explicit minor in its segment (spec §10)', () => {
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1~', 'gts.x.pkg.ns.type.v1.*').match).toBe(false);
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1.0~a.b.c.d.v1', 'gts.x.pkg.ns.type.v1.*').match).toBe(true);
+  });
+
+  test('omitted minors are flexible in every segment of a concrete instance selector', () => {
+    const selector = 'gts.x.pkg.ns.type.v1~a.b._.item.v1';
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1.3~a.b._.item.v1.2', selector).match).toBe(true);
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1~a.b._.item.v12', selector).match).toBe(false);
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1~a.b._.item.v1~a.b._.sub.v1', selector).match).toBe(false);
+  });
+});
+
+describe('OP#4 - pattern grammar and coverage (spec §10)', () => {
+  test('version components are unsigned 32-bit integers', () => {
+    const largest = matchIDPattern('gts.x.pkg.ns.type.v4294967295~', 'gts.*');
+    expect(largest.match).toBe(true);
+    expect(largest.error).toBeUndefined();
+    expect(matchIDPattern('gts.x.pkg.ns.type.v4294967296~', 'gts.*').error).toMatch(/exceeds 4294967295/);
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1.4294967296~', 'gts.*').error).toBeTruthy();
+  });
+
+  test('identifiers are validated as spelled, without trimming', () => {
+    expect(matchIDPattern(' gts.x.pkg.ns.type.v1~', 'gts.*').error).toBeTruthy();
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1~ ', 'gts.*').error).toBeTruthy();
+  });
+
+  test('wildcards may only follow a complete token or the version marker', () => {
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1~', 'gts.x.pkg.ns.type.v*').match).toBe(true);
+    for (const invalid of ['gts.x.pkg.ns.typ*', 'gts.x.pkg.ns.type.v1*', 'gts.x.pkg.ns.type.v1.0.*']) {
+      expect(matchIDPattern('gts.x.pkg.ns.type.v1~', invalid).error).toBeTruthy();
+    }
+  });
+
+  test('a pattern candidate matches only when the filter covers it', () => {
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1.*', 'gts.x.pkg.ns.type.v1~').match).toBe(true);
+    // `v1~*` also selects `v1~`, which `v1.*` excludes.
+    expect(matchIDPattern('gts.x.pkg.ns.type.v1~*', 'gts.x.pkg.ns.type.v1.*').match).toBe(false);
+    expect(matchIDPattern('gts.vendor.*', 'gts.vendor.pkg.*').match).toBe(false);
+    expect(matchIDPattern('gts.vendor.pkg.*', 'gts.vendor.*').match).toBe(true);
+  });
+
+  test('a pattern that selects no identifier within the length limit is covered by any filter', () => {
+    const empty = 'gts.' + 'a'.repeat(1011) + '.*';
+    const nonEmpty = 'gts.' + 'a'.repeat(1010) + '.*';
+    expect(matchIDPattern(empty, 'gts.x.core.resources.resource.*').match).toBe(true);
+    expect(matchIDPattern(nonEmpty, 'gts.x.core.resources.resource.*').match).toBe(false);
+  });
 });
 
 describe('OP#4 / OP#10 - chain-suffix wildcards', () => {
   /*
-   * The two operations disagree in the gts-spec 0.13 suite and both verdicts
-   * are asserted there, so the divergence is deliberate and pinned here:
-   *
-   *   OP#4  (§10 prose)    `type.v1~*` matches `type.v1~` itself.
-   *   OP#10 (§10 examples) a collection query returns only derived identifiers.
-   *
-   * In gts-spec 0.12 both were exclusive; 0.13 flipped only the OP#4
-   * assertions and left the OP#10 expectations unchanged.
+   * Since gts-spec 0.16.1 the two operations agree: a bare chain-suffix
+   * wildcard may match an empty suffix, so `type.v1~*` selects `type.v1~`
+   * itself in both OP#4 matching and OP#10 collection queries (§10).
    */
   test('pattern matching treats a chain-suffix wildcard as including the type itself', () => {
     expect(matchIDPattern('gts.vendor.pkg.ns.type.v0~', 'gts.vendor.pkg.ns.type.v0~*').match).toBe(true);
     expect(matchIDPattern('gts.vendor.pkg.ns.type.v0.1~', 'gts.vendor.pkg.ns.type.v0~*').match).toBe(true);
   });
 
-  test('a collection query with a chain-suffix wildcard returns only derived identifiers', () => {
+  test('a collection query with a chain-suffix wildcard includes the root type', () => {
     const gts = new GTS({ validateRefs: false });
     const ids = [
       'gts.x.unit.wc.message.v1.0~',
@@ -44,13 +88,18 @@ describe('OP#4 / OP#10 - chain-suffix wildcards', () => {
     ];
     ids.forEach((id) => gts.register({ $id: id, $schema: DRAFT7, type: 'object' }));
 
-    // Only the type derived from v1.0, not v1.0 itself.
-    const derivedFromV10 = gts.query('gts.x.unit.wc.message.v1.0~*');
-    expect(derivedFromV10.count).toBe(1);
-    expect(derivedFromV10.items[0].$id).toBe('gts.x.unit.wc.message.v1.0~x.unit._.system.v1.0~');
+    // v1.0 itself and the type derived from it.
+    const fromV10 = gts.query('gts.x.unit.wc.message.v1.0~*');
+    expect(fromV10.items.map((item) => item.$id).sort()).toEqual([
+      'gts.x.unit.wc.message.v1.0~',
+      'gts.x.unit.wc.message.v1.0~x.unit._.system.v1.0~',
+    ]);
 
-    // Any minor of v1: both derived types, neither base.
-    expect(gts.query('gts.x.unit.wc.message.v1~*').count).toBe(2);
+    // Any minor of v1: both bases and both derived types.
+    expect(gts.query('gts.x.unit.wc.message.v1~*').count).toBe(4);
+
+    // A minor wildcard requires an explicit minor; here every id has one.
+    expect(gts.query('gts.x.unit.wc.message.v1.*').count).toBe(4);
 
     // A plain token wildcard is unaffected and still matches everything.
     expect(gts.query('gts.x.unit.wc.message.*').count).toBe(4);

@@ -1,4 +1,4 @@
-import { GTS, CompatVerdict } from '../src';
+import { GTS, GtsCompatibility, CompatVerdict } from '../src';
 
 const DRAFT7 = 'http://json-schema.org/draft-07/schema#';
 
@@ -651,10 +651,10 @@ describe('OP#8 - malformed schemas degrade instead of throwing', () => {
 });
 
 describe('OP#8 - assertions that are not annotations', () => {
-  test('a differing x-gts-ref pattern is not treated as documentation', () => {
-    // x-gts-ref is enforced against instances by OP#6, so two schemas whose
-    // reference patterns accept disjoint targets do not accept the same
-    // instances - the engine must not strip it along with the other x-gts-*.
+  test('a differing reference operand is not treated as documentation', () => {
+    // Reference keywords are enforced against instances by OP#6, so two
+    // schemas whose operands accept disjoint targets do not accept the same
+    // instances - the engine must not strip them along with the other x-gts-*.
     const gts = new GTS({ validateRefs: false });
     const oldId = 'gts.x.unit.xref.evt.v1.0~';
     const newId = 'gts.x.unit.xref.evt.v1.1~';
@@ -663,25 +663,29 @@ describe('OP#8 - assertions that are not annotations', () => {
       $id: oldId,
       $schema: DRAFT7,
       type: 'object',
-      properties: { ref: { type: 'string', 'x-gts-ref': 'gts.x.unit.alpha.*' } },
+      properties: { ref: { type: 'string', 'x-gts-instance-ref': 'gts.x.unit.alpha.*' } },
     });
     gts.register({
       $id: newId,
       $schema: DRAFT7,
       type: 'object',
-      properties: { ref: { type: 'string', 'x-gts-ref': 'gts.x.unit.beta.*' } },
+      properties: { ref: { type: 'string', 'x-gts-instance-ref': 'gts.x.unit.beta.*' } },
     });
 
-    expect(gts.checkCompatibility(oldId, newId).full_compatibility).toBe('unknown');
+    // Disjoint scopes: a witness accepted by one side and rejected by the other
+    // proves the change in both directions (§9.6.1).
+    const result = gts.checkCompatibility(oldId, newId);
+    expect(result.backward_compatibility).toBe('incompatible');
+    expect(result.forward_compatibility).toBe('incompatible');
   });
 
-  test('an identical x-gts-ref still compares as compatible', () => {
+  test('an identical reference operand still compares as compatible', () => {
     const gts = new GTS({ validateRefs: false });
     const oldId = 'gts.x.unit.xrefsame.evt.v1.0~';
     const newId = 'gts.x.unit.xrefsame.evt.v1.1~';
     const body = {
       type: 'object',
-      properties: { ref: { type: 'string', 'x-gts-ref': 'gts.x.unit.alpha.*' } },
+      properties: { ref: { type: 'string', 'x-gts-instance-ref': 'gts.x.unit.alpha.*' } },
       additionalProperties: false,
     };
 
@@ -1580,5 +1584,91 @@ describe('OP#9 - a constraint visible only through an allOf branch is honored (s
     const result = gts.checkCompatibility(oldId, newId);
 
     expect(result.backward_compatibility).toBe('incompatible');
+  });
+});
+
+describe('OP#8 - GTS reference scopes (§9.6.1, §9.6.2)', () => {
+  const T = 'gts.x.unit.scope.root.v1~';
+  const lookup = { get: () => undefined };
+  const compare = (oldSchema: any, newSchema: any) => GtsCompatibility.compareSchemas(lookup, oldSchema, newSchema);
+
+  test('widening a pattern scope is backward compatible only', () => {
+    expect(
+      compare({ type: 'string', 'x-gts-pattern-ref': T }, { type: 'string', 'x-gts-pattern-ref': 'gts.x.unit.scope.*' })
+    ).toEqual({ backward: 'compatible', forward: 'incompatible' });
+  });
+
+  // Review finding: `allOf` must conjoin both scopes, not keep the first.
+  test('an added narrower conjunct is not dropped by flattening', () => {
+    const old = { 'x-gts-type-ref': 'gts.*' };
+    expect(compare(old, { allOf: [old, { 'x-gts-type-ref': 'gts.x.audit.*' }] })).toEqual({
+      backward: 'incompatible',
+      forward: 'compatible',
+    });
+  });
+
+  // Review finding: a union of string-typed branches rejects 42; a union
+  // without `type` accepts it.
+  test('a union keeps whether its branches accept non-strings', () => {
+    const typed = {
+      anyOf: [
+        { type: 'string', 'x-gts-type-ref': T },
+        { type: 'string', 'x-gts-instance-ref': T },
+      ],
+    };
+    const untyped = { anyOf: [{ 'x-gts-type-ref': T }, { 'x-gts-instance-ref': T }] };
+    expect(compare(typed, untyped)).toEqual({ backward: 'compatible', forward: 'incompatible' });
+  });
+
+  // Review finding: a schema that cannot be evaluated is not a witness.
+  test('an out-of-profile regex makes a would-be witness inconclusive', () => {
+    const scoped = { type: 'string', 'x-gts-type-ref': T };
+    expect(compare(scoped, { ...scoped, pattern: '(a)\\1' }).backward).toBe('unknown');
+  });
+
+  test('/$id names the schema it is resolved for on each side', () => {
+    const doc = (version: string, operand: string) => ({
+      $id: `gts://gts.x.unit.scope.self.v${version}~`,
+      type: 'object',
+      properties: { ref: { type: 'string', 'x-gts-type-ref': operand } },
+    });
+    expect(compare(doc('1.0', '/$id'), doc('1.1', '/$id'))).toEqual({
+      backward: 'incompatible',
+      forward: 'incompatible',
+    });
+    expect(compare(doc('1.0', 'gts.x.unit.scope.self.v1.1~'), doc('1.1', '/$id'))).toEqual({
+      backward: 'compatible',
+      forward: 'compatible',
+    });
+  });
+
+  // Review finding: counterexamples were evaluated as Draft-07, where
+  // `contains: false` rejects `[]` even with `minContains: 0`.
+  test.each([
+    ['https://json-schema.org/draft/2020-12/schema', 'unknown'],
+    ['http://json-schema.org/draft-07/schema#', 'incompatible'],
+  ])('a counterexample is confirmed under the declared dialect %s', (dialect, backward) => {
+    const scoped = { type: ['string', 'array'], 'x-gts-type-ref': 'gts.*' };
+    const anyArray = { type: 'array', contains: false, minContains: 0 };
+    const restricted = { ...scoped, anyOf: [{ type: 'string' }, anyArray] };
+    expect(compare({ $schema: dialect, ...scoped }, { $schema: dialect, ...restricted }).backward).toBe(backward);
+    // Nested comparisons use the dialect of the documents, not of the fragment.
+    const doc = (ref: any) => ({ $schema: dialect, type: 'object', properties: { ref } });
+    expect(compare(doc(scoped), doc(restricted)).backward).toBe(backward);
+    // An omitted `$schema` reads as the other side's.
+    expect(compare(scoped, { $schema: dialect, ...restricted }).backward).toBe(backward);
+  });
+
+  // Review finding: equal documents were compared clause by clause.
+  test('identical schemas with unmodeled reference constraints are compatible', () => {
+    const oneOf = { oneOf: [{ 'x-gts-type-ref': 'gts.*' }, { 'x-gts-type-ref': 'gts.x.*' }] };
+    const mixed = { anyOf: [{ 'x-gts-type-ref': 'gts.*' }, { const: 1 }] };
+    expect(GtsCompatibility.includes(lookup, oneOf, oneOf)).toBe('compatible');
+    expect(compare(mixed, mixed)).toEqual({ backward: 'compatible', forward: 'compatible' });
+    // `/$id` names a different type on each side.
+    const self = { oneOf: [{ 'x-gts-type-ref': '/$id' }, { 'x-gts-type-ref': 'gts.x.*' }] };
+    expect(
+      GtsCompatibility.includes(lookup, self, self, { outer: 'gts.x.unit.a.v1~', inner: 'gts.x.unit.b.v1~' })
+    ).toBe('unknown');
   });
 });

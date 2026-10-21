@@ -10,6 +10,10 @@ import {
 } from './types';
 import { Gts } from './gts';
 import { compileSafePattern, RegexCompilationError, type SafePattern } from './regex-engine';
+import { clauseImplied, isComparedElsewhere, refClauses, usesRefKeywords, witnessCandidates } from './ref-scope';
+import { isGtsRefKeyword, X_GTS_REF_SELF, XGtsRefValidator } from './x-gts-ref';
+
+const SELF_OPERAND = JSON.stringify(X_GTS_REF_SELF);
 
 /**
  * Type Schema Evolution Compatibility (GTS spec 0.13 §4.2 - §4.5).
@@ -146,10 +150,12 @@ const KEYWORDS: Record<string, KeywordSpec> = {
   contains: { kind: 'unmodeled', values: 'schema' },
   additionalItems: { kind: 'unmodeled', values: 'schema' },
   uniqueItems: { kind: 'unmodeled' },
-  // Enforced against instances by OP#6 (§9.6), so it is an assertion, not an
-  // annotation - even though it shares the `x-gts-` prefix with the type-level
-  // keywords that genuinely are metadata.
-  'x-gts-ref': { kind: 'unmodeled' },
+  // Enforced against instances by OP#6 (§9.6), so they are assertions, not
+  // annotations - even though they share the `x-gts-` prefix with the
+  // type-level keywords that genuinely are metadata.
+  'x-gts-type-ref': { kind: 'unmodeled' },
+  'x-gts-instance-ref': { kind: 'unmodeled' },
+  'x-gts-pattern-ref': { kind: 'unmodeled' },
 };
 
 /**
@@ -549,6 +555,10 @@ function mergeSchemas(a: Schema, b: Schema): Schema {
       case 'items':
         out[key] = mergeSchemas(current, value);
         break;
+      case 'allOf':
+        // Residual conjuncts from earlier merges (see the default case).
+        out[key] = [...(Array.isArray(current) ? current : []), ...(Array.isArray(value) ? value : [])];
+        break;
       case 'minimum':
       case 'exclusiveMinimum':
       case 'minLength':
@@ -566,11 +576,49 @@ function mergeSchemas(a: Schema, b: Schema): Schema {
         }
         break;
       default:
-        // Keep the left-hand value; unmodeled divergence surfaces as `unknown`.
+        // Both values apply. Keeping only one would silently drop a conjunct,
+        // so a differing one is kept as a residual `allOf` branch; the
+        // comparison reasons about it or reports `unknown`.
+        if (!deepEqual(current, value)) {
+          out.allOf = [...(Array.isArray(out.allOf) ? out.allOf : []), { [key]: value }];
+        }
         break;
     }
   }
   return out;
+}
+
+/** Keys of `schema` that hold reference constraints (`ref-scope.ts` reads them as clauses). */
+function isRefConstraint(key: string, value: unknown): boolean {
+  return isGtsRefKeyword(key) || (['not', 'anyOf', 'oneOf'].includes(key) && usesRefKeywords({ [key]: value }));
+}
+
+/**
+ * `schema` without its reference constraints, including residual `allOf`
+ * conjuncts that only hold such constraints. What remains is compared by the
+ * ordinary keyword rules.
+ */
+function withoutRefConstraints(schema: Schema): Schema {
+  if (!isObject(schema)) return schema;
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (isRefConstraint(key, value)) continue;
+    if (key === 'allOf' && Array.isArray(value)) {
+      const rest = value.filter(
+        (branch) => !(isObject(branch) && Object.entries(branch).every(([k, v]) => isRefConstraint(k, v)))
+      );
+      if (rest.length > 0) out.allOf = rest;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** The selected type `/$id` names for each side of a comparison. */
+export interface RefSelves {
+  outer?: string;
+  inner?: string;
 }
 
 /**
@@ -780,8 +828,18 @@ export function findCrossedBound(subSchemas: Schema[]): string | null {
 
 class SubsumptionChecker {
   private resolver: SchemaResolver;
+  private evaluator = new XGtsRefValidator();
 
-  constructor(store: EntityLookup) {
+  /**
+   * `dialectSource` carries the `$schema` of the compared documents:
+   * `stripAnnotations` drops it from every compared fragment, but evaluating
+   * a counterexample depends on it (2020-12 `minContains`, for one).
+   */
+  constructor(
+    store: EntityLookup,
+    private selves: RefSelves = {},
+    private dialectSource: Schema = {}
+  ) {
     this.resolver = new SchemaResolver(store);
   }
 
@@ -829,8 +887,61 @@ class SubsumptionChecker {
 
     const outerNorm = stripAnnotations(outer);
     const innerNorm = stripAnnotations(inner);
-    if (deepEqual(outerNorm, innerNorm)) return this.finalize('compatible');
+    // Equal documents are equal schemas unless a `/$id` operand somewhere
+    // below names a different type on each side. This holds for reference
+    // constraints the clause rules cannot read as well.
+    const selfDependent = this.selves.outer !== this.selves.inner && JSON.stringify(outerNorm).includes(SELF_OPERAND);
+    if (!selfDependent && deepEqual(outerNorm, innerNorm)) return this.finalize('compatible');
+    if (usesRefKeywords(outerNorm) || usesRefKeywords(innerNorm)) {
+      return this.finalize(this.compareWithRefs(outerNorm, innerNorm, depth));
+    }
+    return this.finalize(this.compareKeywords(outerNorm, innerNorm, depth));
+  }
 
+  /**
+   * Compares schemas that use GTS reference keywords (§9.6.1 "Derivation and
+   * evolution", §9.6.2). Inclusion of the reference constraints is proven
+   * from their clauses (`ref-scope.ts`); a non-inclusion is reported only
+   * with a concrete string that `inner` accepts and `outer` rejects, both
+   * evaluated as whole schemas. The remaining keywords are compared by the
+   * ordinary rules. Anything else is `unknown`; registry contents never
+   * decide a verdict.
+   */
+  private compareWithRefs(outer: Schema, inner: Schema, depth: number): CompatVerdict {
+    const outerClauses = refClauses(outer, this.selves.outer).filter((clause) => !isComparedElsewhere(clause));
+    const innerClauses = refClauses(inner, this.selves.inner);
+    const refsIncluded = outerClauses.every((clause) => clauseImplied(innerClauses, clause));
+
+    const innerRest = withoutRefConstraints(inner);
+    let rest = this.compareKeywords(withoutRefConstraints(outer), innerRest, depth);
+    // Without its reference constraints `inner` accepts more than it does, so
+    // a non-inclusion found there is not proven for `inner` itself.
+    if (rest === 'incompatible' && !deepEqual(innerRest, inner)) rest = 'unknown';
+
+    if (refsIncluded && rest === 'compatible') return 'compatible';
+    if (rest === 'incompatible') return 'incompatible';
+    for (const witness of witnessCandidates([...innerClauses, ...refClauses(outer, this.selves.outer)])) {
+      // A schema that cannot be evaluated proves nothing (tri-state).
+      if (
+        this.evaluate(inner, witness, this.selves.inner) === 'accept' &&
+        this.evaluate(outer, witness, this.selves.outer) === 'reject'
+      ) {
+        return 'incompatible';
+      }
+    }
+    return 'unknown';
+  }
+
+  private evaluate(schema: Schema, value: unknown, selectedTypeId: string | undefined): 'accept' | 'reject' | 'error' {
+    try {
+      return this.evaluator.accepts(value, schema, selectedTypeId, this.dialectSource) ? 'accept' : 'reject';
+    } catch {
+      return 'error';
+    }
+  }
+
+  private compareKeywords(outerNorm: Schema, innerNorm: Schema, depth: number): CompatVerdict {
+    if (isEmptySchema(outerNorm)) return 'compatible';
     let verdict: CompatVerdict = 'compatible';
     verdict = worst(verdict, this.compareTypes(outerNorm, innerNorm));
     verdict = worst(verdict, this.compareFixedValues(outerNorm, innerNorm));
@@ -840,7 +951,7 @@ class SubsumptionChecker {
     verdict = worst(verdict, this.compareNarrowing(outerNorm, innerNorm));
     verdict = worst(verdict, this.compareUnmodeled(outerNorm, innerNorm));
 
-    return this.finalize(verdict);
+    return verdict;
   }
 
   private compareTypes(outer: Schema, inner: Schema): CompatVerdict {
@@ -969,6 +1080,8 @@ class SubsumptionChecker {
     // so a keyword nobody has thought about yet fails closed to `unknown`
     // rather than being silently ignored.
     const keys = new Set([...Object.keys(outer), ...Object.keys(inner)]);
+    // A residual `allOf` holds conjuncts the resolver could not merge.
+    if (keys.has('allOf') && !deepEqual(outer.allOf, inner.allOf)) return 'unknown';
     for (const key of keys) {
       if (keywordKind(key) !== 'unmodeled') continue;
       if (deepEqual(outer[key], inner[key])) continue;
@@ -1049,6 +1162,11 @@ class SubsumptionChecker {
   }
 }
 
+/** The canonical GTS identifier a schema document's `$id` names, if any. */
+function selfId(schema: Schema): string | undefined {
+  return isObject(schema) && typeof schema.$id === 'string' ? stripUriPrefix(schema.$id) : undefined;
+}
+
 export class GtsCompatibility {
   /**
    * The dialect a `$schema` value names, with the spellings that carry no
@@ -1090,10 +1208,36 @@ export class GtsCompatibility {
       return { backward: 'unknown', forward: 'unknown' };
     }
 
+    const oldSelf = selfId(oldSchema);
+    const newSelf = selfId(newSchema);
+    const dialectSource = { $schema: oldDialect ?? newDialect };
     return {
-      backward: new SubsumptionChecker(store).subsumes(newSchema, oldSchema),
-      forward: new SubsumptionChecker(store).subsumes(oldSchema, newSchema),
+      backward: new SubsumptionChecker(store, { outer: newSelf, inner: oldSelf }, dialectSource).subsumes(
+        newSchema,
+        oldSchema
+      ),
+      forward: new SubsumptionChecker(store, { outer: oldSelf, inner: newSelf }, dialectSource).subsumes(
+        oldSchema,
+        newSchema
+      ),
     };
+  }
+
+  /**
+   * Verdict for `Valid(inner) ⊆ Valid(outer)` between two (sub)schemas, with
+   * `/$id` resolved per side and `dialectSource` (by default `outer`)
+   * supplying the `$schema` of the documents they come from. Used by OP#12
+   * to compare a restated property with the base declaration.
+   */
+  static includes(
+    store: EntityLookup,
+    outer: Schema,
+    inner: Schema,
+    selves: RefSelves = {},
+    dialectSource: Schema = outer
+  ): CompatVerdict {
+    const $schema = isObject(dialectSource) ? dialectSource.$schema : undefined;
+    return new SubsumptionChecker(store, selves, { $schema }).subsumes(outer, inner);
   }
 
   static checkCompatibility(

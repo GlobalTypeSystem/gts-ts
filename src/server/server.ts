@@ -361,18 +361,18 @@ export class GtsServer {
         };
       }
 
-      // Validate schema with x-gts-ref if it's a schema
-      // x-gts-ref validation always returns 422 on failure (not just when validate=true)
+      // GTS reference operands are checked on every schema registration, even
+      // with validate=false: an invalid operand is a schema error that a later
+      // validation would report anyway, and §9.6.3 permits early rejection.
       if (entity.isSchema) {
-        const xGtsRefValidator = new XGtsRefValidator(this.store.asEntityLookup());
-        const xGtsRefErrors = xGtsRefValidator.validateSchema(content);
+        const xGtsRefErrors = new XGtsRefValidator().validateSchema(content);
         if (xGtsRefErrors.length > 0) {
           const errorMsgs = xGtsRefErrors.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ');
           reply.code(422);
           return {
             ok: false,
             is_type_schema: true,
-            error: `x-gts-ref validation failed: ${errorMsgs}`,
+            error: `GTS reference validation failed: ${errorMsgs}`,
           };
         }
       }
@@ -676,15 +676,14 @@ export class GtsServer {
   }
 
   // Reference/ancestor checks that need the rest of the batch present:
-  // x-gts-ref existence and derived-vs-parent compatibility. Run after every
+  // GTS reference operands and derived-vs-parent compatibility. Run after every
   // entry is staged so intra-batch references resolve regardless of order.
   private schemaReferenceError(content: any, id: string, refValidation: GtsRefValidationMode): string | null {
     const documentResult = this.store.validateSchemaDocument(content, id);
     if (!documentResult.ok) return documentResult.error;
-    const xGtsRefValidator = new XGtsRefValidator(this.store.asEntityLookup());
-    const xGtsRefErrors = xGtsRefValidator.validateSchema(content);
+    const xGtsRefErrors = new XGtsRefValidator().validateSchema(content);
     if (xGtsRefErrors.length > 0) {
-      return `x-gts-ref validation failed: ${xGtsRefErrors.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ')}`;
+      return `GTS reference validation failed: ${xGtsRefErrors.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ')}`;
     }
     const parentResult = this.store.validateSchemaAgainstParent(id, refValidation);
     if (!parentResult.ok) return `Derived schema is not compatible with base: ${parentResult.error}`;
@@ -704,7 +703,7 @@ export class GtsServer {
     }
     const typeId = identity.typeId as string;
 
-    // Reuse the single-entity registration path (x-gts-ref checks, modifier
+    // Reuse the single-entity registration path (reference operand checks, modifier
     // rules, store.register) via a throwaway reply that swallows status codes;
     // per-entry outcomes are surfaced through the aggregate `results` instead.
     const fakeReply = { code: () => fakeReply } as unknown as FastifyReply;
@@ -794,7 +793,9 @@ export class GtsServer {
   ): Promise<any> {
     const { pattern, candidate } = request.query;
 
-    if (!pattern || !candidate) {
+    // An empty string is a present but invalid identifier: report it as a
+    // match error, not as a missing parameter.
+    if (typeof pattern !== 'string' || typeof candidate !== 'string') {
       reply.code(400);
       throw new Error('Missing required parameters: pattern, candidate');
     }

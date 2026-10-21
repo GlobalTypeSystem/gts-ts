@@ -1,6 +1,7 @@
 import { RelationshipResult, stripUriPrefix } from './types';
 import { GtsStore } from './store';
 import { Gts } from './gts';
+import { ENTITY_REF_KEYWORDS } from './x-gts-ref';
 
 export class GtsRelationships {
   static resolveRelationships(store: GtsStore, gtsId: string): RelationshipResult {
@@ -68,9 +69,11 @@ export class GtsRelationships {
       }
     }
 
-    if ('x-gts-ref' in obj && typeof obj['x-gts-ref'] === 'string') {
-      const ref = obj['x-gts-ref'];
-      if (Gts.isValidGtsID(ref)) {
+    // Concrete entity-reference operands name related entities. Pattern
+    // references are registry-independent and are not reported (§9.6.2).
+    for (const keyword of ENTITY_REF_KEYWORDS) {
+      const ref = obj[keyword];
+      if (typeof ref === 'string' && Gts.isConcreteGtsID(ref)) {
         relationships.add(ref);
         if (!store.get(ref)) {
           brokenReferences.add(ref);

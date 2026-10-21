@@ -1,4 +1,4 @@
-import { QueryResult, GTS_PREFIX } from './types';
+import { QueryResult } from './types';
 import { GtsStore } from './store';
 import { Gts } from './gts';
 
@@ -21,7 +21,7 @@ export class GtsQuery {
       const results: any[] = [];
 
       // Iterate through all entities in the store
-      for (const id of store.query(basePattern, undefined, false)) {
+      for (const id of store.query(basePattern)) {
         if (results.length >= limit) break;
         const entity = store.get(id);
         if (!entity || !this.matchesFilters(entity.content, filters)) continue;
@@ -107,19 +107,11 @@ export class GtsQuery {
 
   private static validateQueryPattern(basePattern: string, isWildcard: boolean): string | undefined {
     if (isWildcard) {
-      // Wildcard pattern must end with .* or ~*
-      if (!basePattern.endsWith('.*') && !basePattern.endsWith('~*')) {
-        return 'Invalid query: wildcard patterns must end with .* or ~*';
-      }
-
-      // Validate as wildcard pattern
+      // Wildcard patterns follow the spec §10 grammar.
       try {
-        // Just check it's a valid pattern format
-        if (!basePattern.startsWith(GTS_PREFIX)) {
-          return `Invalid query: pattern must start with '${GTS_PREFIX}'`;
-        }
+        Gts.parsePattern(basePattern);
       } catch (err) {
-        return `Invalid query: ${err}`;
+        return `Invalid query: ${err instanceof Error ? err.message : String(err)}`;
       }
     } else {
       // Non-wildcard pattern must be a complete valid GTS ID

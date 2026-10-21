@@ -6,9 +6,18 @@ A complete TypeScript implementation of the Global Type System (GTS)
 
 GTS [Global Type System](https://github.com/globaltypesystem/gts-spec) is a simple, human-readable, globally unique identifier and referencing system for data type definitions (e.g., JSON Schemas) and data instances (e.g., JSON objects). This TypeScript implementation provides type-safe operations for working with GTS identifiers.
 
-**Targets gts-spec [v0.15.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.15.0)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for breaking changes.
+**Targets gts-spec [v0.17.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.17.0)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for breaking changes.
 
-Regular expressions follow the GTS 0.15 [safe regular-expression profile](#regular-expressions) (spec README §11.0.1, ADR-0006), a breaking change from the full ECMA-262 support of 0.14. The conformance tests run against the released `v0.15.0` pinned above.
+GTS 0.17 replaces `x-gts-ref` with the kind-specific [entity references](#gts-references) `x-gts-type-ref` and `x-gts-instance-ref`, and 0.16 adds `x-gts-pattern-ref` with a formal pattern grammar and coverage relation (spec README §9.6, §10, ADR-0007, ADR-0008). Regular expressions follow the GTS 0.15 [safe regular-expression profile](#regular-expressions) (spec README §11.0.1, ADR-0006). The conformance tests run against the released `v0.17.0` pinned above.
+
+### GTS references
+
+- **`x-gts-type-ref`** / **`x-gts-instance-ref`** constrain a string to a concrete Type or Instance Identifier selected by the operand: a concrete identifier, a §10 wildcard pattern, or `/$id` (the selected leaf type). A concrete Instance ID operand is a schema error for `x-gts-type-ref`.
+- **`x-gts-pattern-ref`** constrains a string to a GTS identifier pattern covered by the operand (`M(value) ⊆ M(operand)`); it never consults the registry.
+- The keywords are evaluated by the JSON Schema engine, so `not`, `anyOf`, `oneOf` and the other applicators apply to them. `gts-ref-validation` (`none` / `any-present` / `any-valid`) adds registry presence and validity checks for entity references: a *candidate* is looked up only where its keyword is evaluated, so the result follows the applicators; *operand* targets are checked schema-wide, including for absent properties and inactive branches.
+- An invalid operand is a schema error at every schema location — definitions, inactive branches, local `$ref` targets and `x-gts-traits-schema` — and cannot be inverted by `not` or rescued by `anyOf`. The removed `x-gts-ref`, like any unknown `x-gts-*` keyword, is rejected.
+- Identifiers and patterns are validated as spelled (no trimming); versions are unsigned 32-bit integers; an omitted minor matches any minor in every segment, and `v1.*` requires an explicit minor.
+- OP#12 and OP#8 compare reference scopes by kind-filtered §10 coverage, resolving `/$id` for each compared schema. When reference constraints are not proven to be included, OP#8 reports `incompatible` only with a concrete counterexample and otherwise `unknown`; OP#12 rejects a restated property unless inclusion is proven.
 
 ### Regular expressions
 
@@ -25,7 +34,7 @@ Featureset:
 - [x] **OP#1 - ID Validation**: Verify identifier syntax using regex patterns
 - [x] **OP#2 - ID Extraction**: Fetch identifiers from JSON objects or JSON Schema documents
 - [x] **OP#3 - ID Parsing**: Decompose identifiers into constituent parts (vendor, package, namespace, type, version, etc.)
-- [x] **OP#4 - ID Pattern Matching**: Match identifiers against patterns containing wildcards
+- [x] **OP#4 - ID Pattern Matching**: Match concrete identifiers against patterns, and pattern candidates by coverage (§10)
 - [x] **OP#5 - ID to UUID Mapping**: Generate deterministic UUIDs from GTS identifiers
 - [x] **OP#6 - Instance Validation**: Validate object instances against their corresponding Type Schemas
 - [x] **OP#7 - Relationship Resolution**: Load all schemas and instances, resolve inter-dependencies, and detect broken references
@@ -44,7 +53,7 @@ Other GTS spec [Reference Implementation](https://github.com/globaltypesystem/gt
 - [x] **In-memory entities registry** - simple GTS entities registry with optional GTS references validation on entity registration
 - [x] **CLI** - command-line interface for all GTS operations
 - [x] **Web server** - a non-production web-server with REST API for the operations processing and testing
-- [x] **x-gts-ref** - to support special GTS entity reference annotation in schemas
+- [x] **x-gts-type-ref / x-gts-instance-ref / x-gts-pattern-ref** - GTS entity references and pattern-valued fields in schemas
 - [x] **x-gts-final / x-gts-abstract** - GTS Type Schema modifiers controlling inheritance and instantiation
 - [ ] **YAML support** - to support YAML files (`*.yml`, `*.yaml`) as input files
 - [ ] **TypeSpec support** - add [typespec.io](https://typespec.io/) files (`*.tsp`) support

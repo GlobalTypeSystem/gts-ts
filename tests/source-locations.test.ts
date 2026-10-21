@@ -111,7 +111,7 @@ name: 42
     expect(issue.message).not.toContain('private-name.yaml');
   });
 
-  test('preserves escaped property segments in x-gts-ref locations', () => {
+  test('preserves escaped property segments in x-gts-type-ref locations', () => {
     const gts = new GTS();
     const typeId = 'gts.x.unit.location.pointer.v1~';
     const property = 'a.b/c~d';
@@ -119,7 +119,7 @@ name: 42
       $id: `gts://${typeId}`,
       $schema: 'http://json-schema.org/draft-07/schema#',
       type: 'object',
-      properties: { [property]: { type: 'string', 'x-gts-ref': 'gts.x.unit.expected.type.v1~' } },
+      properties: { [property]: { type: 'string', 'x-gts-type-ref': 'gts.x.unit.expected.type.v1~' } },
     });
     const text = `{
   "id": "${typeId}x.unit._.one.v1",
@@ -392,5 +392,24 @@ name: 42
     expect(result.ok).toBe(false);
     expect(issue.keyword).toBe('dialect');
     expectSource(text, issue, `"${childId}"`, '"type"');
+  });
+});
+
+describe('source locations of reference operand errors', () => {
+  test('an invalid operand reached through an escaped local $ref is located at its declaration', () => {
+    const text = `{
+  "$id": "gts://gts.x.unit.location.operand.v1~",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": { "ref": { "$ref": "#/x~1data~0" } },
+  "x/data~": { "not": { "x-gts-type-ref": "invalid" } }
+}`;
+
+    const result = new GTS().registerAndValidateText(text, 'json', GtsRefValidationMode.None);
+    const issue = issueAt(result, 0, '/x~1data~0/not/x-gts-type-ref');
+
+    expect(result.ok).toBe(false);
+    expect(issue.keyword).toBe('x-gts-type-ref');
+    expectSource(text, issue, '"invalid"', '"x-gts-type-ref"');
   });
 });

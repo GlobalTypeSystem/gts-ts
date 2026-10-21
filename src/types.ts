@@ -332,7 +332,7 @@ export interface GtsConfig {
 
 /**
  * The read-only registry surface that the compatibility engine and the
- * `x-gts-ref` validator need - entity lookup by identifier, nothing more.
+ * reference keyword checks need - entity lookup by identifier, nothing more.
  *
  * They depend on this instead of on `GtsStore` so that the dependency stays
  * one-way: the registry may reach into those modules, and they only need to
