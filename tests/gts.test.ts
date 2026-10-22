@@ -2036,6 +2036,15 @@ describe('reference operands at schema locations (§9.6.3)', () => {
   });
 });
 
+test('validateInstance reports a $ref to another resource as a schema error', () => {
+  const leaf = {
+    $id: 'gts://gts.x.probe._.base.v1~x.probe._.leaf.v1~',
+    allOf: [{ $ref: 'gts://gts.x.probe._.base.v1~' }],
+    properties: { r: { type: 'string', 'x-gts-type-ref': 'gts.x.probe._.base.v1~' } },
+  };
+  expect(() => new XGtsRefValidator().validateInstance({ r: 'gts.x.other._.t.v1~' }, leaf)).toThrow(GtsSchemaError);
+});
+
 // P5-R2 - a `$ref` that does not resolve to a usable schema must fail closed:
 // the subtree behind it cannot be shown to satisfy its reference keywords.
 describe('P5-R2 - $ref resolution fails closed instead of silently skipping the subtree', () => {
@@ -2157,7 +2166,7 @@ describe('reference keywords under JSON Schema applicators', () => {
     ],
     ['a reference condition selecting a false branch', { if: { 'x-gts-type-ref': 'gts.*' }, then: false }],
   ])('reports a rejection by applicators over reference keywords: %s', (_name, schema) => {
-    expect(validator.accepts(target, schema)).toBe(false);
+    expect(validator.acceptor(schema)(target)).toBe(false);
     expect(validator.validateInstance(target, schema)).toHaveLength(1);
   });
 

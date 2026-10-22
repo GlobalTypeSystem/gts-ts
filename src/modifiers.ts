@@ -11,14 +11,12 @@
  */
 
 import { forEachSchemaNode } from './schema-walk';
+import { GTS_REF_KEYWORDS } from './x-gts-ref';
 
 export const X_GTS_FINAL = 'x-gts-final';
 export const X_GTS_ABSTRACT = 'x-gts-abstract';
 export const X_GTS_TRAITS = 'x-gts-traits';
 export const X_GTS_TRAITS_SCHEMA = 'x-gts-traits-schema';
-export const X_GTS_TYPE_REF = 'x-gts-type-ref';
-export const X_GTS_INSTANCE_REF = 'x-gts-instance-ref';
-export const X_GTS_PATTERN_REF = 'x-gts-pattern-ref';
 
 /**
  * The four keywords that describe the type as a whole and therefore MUST sit at
@@ -32,10 +30,8 @@ export const DOCUMENT_LEVEL_KEYWORDS = [X_GTS_FINAL, X_GTS_ABSTRACT, X_GTS_TRAIT
  * the removed `x-gts-ref` - is a schema error. Plain `x-*` vendor extensions
  * outside the namespace are untouched by this rule.
  */
-export const SUPPORTED_X_GTS_KEYWORDS = [
-  X_GTS_TYPE_REF,
-  X_GTS_INSTANCE_REF,
-  X_GTS_PATTERN_REF,
+export const SUPPORTED_X_GTS_KEYWORDS: readonly string[] = [
+  ...GTS_REF_KEYWORDS,
   X_GTS_TRAITS_SCHEMA,
   X_GTS_TRAITS,
   X_GTS_FINAL,

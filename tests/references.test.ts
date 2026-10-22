@@ -409,6 +409,23 @@ describe('OP#6 - any-valid through reference cycles (§9.6.1)', () => {
   });
 });
 
+describe('entity-reference operand targets', () => {
+  // Review finding: a missing operand target lost its location and keyword.
+  test.each([
+    ['a concrete operand', 'gts.x.unit.missing.target.v1~'],
+    ['a wildcard operand', 'gts.x.unit.missing.*'],
+  ])('%s naming no registered entity is reported at the keyword', (_label, operand) => {
+    const gts = new GTS();
+    const id = 'gts.x.unit.refscope.dangling.v1~';
+    gts.register(holder(id, { type: 'string', 'x-gts-type-ref': operand }));
+    const result = gts.validateSchema(id, GtsRefValidationMode.AnyPresent);
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual([
+      expect.objectContaining({ instancePath: '/properties/ref/x-gts-type-ref', keyword: 'x-gts-type-ref' }),
+    ]);
+  });
+});
+
 describe('OP#12 - restated properties compared as whole schemas', () => {
   // Review finding: a type behind a local `$ref` is not dropped.
   test('a type reached through a local $ref is kept', () => {
@@ -444,5 +461,204 @@ describe('OP#12 - restated properties compared as whole schemas', () => {
     // Draft-07 has no `minContains`, so `contains: false` rejects `[]`.
     expect(restated(DRAFT7).error).toContain('accepts values the base rejects');
     expect(restated(D2020).error).not.toContain('accepts values the base rejects');
+  });
+
+  // Review finding: a recursive local `$ref` exhausts inlining, which is not
+  // evidence of reference keywords.
+  test('a recursive local $ref without reference keywords is not a reference scope', () => {
+    const node = { type: 'object', properties: { children: { type: 'array', items: { $ref: '#/definitions/node' } } } };
+    const tree = { $ref: '#/definitions/node' };
+    const gts = new GTS();
+    const base = 'gts.x.unit.refscope.tree.v1~';
+    const leaf = `${base}x.unit._.leaf.v1~`;
+    gts.register(holder(base, tree, { definitions: { node } }));
+    gts.register(holder(leaf, tree, { definitions: { node } }));
+    expect(gts.validateSchema(leaf, NONE)).toMatchObject({ ok: true });
+  });
+
+  test.each([
+    [
+      'a pointer inside an embedded resource',
+      {
+        $id: 'inner',
+        type: 'object',
+        properties: { nested: { $ref: '#/definitions/R' } },
+        definitions: { R: { type: 'string' } },
+      },
+      {},
+    ],
+    [
+      'a recursive anchor',
+      { $ref: '#node' },
+      { definitions: { node: { $id: '#node', type: 'object', properties: { child: { $ref: '#node' } } } } },
+    ],
+  ])('an identical restatement through %s without reference keywords is valid', (_label, prop, extra) => {
+    const gts = new GTS();
+    const base = 'gts.x.unit.refscope.scoped.v1~';
+    const leaf = `${base}x.unit._.leaf.v1~`;
+    gts.register(holder(base, prop, extra));
+    gts.register(holder(leaf, prop, extra));
+    expect(gts.validateSchema(leaf, NONE)).toMatchObject({ ok: true });
+  });
+
+  // Review finding: reference keywords under `if`/`then`/`else` are a scope too.
+  test('a conditional reference scope cannot be dropped', () => {
+    const conditional = { type: 'string', if: true, then: { 'x-gts-type-ref': 'gts.x.*' } };
+    expect(derive(conditional, { type: 'string' }).error).toContain('is not proven to stay within the base');
+    expect(derive(conditional, conditional).ok).toBe(true);
+  });
+
+  // Review finding: a narrowing through anyOf/oneOf or a registered $ref
+  // keeps the base type.
+  test.each([
+    [
+      'anyOf',
+      {
+        anyOf: [
+          { type: 'string', maxLength: 2 },
+          { type: 'string', minLength: 5 },
+        ],
+      },
+      true,
+    ],
+    [
+      'oneOf',
+      {
+        oneOf: [
+          { type: 'string', maxLength: 2 },
+          { type: 'string', minLength: 5 },
+        ],
+      },
+      true,
+    ],
+    ['anyOf with a wider branch', { anyOf: [{ type: 'string' }, { type: 'integer' }] }, false],
+    ['no type', { minLength: 1 }, false],
+    ['anyOf with a wider allOf branch', { anyOf: [{ type: 'string' }, { allOf: [{ type: 'integer' }] }] }, false],
+    [
+      'anyOf with a narrower allOf branch',
+      { anyOf: [{ type: 'string', maxLength: 1 }, { allOf: [{ type: 'string' }] }] },
+      true,
+    ],
+  ])('a restated property narrowed by %s is checked against the base type', (_label, leafProp, valid) => {
+    expect(derive({ type: 'string' }, leafProp).ok).toBe(valid);
+  });
+
+  test.each([
+    [
+      'allOf type intersection in either order',
+      { type: 'string' },
+      { anyOf: [{ type: 'string' }, { allOf: [{ type: 'number' }, { type: 'integer' }] }] },
+      false,
+    ],
+    ['a value the base type excludes', { type: 'integer', enum: [1, 1.5] }, { const: 1.5 }, false],
+    ['a value the base type admits', { type: 'integer', enum: [1, 1.5] }, { const: 1 }, true],
+    [
+      'a union of narrower bounds',
+      { type: 'string', maxLength: 5 },
+      {
+        anyOf: [
+          { type: 'string', maxLength: 2 },
+          { type: 'string', maxLength: 3 },
+        ],
+      },
+      true,
+    ],
+    [
+      'a union with a wider bound',
+      { type: 'string', maxLength: 5 },
+      {
+        anyOf: [
+          { type: 'string', maxLength: 2 },
+          { type: 'string', maxLength: 9 },
+        ],
+      },
+      false,
+    ],
+  ])('%s', (_label, baseProp, leafProp, valid) => {
+    expect(derive(baseProp, leafProp).ok).toBe(valid);
+  });
+
+  test('a reference scope behind an anchor and a registered $ref cannot be dropped', () => {
+    const gts = new GTS();
+    const scope = 'gts.x.unit.refscope.anchored.v1~';
+    const base = 'gts.x.unit.refscope.anchorbase.v1~';
+    const leaf = `${base}x.unit._.leaf.v1~`;
+    const definitions = { node: { $id: '#node', $ref: `gts://${scope}` } };
+    gts.register({ $id: `gts://${scope}`, $schema: DRAFT7, type: 'string', 'x-gts-type-ref': 'gts.x.*' });
+    gts.register(holder(base, { $ref: '#node' }, { definitions }));
+    gts.register(holder(leaf, { type: 'string' }, { definitions }));
+    expect(gts.validateSchema(leaf, NONE).ok).toBe(false);
+  });
+
+  test.each([
+    ['', {}],
+    [' with an empty patternProperties', { patternProperties: {} }],
+  ])('an allOf branch does not extend a closed object%s', (_label, extra) => {
+    const closed = { type: 'object', properties: { a: { type: 'string' } }, additionalProperties: false, ...extra };
+    const base = { ...closed, allOf: [{ properties: { b: { type: 'string' } } }] };
+    const leaf = { ...closed, properties: { a: { type: 'string' }, b: { type: 'string' } } };
+    expect(derive(base, leaf).ok).toBe(false);
+  });
+
+  test.each(['#node', '#%6eode'])(
+    'a reference scope behind an anchor %s under an unknown keyword cannot be dropped',
+    (ref) => {
+      const meta = { meta: { $id: '#node', type: 'string', 'x-gts-type-ref': 'gts.x.*' } };
+      const gts = new GTS();
+      const base = 'gts.x.unit.refscope.metaanchor.v1~';
+      const leaf = `${base}x.unit._.leaf.v1~`;
+      gts.register(holder(base, { $ref: ref }, meta));
+      gts.register(holder(leaf, { type: 'string' }, meta));
+      expect(gts.validateSchema(leaf, NONE).ok).toBe(false);
+    }
+  );
+
+  test.each(['const', 'enum', 'default', 'examples'])(
+    'a reference scope behind an anchor in a definition named %s cannot be dropped',
+    (definition) => {
+      const definitions = {
+        definitions: { [definition]: { $id: '#node', type: 'string', 'x-gts-type-ref': 'gts.x.*' } },
+      };
+      const gts = new GTS();
+      const base = 'gts.x.unit.refscope.defanchor.v1~';
+      const leaf = `${base}x.unit._.leaf.v1~`;
+      gts.register(holder(base, { $ref: '#node' }, definitions));
+      gts.register(holder(leaf, { type: 'string' }, definitions));
+      expect(gts.validateSchema(leaf, NONE).ok).toBe(false);
+    }
+  );
+
+  test('a no-op applicator does not waive an inherited bound', () => {
+    expect(derive({ type: 'string', maxLength: 2 }, { type: 'string', minLength: 1, anyOf: [{}] }).ok).toBe(false);
+  });
+
+  test('a value set is typed by its values', () => {
+    expect(derive({ anyOf: [{ type: 'string' }, { type: 'integer' }] }, { type: 'number', const: 1 }).ok).toBe(true);
+    expect(derive({ type: 'integer' }, { type: 'number', const: 1.5 }).ok).toBe(false);
+  });
+
+  test.each([
+    ['a narrower', { type: 'string', maxLength: 3 }, true],
+    ['a wider', { type: 'integer' }, false],
+  ])('a $ref to %s registered type schema is compared by its content', (_label, target, valid) => {
+    const gts = new GTS();
+    const scope = 'gts.x.unit.refscope.str.v1~';
+    const base = 'gts.x.unit.refscope.typed.v1~';
+    const leaf = `${base}x.unit._.leaf.v1~`;
+    gts.register({ $id: `gts://${scope}`, $schema: DRAFT7, ...target });
+    gts.register(holder(base, { type: 'string' }));
+    gts.register(holder(leaf, { $ref: `gts://${scope}` }));
+    expect(gts.validateSchema(leaf, NONE).ok).toBe(valid);
+  });
+
+  test('reference keywords behind a $ref to a registered schema are a scope too', () => {
+    const gts = new GTS();
+    const scope = 'gts.x.unit.refscope.scope.v1~';
+    const base = 'gts.x.unit.refscope.viaref.v1~';
+    const leaf = `${base}x.unit._.leaf.v1~`;
+    gts.register({ $id: `gts://${scope}`, $schema: DRAFT7, type: 'string', 'x-gts-type-ref': 'gts.x.*' });
+    gts.register(holder(base, { type: 'string', allOf: [{ $ref: `gts://${scope}` }] }));
+    gts.register(holder(leaf, { type: 'string', allOf: [{ if: true, then: { minLength: 1 } }] }));
+    expect(gts.validateSchema(leaf, NONE).error).toContain("Property 'ref'");
   });
 });

@@ -21,7 +21,7 @@
 
 import type AjvCore from 'ajv/dist/core';
 import type { DataValidateFunction, ErrorObject } from 'ajv/dist/types';
-import Ajv from 'ajv';
+import Ajv, { MissingRefError } from 'ajv';
 import Ajv2019 from 'ajv/dist/2019';
 import Ajv2020 from 'ajv/dist/2020';
 import { Gts } from './gts';
@@ -283,7 +283,8 @@ export class XGtsRefValidator {
    * other keywords are not reported. `/$id` resolves to `selectedTypeId`, by
    * default `schema.$id`.
    * Throws {@link GtsSchemaError} when the schema has an invalid operand at
-   * any schema location, even one no value reaches (§9.6.3), and rejects
+   * any schema location, even one no value reaches (§9.6.3), or a `$ref` to
+   * another resource (there is no registry to resolve it), and rejects
    * regular expressions outside the GTS profile before compiling (§11.0.1).
    */
   validateInstance(
@@ -298,8 +299,7 @@ export class XGtsRefValidator {
       throw new GtsSchemaError(schemaErrors.map((error) => `${error.fieldPath}: ${error.reason}`).join('; '));
     }
     assertSafeSchemaPatterns(schema);
-    const ajv = this.ajvFor(schema);
-    const validate = ajv.compile(schema);
+    const validate = this.compile(schema);
     const previous = this.context;
     this.context = { selectedTypeId: selected };
     let errors: ErrorObject[];
@@ -363,23 +363,36 @@ export class XGtsRefValidator {
   }
 
   /**
-   * Whether `schema` accepts `value`, with reference keywords checked
-   * structurally (no registry) and `/$id` naming `selectedTypeId`. Used to
-   * confirm counterexamples when comparing schemas. Throws on a schema error.
+   * Compiles `schema` once into a test of whether it accepts a value, with
+   * reference keywords checked structurally (no registry) and `/$id` naming
+   * `selectedTypeId`. Used to confirm counterexamples when comparing
+   * schemas. Throws on a schema error.
    */
-  accepts(value: unknown, schema: any, selectedTypeId?: string, dialectSource: any = schema): boolean {
-    if (typeof schema === 'boolean') return schema;
+  acceptor(schema: any, selectedTypeId?: string, dialectSource: any = schema): (value: unknown) => boolean {
+    if (typeof schema === 'boolean') return () => schema;
     assertSafeSchemaPatterns(schema, dialectSource);
     // An identity would register the fragment as a resource of its own.
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { $id, $schema, ...fragment } = schema;
     const validate = this.ajvFor(dialectSource).compile(fragment);
-    const previous = this.context;
-    this.context = { selectedTypeId };
+    return (value) => {
+      const previous = this.context;
+      this.context = { selectedTypeId };
+      try {
+        return validate(value) as boolean;
+      } finally {
+        this.context = previous;
+      }
+    };
+  }
+
+  /** Compiles `schema`; a `$ref` to another resource is a schema error. */
+  private compile(schema: any) {
     try {
-      return validate(value) as boolean;
-    } finally {
-      this.context = previous;
+      return this.ajvFor(schema).compile(schema);
+    } catch (error) {
+      if (!(error instanceof MissingRefError)) throw error;
+      throw new GtsSchemaError(`Cannot resolve $ref '${error.missingRef}' without a registry`);
     }
   }
 

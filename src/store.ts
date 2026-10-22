@@ -8,6 +8,7 @@ import { isPlainSchemaObject, contentHash, cloneJsonEntity } from './json-canoni
 import { dialectOf, canonicalDialectUri } from './schema-dialect';
 import { assertSafeSchemaPatterns } from './schema-safety';
 import {
+  CompatVerdict,
   GtsConfig,
   JsonEntity,
   ValidationResult,
@@ -37,14 +38,15 @@ import {
 } from './x-gts-ref';
 import {
   escapeJsonPointerSegment,
+  forEachSchemaNode,
   isEmbeddedResource,
   resolveLocalRef,
   Resource,
   visitJsonSubschemas,
 } from './schema-walk';
-import { unprovenRefClauses, usesRefKeywords } from './ref-scope';
+import { unprovenRefClauses } from './ref-scope';
 import { isDeepStrictEqual } from 'util';
-import { GtsCompatibility, findCrossedBound, isEmptySchema } from './compatibility';
+import { GtsCompatibility, findCrossedBound, isEmptySchema, typesWithin } from './compatibility';
 import { GtsModifiers } from './modifiers';
 
 /**
@@ -357,9 +359,11 @@ export class GtsStore {
     wildcardPatterns?: OperandTargets,
     dialectSource: any = schema,
     pathPrefix: string = ''
-  ): string[] {
+  ): XGtsRefValidationError[] {
     if (refValidation === GtsRefValidationMode.None) return [];
-    const errors: string[] = [];
+    const errors: XGtsRefValidationError[] = [];
+    const fail = (keyword: GtsRefKeyword, path: string, operand: unknown, pattern: string, reason: string) =>
+      errors.push({ keyword, fieldPath: path, value: operand, refPattern: pattern, reason });
     for (const { keyword, operand, path: localPath } of declaredRefOperands(schema, dialectSource)) {
       if (!ENTITY_REF_KEYWORDS.includes(keyword)) continue;
       const path = `${pathPrefix}${localPath}`;
@@ -371,17 +375,39 @@ export class GtsStore {
       }
       if (Gts.containsWildcard(pattern)) {
         if (this.matchingIds(pattern).length === 0) {
-          errors.push(`${path} constrains values to '${pattern}', but no registered GTS entity matches it`);
+          fail(
+            keyword,
+            path,
+            operand,
+            pattern,
+            `constrains values to '${pattern}', but no registered GTS entity matches it`
+          );
         } else {
           if (!wildcardPatterns?.has(pattern)) wildcardPatterns?.set(pattern, { keyword, path });
         }
       } else if (pattern !== stripUriPrefix(selectedTypeId) && !this.get(pattern)) {
-        errors.push(`${path} constrains values to '${pattern}', which is not a registered GTS entity`);
+        fail(
+          keyword,
+          path,
+          operand,
+          pattern,
+          `constrains values to '${pattern}', which is not a registered GTS entity`
+        );
       } else if (pattern !== stripUriPrefix(selectedTypeId)) {
         if (!referencedIds?.has(pattern)) referencedIds?.set(pattern, { keyword, path });
       }
     }
     return errors;
+  }
+
+  /** The failed result for {@link refOperandTargetErrors}, with an issue at each operand. */
+  private refOperandTargetFailure(schemaId: string, errors: XGtsRefValidationError[]): ValidationResult {
+    return {
+      id: schemaId,
+      ok: false,
+      error: `GTS reference validation failed: ${errors.map((error) => `${error.fieldPath} ${error.reason}`).join('; ')}`,
+      errors: errors.map((error) => this.xGtsRefIssue(error)),
+    };
   }
 
   // All three registries extend AjvCore, so the common base type lets callers
@@ -2394,7 +2420,7 @@ export class GtsStore {
         wildcardPatterns
       );
       if (targetErrors.length > 0) {
-        return { id: schemaId, ok: false, error: `GTS reference validation failed: ${targetErrors.join('; ')}` };
+        return this.refOperandTargetFailure(schemaId, targetErrors);
       }
 
       // Per ADR-0001 derivation is established by the chained `$id` alone, so the
@@ -2636,7 +2662,7 @@ export class GtsStore {
       '/x-gts-traits-schema'
     );
     if (targetErrors.length > 0) {
-      return { id: schemaId, ok: false, error: `GTS reference validation failed: ${targetErrors.join('; ')}` };
+      return this.refOperandTargetFailure(schemaId, targetErrors);
     }
 
     try {
@@ -3877,11 +3903,76 @@ export class GtsStore {
     return errors;
   }
 
-  /** Whether `schema` restricts the JSON type of its values: `type`, a value set, or an `allOf` conjunct that does. */
-  private restrictsType(schema: any, depth: number = 0): boolean {
-    if (!isPlainSchemaObject(schema) || depth > MAX_SCHEMA_DEPTH) return false;
-    if (schema.type !== undefined || 'const' in schema || Array.isArray(schema.enum)) return true;
-    return Array.isArray(schema.allOf) && schema.allOf.some((branch: any) => this.restrictsType(branch, depth + 1));
+  /**
+   * Whether the property schema `schema` applies a GTS reference keyword at
+   * any location it applies, `if`/`then`/`else` included, following local
+   * `$ref`s within `document` and `$ref`s to registered schemas, each
+   * visited once. An anchor `$ref` follows every schema declaring that
+   * anchor; a pointer the walk cannot follow from here (into an enclosing
+   * embedded resource) counts when any location of its document reaches
+   * one. Any other `$ref` that cannot
+   * be followed, or a schema past the walk's safety limits, counts as
+   * reaching one (fail closed).
+   */
+  private reachesRefKeywords(schema: unknown, document: any): boolean {
+    const pending: Array<{ root: any; from?: unknown }> = [{ root: document ?? schema, from: schema }];
+    const followed = new Set<string>();
+    const wholeDocuments = new Set<any>();
+    const anchored = new Set<unknown>();
+    let reaches = false;
+    try {
+      while (pending.length > 0 && !reaches) {
+        const { root, from } = pending.pop()!;
+        const unfollowedLocalRef = (_path: string, ref: string) => {
+          const fragment = decodeFragment(ref);
+          if (fragment === undefined) {
+            reaches = true;
+          } else if (fragment !== '' && !fragment.startsWith('/')) {
+            // Ajv resolves an anchor wherever it is declared, even under an
+            // unknown keyword, so its targets are applied locations.
+            for (const target of anchorTargets(root, fragment)) {
+              if (!anchored.has(target)) {
+                anchored.add(target);
+                pending.push({ root, from: target });
+              }
+            }
+          } else if (from !== undefined && !wholeDocuments.has(root)) {
+            // A pointer into an enclosing embedded resource: every location
+            // of the document, declarations included.
+            wholeDocuments.add(root);
+            pending.push({ root });
+          }
+        };
+        forEachSchemaNode(
+          root,
+          (node, _path, resource) => {
+            if (GTS_REF_KEYWORDS.some((keyword) => keyword in node)) {
+              reaches = true;
+            } else if (typeof node.$ref === 'string' && resolveLocalRef(root, resource, node.$ref) === undefined) {
+              const [uri, fragment = ''] = node.$ref.split('#');
+              if (!hasUriPrefix(uri) || uri === root.$id) {
+                unfollowedLocalRef('', node.$ref);
+                return;
+              }
+              const target = this.get(stripUriPrefix(uri));
+              if (!target?.isSchema || !isPlainSchemaObject(target.content)) {
+                reaches = true;
+              } else if (!followed.has(node.$ref)) {
+                followed.add(node.$ref);
+                // A fragment can name a declaration, so the whole document is walked.
+                pending.push({ root: target.content, from: fragment === '' ? target.content : undefined });
+              }
+            }
+          },
+          root,
+          unfollowedLocalRef,
+          from === undefined ? undefined : { subschemas: [from], resource: { schema: root, path: '' } }
+        );
+      }
+    } catch {
+      return true;
+    }
+    return reaches;
   }
 
   private comparePropertyConstraints(
@@ -3906,13 +3997,14 @@ export class GtsStore {
     // keywords involved an unproven inclusion fails too (fail-closed).
     // The restated property with its local `$ref`s inlined.
     let derivedSchema = derived;
+    let verdict: CompatVerdict | undefined;
     if (!inheritsViaRef) {
       const budget: InlineBudget = { paths: 0, exhausted: false };
       const baseSchema = inlineLocalRefs(base, refSelf.baseDocument, budget);
       derivedSchema = inlineLocalRefs(derived, refSelf.derivedDocument, budget);
       // A derivation hierarchy has one dialect (`detectChainDialectMismatch`).
       const dialectSource = { $schema: refSelf.derivedDocument?.$schema ?? refSelf.baseDocument?.$schema };
-      const verdict = budget.exhausted
+      verdict = budget.exhausted
         ? 'unknown'
         : GtsCompatibility.includes(
             this,
@@ -3921,7 +4013,11 @@ export class GtsStore {
             { outer: refSelf.base, inner: refSelf.derived },
             dialectSource
           );
-      const usesRefs = budget.exhausted || usesRefKeywords(baseSchema) || usesRefKeywords(derivedSchema);
+      // Decided on the original schemas: inlining stops at its budget, and a
+      // recursive `$ref` exhausts it without any reference keyword involved.
+      const usesRefs =
+        this.reachesRefKeywords(base, refSelf.baseDocument) ||
+        this.reachesRefKeywords(derived, refSelf.derivedDocument);
       if (verdict === 'incompatible' || (verdict === 'unknown' && usesRefs)) {
         const unproven = usesRefs ? unprovenRefClauses(derivedSchema, baseSchema, refSelf.derived, refSelf.base) : [];
         const detail = unproven.length > 0 ? ` (base reference scope ${unproven.join(', ')})` : '';
@@ -3946,15 +4042,22 @@ export class GtsStore {
     if (crossKeywordConflict) {
       errors.push(`Property '${displayPath}' cannot be satisfied: ${crossKeywordConflict}`);
     }
+    // The keyword checks below approximate the inclusion proven above.
+    if (verdict === 'compatible') return errors;
 
     // Type check
     const baseType = base.type;
     const derivedType = derived.type;
-    // A restated property without `type` (and without a value set that pins
-    // its values), even behind a local `$ref`, accepts values of every type
-    // the base rejects.
-    if (!inheritsViaRef && baseType !== undefined && !this.restrictsType(derivedSchema)) {
-      errors.push(`Property '${displayPath}' drops constraint 'type'`);
+    // A restated property without `type` (and without a value set or
+    // applicator that pins it), even behind a local `$ref`, accepts values of
+    // every type the base rejects. An explicit `type` is compared below.
+    if (!inheritsViaRef && baseType !== undefined) {
+      const within = typesWithin(derivedSchema, baseType);
+      if (within === null) {
+        errors.push(`Property '${displayPath}' drops constraint 'type'`);
+      } else if (!within && derivedType === undefined) {
+        errors.push(`Property '${displayPath}' accepts types outside the base type`);
+      }
     }
     if (baseType !== undefined && derivedType !== undefined) {
       if (Array.isArray(derivedType)) {
@@ -4273,6 +4376,57 @@ function inlineLocalRefs(
   }
   return out;
 }
+
+/** The decoded fragment of `uri` (`''` without one), or `undefined` when it is malformed. */
+function decodeFragment(uri: string): string | undefined {
+  const hash = uri.indexOf('#');
+  try {
+    return hash < 0 ? '' : decodeURIComponent(uri.slice(hash + 1));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Every object in `document` that declares the anchor `name` (`$anchor`,
+ * `$dynamicAnchor`, or a draft-07 `$id` fragment), wherever it sits outside
+ * literal data.
+ */
+function anchorTargets(document: unknown, name: string): object[] {
+  const targets: object[] = [];
+  // `names`: the object maps names to schemas, so no key is literal data.
+  const stack: Array<{ value: unknown; names: boolean }> = [{ value: document, names: false }];
+  let visited = 0;
+  while (stack.length > 0) {
+    const { value, names } = stack.pop()!;
+    if (value === null || typeof value !== 'object') continue;
+    if (++visited > MAX_SCHEMA_PATHS) throw new Error(`Schema exceeds the ${MAX_SCHEMA_PATHS} path safety limit`);
+    if (Array.isArray(value)) {
+      stack.push(...value.map((item) => ({ value: item, names: false })));
+      continue;
+    }
+    const object = value as Record<string, unknown>;
+    if (!names) {
+      const idAnchor = typeof object.$id === 'string' ? decodeFragment(object.$id) : undefined;
+      if (object.$anchor === name || object.$dynamicAnchor === name || idAnchor === name) targets.push(object);
+    }
+    for (const [key, child] of Object.entries(object)) {
+      if (names) stack.push({ value: child, names: false });
+      else if (!LITERAL_KEYWORDS.has(key)) stack.push({ value: child, names: NAME_MAP_KEYWORDS.has(key) });
+    }
+  }
+  return targets;
+}
+
+/** Keywords whose values map names (which may spell keywords) to schemas. */
+const NAME_MAP_KEYWORDS = new Set([
+  '$defs',
+  'definitions',
+  'dependencies',
+  'dependentSchemas',
+  'patternProperties',
+  'properties',
+]);
 
 interface InlineBudget {
   paths: number;

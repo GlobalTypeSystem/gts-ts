@@ -163,8 +163,12 @@ function isSchemaValue(value: unknown): boolean {
  */
 export type SchemaNodeVisitor = (node: Record<string, any>, path: string, resource: Resource) => void;
 
+export function escapeJsonPointerSegment(segment: string | number): string {
+  return String(segment).replace(/~/g, '~0').replace(/\//g, '~1');
+}
+
 function pointer(path: string, segment: string | number): string {
-  return `${path}/${String(segment).replace(/~/g, '~0').replace(/\//g, '~1')}`;
+  return `${path}/${escapeJsonPointerSegment(segment)}`;
 }
 
 /** Schema locations that declare schemas for reuse or for other types, without applying them. */
@@ -248,55 +252,11 @@ export function forEachSchemaNode(
   }
 }
 
-const ANY_VALUE_KEYWORDS = new Set([
-  'additionalItems',
-  'additionalProperties',
-  'contains',
-  'contentSchema',
-  'else',
-  'if',
-  'not',
-  'propertyNames',
-  'then',
-  'unevaluatedItems',
-  'unevaluatedProperties',
-  'x-gts-traits-schema',
-]);
-const ANY_LIST_KEYWORDS = new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems']);
-const ANY_MAP_KEYWORDS = new Set(['$defs', 'definitions', 'dependentSchemas', 'properties', 'patternProperties']);
-
-export function escapeJsonPointerSegment(segment: string | number): string {
-  return String(segment).replace(/~/g, '~0').replace(/\//g, '~1');
-}
-
 /**
  * Calls `visit` for each direct subschema of `schema` under any supported
  * dialect, without following references. For callers that drive their own
  * recursion; use {@link forEachSchemaNode} to visit every schema location.
  */
 export function visitJsonSubschemas(schema: any, path: string, visit: (subschema: any, path: string) => void): void {
-  for (const [key, value] of Object.entries(schema)) {
-    const nestedPath = `${path}/${escapeJsonPointerSegment(key)}`;
-    if (ANY_VALUE_KEYWORDS.has(key)) {
-      visit(value, nestedPath);
-    } else if (ANY_LIST_KEYWORDS.has(key) && Array.isArray(value)) {
-      value.forEach((item, index) => visit(item, `${nestedPath}/${index}`));
-    } else if (ANY_MAP_KEYWORDS.has(key) && value && typeof value === 'object' && !Array.isArray(value)) {
-      for (const [name, childSchema] of Object.entries(value)) {
-        visit(childSchema, `${nestedPath}/${escapeJsonPointerSegment(name)}`);
-      }
-    } else if (key === 'items') {
-      if (Array.isArray(value)) {
-        value.forEach((item, index) => visit(item, `${nestedPath}/${index}`));
-      } else {
-        visit(value, nestedPath);
-      }
-    } else if (key === 'dependencies' && value && typeof value === 'object' && !Array.isArray(value)) {
-      for (const [name, dependency] of Object.entries(value)) {
-        if (!Array.isArray(dependency)) {
-          visit(dependency, `${nestedPath}/${escapeJsonPointerSegment(name)}`);
-        }
-      }
-    }
-  }
+  pushSubschemas(schema, path, ANY_DIALECT, visit);
 }

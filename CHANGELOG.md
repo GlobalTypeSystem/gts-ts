@@ -15,7 +15,7 @@ Upgrades the implementation from GTS spec **v0.15.0** to **[v0.17.0](https://git
 - The GTS keyword vocabulary is exactly `x-gts-type-ref`, `x-gts-instance-ref`, `x-gts-pattern-ref`, `x-gts-traits-schema`, `x-gts-traits`, `x-gts-final`, and `x-gts-abstract` (spec §11.0).
 - Identifier matching follows the formal §10 grammar: an omitted minor matches any minor in every type and instance segment; `v1.*` requires an explicit minor; a wildcard may only follow a complete token or the version marker `v`; version components outside the unsigned 32-bit range are invalid. Identifiers are validated as spelled, without trimming.
 - OP#4 matches a pattern candidate when the filter covers it (`M(candidate) ⊆ M(filter)`), and OP#10 chain wildcards (`type.v1~*`) include the type itself. `matchIDPattern` and `GtsStore.query` no longer take the `chainSuffixMatchesSelf` option.
-- `XGtsRefValidator` is rewritten: the constructor takes no arguments; `validateSchema` reports invalid operands (and local `$ref`s that name no schema) at every schema location; `validateInstance` checks the reference keywords structurally, without registry lookup, also reporting failures of applicators (`not`, `oneOf`, ...) whose subschemas use reference keywords, and throws `GtsSchemaError` for a schema error. `validateSchemaRefExistence`, `getReferencedIds`, `getReferencedWildcardPatterns`, and `isSelfReference` are removed.
+- `XGtsRefValidator` is rewritten: the constructor takes no arguments; `validateSchema` reports invalid operands (and local `$ref`s that name no schema) at every schema location; `validateInstance` checks the reference keywords structurally, without registry lookup, also reporting failures of applicators (`not`, `oneOf`, ...) whose subschemas use reference keywords, and throws `GtsSchemaError` for a schema error, including a `$ref` to another resource, which it cannot resolve without a registry. `validateSchemaRefExistence`, `getReferencedIds`, `getReferencedWildcardPatterns`, and `isSelfReference` are removed.
 
 ### Added
 
@@ -31,11 +31,13 @@ Upgrades the implementation from GTS spec **v0.15.0** to **[v0.17.0](https://git
 - Under `any-valid`, a reference to an invalid entity that rejects the value carries that entity's structured issues, tagged with its `entityId`.
 - Reference cycles settle on a consistent verdict: a result reached by assuming an entity still in progress valid is revalidated when the assumption fails, and a cycle without a consistent verdict fails closed.
 - A single dialect-aware schema walker (`schema-walk.ts`) serves the regex safety check, the vocabulary and placement checks, and operand checks; it follows local `$ref`s, reports reached nodes at their declaration, and treats `definitions` as a schema location in every dialect.
-- OP#12 compares a restated property with the base as a whole schema: dropping `type`, omitting a constrained base property, or restating it as `true` is a widening.
+- OP#12 compares a restated property with the base as a whole schema: dropping `type`, omitting a constrained base property, or restating it as `true` is a widening. A proven inclusion is not second-guessed by the keyword-by-keyword checks, and an unproven one fails only when either side reaches a reference keyword (through any applicator, including `if`/`then`/`else`, local `$ref`s and anchors, and `$ref`s to registered schemas).
+- OP#8 and OP#12 compare an `anyOf`/`oneOf` branch by branch and infer types from `anyOf`/`oneOf`/`allOf` branches and from `const`/`enum` values.
+- The server labels a schema error that involves no reference keyword (such as a local `$ref` that names no schema) `Invalid schema:` instead of `GTS reference validation failed:`.
 
 ### Fixed
 
-- OP#8 flattening no longer drops a differing conjunct of an `allOf`; unmodeled conjuncts make the verdict `unknown`.
+- OP#8 flattening no longer drops a differing conjunct of an `allOf`; unmodeled conjuncts make the verdict `unknown`. Differing annotations are not conjuncts, and a branch's `additionalProperties` applies to properties only another branch declares.
 - A local `$ref` that resolves to a scalar or an array fails closed instead of accepting the subtree.
 - `GET /match-id-pattern` reports an empty `pattern` or `candidate` as an invalid identifier instead of a missing parameter.
 

@@ -34,6 +34,30 @@ describe('unsupported schema regex', () => {
   });
 });
 
+describe('dangling local $ref', () => {
+  // Review finding: it was reported as a GTS reference failure.
+  test('returns 422 as a schema error, not a reference failure (validate=false)', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    try {
+      const response = await server.instance.inject({
+        method: 'POST',
+        url: '/entities?validate=false',
+        payload: {
+          $id: 'gts://gts.x.unit.srv.dangling.v1~',
+          $schema: DRAFT7,
+          type: 'object',
+          properties: { a: { $ref: '#/definitions/missing' } },
+        },
+      });
+      expect(response.statusCode).toBe(422);
+      expect(response.json().error).toMatch(/^Invalid schema: .*Cannot resolve \$ref/);
+      expect(response.json().error).not.toContain('GTS reference validation failed');
+    } finally {
+      await server.stop();
+    }
+  });
+});
+
 describe('POST /type-schemas', () => {
   test('rejects a non-array body with 422', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });

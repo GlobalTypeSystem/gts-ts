@@ -11,7 +11,7 @@ import {
 import { Gts } from './gts';
 import { compileSafePattern, RegexCompilationError, type SafePattern } from './regex-engine';
 import { clauseImplied, isComparedElsewhere, refClauses, usesRefKeywords, witnessCandidates } from './ref-scope';
-import { isGtsRefKeyword, X_GTS_REF_SELF, XGtsRefValidator } from './x-gts-ref';
+import { GTS_REF_KEYWORDS, isGtsRefKeyword, X_GTS_REF_SELF, XGtsRefValidator } from './x-gts-ref';
 
 const SELF_OPERAND = JSON.stringify(X_GTS_REF_SELF);
 
@@ -153,9 +153,7 @@ const KEYWORDS: Record<string, KeywordSpec> = {
   // Enforced against instances by OP#6 (§9.6), so they are assertions, not
   // annotations - even though they share the `x-gts-` prefix with the
   // type-level keywords that genuinely are metadata.
-  'x-gts-type-ref': { kind: 'unmodeled' },
-  'x-gts-instance-ref': { kind: 'unmodeled' },
-  'x-gts-pattern-ref': { kind: 'unmodeled' },
+  ...Object.fromEntries(GTS_REF_KEYWORDS.map((keyword): [string, KeywordSpec] => [keyword, { kind: 'unmodeled' }])),
 };
 
 /**
@@ -406,7 +404,8 @@ function impliedTypesOf(value: any): string[] {
     case 'boolean':
       return ['boolean'];
     case 'number':
-      return Number.isInteger(value) ? ['number', 'integer'] : ['number'];
+      // `number` covers `integer` (`widenNumeric`), so the narrower name is exact.
+      return Number.isInteger(value) ? ['integer'] : ['number'];
     case 'object':
       return ['object'];
     default:
@@ -414,18 +413,52 @@ function impliedTypesOf(value: any): string[] {
   }
 }
 
-function typeSet(schema: Schema): Set<string> | null {
-  if (typeof schema !== 'object' || schema === null) return null;
+function typeSet(schema: Schema, depth = 0): Set<string> | null {
+  if (typeof schema !== 'object' || schema === null || depth > MAX_SCHEMA_DEPTH) return null;
   const type = schema.type;
-  if (type !== undefined) return new Set(Array.isArray(type) ? type : [type]);
-
-  // No `type` keyword: a `const`/`enum` value set still implies a type - its
-  // values ARE that type - even though the schema never states it literally.
+  const declared = type === undefined ? null : new Set<string>(Array.isArray(type) ? type : [type]);
+  // A `const`/`enum` value set implies a type - its values ARE that type -
+  // and only the values the declared `type` admits are accepted.
   const values = fixedValues(schema);
-  if (values === null) return null; // genuinely unconstrained
-  const implied = new Set<string>();
-  for (const v of values) for (const t of impliedTypesOf(v)) implied.add(t);
-  return implied;
+  if (values !== null) {
+    const implied = values.flatMap(impliedTypesOf);
+    return new Set(declared === null ? implied : implied.filter((t) => typeSetAdmitsType(declared, t)));
+  }
+  if (declared !== null) return declared;
+
+  // Every value an `anyOf`/`oneOf` accepts is accepted by one of its branches.
+  for (const key of ['anyOf', 'oneOf']) {
+    const branches = schema[key];
+    if (!Array.isArray(branches) || branches.length === 0) continue;
+    const sets = branches.map((branch) => typeSet(branch, depth + 1));
+    if (sets.every((set): set is Set<string> => set !== null)) return new Set(sets.flatMap((set) => [...set]));
+  }
+  // Every value an `allOf` accepts has a type every typed conjunct admits.
+  if (Array.isArray(schema.allOf)) {
+    const sets = schema.allOf.map((branch: Schema) => typeSet(branch, depth + 1)).filter(Boolean) as Set<string>[];
+    if (sets.length > 0) {
+      const candidates = new Set(sets.flatMap((set) => [...set]));
+      return new Set([...candidates].filter((t) => sets.every((set) => typeSetAdmitsType(set, t))));
+    }
+  }
+  return null; // genuinely unconstrained, or constrained in a way not modeled
+}
+
+/** Whether a value of type `type` can satisfy a schema whose types are `types`. */
+function typeSetAdmitsType(types: Set<string>, type: string): boolean {
+  return types.has(type) || (type === 'integer' && types.has('number'));
+}
+
+/**
+ * Whether every value `schema` accepts has one of `types`, as far as its
+ * `type`, `const`/`enum`, `anyOf`, `oneOf` and `allOf` show, or `null` when
+ * they do not restrict its type at all.
+ */
+export function typesWithin(schema: Schema, types: string | string[]): boolean | null {
+  const own = typeSet(schema);
+  if (own === null) return null;
+  const accepted = new Set(Array.isArray(types) ? types : [types]);
+  return [...own].every((t) => typeSetAdmitsType(accepted, t));
 }
 
 /** `number` also accepts every `integer`, so widen the accepting side. */
@@ -578,11 +611,27 @@ function mergeSchemas(a: Schema, b: Schema): Schema {
       default:
         // Both values apply. Keeping only one would silently drop a conjunct,
         // so a differing one is kept as a residual `allOf` branch; the
-        // comparison reasons about it or reports `unknown`.
-        if (!deepEqual(current, value)) {
+        // comparison reasons about it or reports `unknown`. An annotation
+        // constrains nothing, so there is no conjunct to keep.
+        if (keywordKind(key) !== 'annotation' && !deepEqual(current, value)) {
           out.allOf = [...(Array.isArray(out.allOf) ? out.allOf : []), { [key]: value }];
         }
         break;
+    }
+  }
+  // A property only one side declares is still subject to the other side's
+  // `additionalProperties` (`patternProperties` names are not modeled, and
+  // make the comparison inconclusive anyway).
+  for (const [side, other] of [
+    [left, right],
+    [right, left],
+  ]) {
+    const extra = other.additionalProperties;
+    if (!isObject(side.properties) || extra === undefined || extra === true || hasPatternProperties(other)) continue;
+    const declared = isObject(other.properties) ? other.properties : {};
+    for (const prop of Object.keys(side.properties)) {
+      if (prop in declared) continue;
+      out.properties = { ...out.properties, [prop]: mergeSchemas(out.properties[prop], extra) };
     }
   }
   return out;
@@ -895,7 +944,32 @@ class SubsumptionChecker {
     if (usesRefKeywords(outerNorm) || usesRefKeywords(innerNorm)) {
       return this.finalize(this.compareWithRefs(outerNorm, innerNorm, depth));
     }
+    const branches = this.compareUnionBranches(outerNorm, innerNorm, depth);
+    if (branches !== null) return this.finalize(branches);
     return this.finalize(this.compareKeywords(outerNorm, innerNorm, depth));
+  }
+
+  /**
+   * `inner` with an `anyOf` or `oneOf` accepts only values one of its
+   * branches, together with the rest of `inner`, accepts, so it is included
+   * when each such conjunction is. A `oneOf` also rejects a value several
+   * branches accept, so an excluded conjunction does not prove that `inner`
+   * is excluded. `null` when `inner` has no union.
+   */
+  private compareUnionBranches(outer: Schema, inner: Schema, depth: number): CompatVerdict | null {
+    for (const key of ['anyOf', 'oneOf']) {
+      const branches = inner[key];
+      if (!Array.isArray(branches) || branches.length === 0) continue;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { [key]: _union, ...rest } = inner;
+      let verdict: CompatVerdict = 'compatible';
+      for (const branch of branches) {
+        verdict = worst(verdict, this.subsumes(outer, { ...rest, allOf: [...(rest.allOf ?? []), branch] }, depth + 1));
+        if (verdict === 'incompatible') break;
+      }
+      return key === 'oneOf' && verdict === 'incompatible' ? 'unknown' : verdict;
+    }
+    return null;
   }
 
   /**
@@ -920,24 +994,33 @@ class SubsumptionChecker {
 
     if (refsIncluded && rest === 'compatible') return 'compatible';
     if (rest === 'incompatible') return 'incompatible';
+    const innerAccepts = this.compileEvaluation(inner, this.selves.inner);
+    const outerAccepts = this.compileEvaluation(outer, this.selves.outer);
     for (const witness of witnessCandidates([...innerClauses, ...refClauses(outer, this.selves.outer)])) {
       // A schema that cannot be evaluated proves nothing (tri-state).
-      if (
-        this.evaluate(inner, witness, this.selves.inner) === 'accept' &&
-        this.evaluate(outer, witness, this.selves.outer) === 'reject'
-      ) {
-        return 'incompatible';
-      }
+      if (innerAccepts(witness) === 'accept' && outerAccepts(witness) === 'reject') return 'incompatible';
     }
     return 'unknown';
   }
 
-  private evaluate(schema: Schema, value: unknown, selectedTypeId: string | undefined): 'accept' | 'reject' | 'error' {
+  /** `schema` compiled once for evaluating witnesses; a schema error evaluates to `'error'`. */
+  private compileEvaluation(
+    schema: Schema,
+    selectedTypeId: string | undefined
+  ): (value: unknown) => 'accept' | 'reject' | 'error' {
+    let accepts: (value: unknown) => boolean;
     try {
-      return this.evaluator.accepts(value, schema, selectedTypeId, this.dialectSource) ? 'accept' : 'reject';
+      accepts = this.evaluator.acceptor(schema, selectedTypeId, this.dialectSource);
     } catch {
-      return 'error';
+      return () => 'error';
     }
+    return (value) => {
+      try {
+        return accepts(value) ? 'accept' : 'reject';
+      } catch {
+        return 'error';
+      }
+    };
   }
 
   private compareKeywords(outerNorm: Schema, innerNorm: Schema, depth: number): CompatVerdict {

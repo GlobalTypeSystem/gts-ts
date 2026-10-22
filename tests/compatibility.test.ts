@@ -1587,6 +1587,54 @@ describe('OP#9 - a constraint visible only through an allOf branch is honored (s
   });
 });
 
+describe('OP#8 - a union is compared branch by branch', () => {
+  // Review finding: a union of narrower bounds was reported incompatible.
+  test.each([
+    ['anyOf', 'compatible'],
+    ['oneOf', 'compatible'],
+  ])('%s of narrower bounds is forward %s', (key, forward) => {
+    const gts = new GTS({ validateRefs: false });
+    const oldId = 'gts.x.unit.union.event.v1.0~';
+    const newId = 'gts.x.unit.union.event.v1.1~';
+    const narrower = {
+      [key]: [
+        { type: 'string', maxLength: 2 },
+        { type: 'string', maxLength: 3 },
+      ],
+    };
+    gts.register({
+      $id: `gts://${oldId}`,
+      $schema: DRAFT7,
+      type: 'object',
+      properties: { a: { type: 'string', maxLength: 5 } },
+    });
+    gts.register({ $id: `gts://${newId}`, $schema: DRAFT7, type: 'object', properties: { a: narrower } });
+
+    expect(gts.checkCompatibility(oldId, newId).forward_compatibility).toBe(forward);
+  });
+});
+
+describe('OP#8 - annotations merged through allOf are not constraints', () => {
+  // Review finding: a differing annotation became a residual allOf conjunct.
+  test.each([
+    ['a description on both sides', { description: 'derived' }],
+    ['a different $id', {}],
+  ])('a derived version with %s stays compatible', (_label, extra) => {
+    const gts = new GTS({ validateRefs: false });
+    const base = 'gts.x.unit.annmerge.base.v1~';
+    const oldId = `${base}x.unit._.leaf.v1.0~`;
+    const newId = `${base}x.unit._.leaf.v1.1~`;
+    const body = { type: 'object', properties: { a: { type: 'string' } } };
+    gts.register({ $id: `gts://${base}`, $schema: DRAFT7, description: 'base', ...body });
+    gts.register({ $id: `gts://${oldId}`, $schema: DRAFT7, ...body });
+    gts.register({ $id: `gts://${newId}`, $schema: DRAFT7, allOf: [{ $ref: `gts://${base}` }], ...body, ...extra });
+
+    const result = gts.checkCompatibility(oldId, newId);
+
+    expect([result.backward_compatibility, result.forward_compatibility]).toEqual(['compatible', 'compatible']);
+  });
+});
+
 describe('OP#8 - GTS reference scopes (§9.6.1, §9.6.2)', () => {
   const T = 'gts.x.unit.scope.root.v1~';
   const lookup = { get: () => undefined };
