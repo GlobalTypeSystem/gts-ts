@@ -1,0 +1,1 @@
+setTimeout('work()', 0);

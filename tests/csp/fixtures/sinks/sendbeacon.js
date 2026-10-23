@@ -1,0 +1,1 @@
+navigator.sendBeacon('/log', 'x');

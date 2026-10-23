@@ -376,14 +376,19 @@ describe('dialect-aware schema positions', () => {
   test.each([
     ['prefixItems', { prefixItems: [unsupported] }, DIALECT, DRAFT_2020],
     ['dependentSchemas', { dependentSchemas: { x: unsupported } }, DIALECT, DRAFT_2019],
-    ['$defs', { $defs: { x: unsupported } }, DIALECT, DRAFT_2020],
     ['unevaluatedProperties', { unevaluatedProperties: unsupported }, DIALECT, DRAFT_2019],
   ])('%s is an annotation in one dialect and a schema in another', (_keyword, body, ignoring, defining) => {
     expect(() => register({ type: 'object', ...body }, ignoring)).not.toThrow();
     expect(() => register({ type: 'object', ...body }, defining)).toThrow(RegexCompilationError);
   });
 
-  test('checks dependencies under 2020-12 because Ajv executes it', () => {
+  // Phase 3: the engine compiles `$defs` in every dialect, so it is a schema position even in draft-07
+  // (it was an annotation under Ajv draft-07); the old annotation row is replaced by this assertion.
+  test.each([DIALECT, DRAFT_2019, DRAFT_2020])('$defs is a schema position in %s', (dialect) => {
+    expect(() => register({ type: 'object', $defs: { x: unsupported } }, dialect)).toThrow(RegexCompilationError);
+  });
+
+  test('checks dependencies under 2020-12 because the engine compiles it in every dialect', () => {
     expect(() => register({ type: 'object', dependencies: { x: unsupported } }, DRAFT_2020)).toThrow(
       RegexCompilationError
     );

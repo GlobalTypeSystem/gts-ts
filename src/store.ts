@@ -1,9 +1,4 @@
-import Ajv from 'ajv';
-import AjvCore from 'ajv/dist/core';
-import Ajv2019 from 'ajv/dist/2019';
-import Ajv2020 from 'ajv/dist/2020';
-import { applyGtsFormats } from './formats';
-import { createLinearRegExp } from './regex-engine';
+import { createSchemaEngine, type SchemaEngine } from './schema-engine';
 import { isPlainSchemaObject, contentHash, cloneJsonEntity } from './json-canonical';
 import { dialectOf, canonicalDialectUri } from './schema-dialect';
 import { assertSafeSchemaPatterns } from './schema-safety';
@@ -23,7 +18,7 @@ import {
 } from './types';
 import { Gts } from './gts';
 import { GtsExtractor } from './extract';
-import { applyXGtsRefKeyword, escapeJsonPointerSegment, visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
+import { escapeJsonPointerSegment, visitJsonSubschemas, XGtsRefValidator } from './x-gts-ref';
 import { GtsCompatibility, findCrossedBound, isEmptySchema } from './compatibility';
 import { GtsModifiers } from './modifiers';
 
@@ -52,7 +47,7 @@ const TRAIT_STRUCTURAL_KEYWORDS = ['properties', 'required', 'additionalProperti
  * The store holds no locks and needs none. Node runs JavaScript on a single
  * thread, and every mutating operation here (notably {@link register},
  * {@link unregister} and {@link rollbackRegistration}) is fully synchronous:
- * it performs its read-modify-write on `byId` and the Ajv registries with no
+ * it performs its read-modify-write on `byId` and the engine `$ref` pool with no
  * `await` in between. A request handler therefore runs to completion
  * atomically with respect to every other handler, so concurrent HTTP requests
  * cannot interleave a partial mutation - the property Go/Rust ports must buy
@@ -60,7 +55,7 @@ const TRAIT_STRUCTURAL_KEYWORDS = ['properties', 'required', 'additionalProperti
  *
  * This invariant is load-bearing. If a genuine `await` is ever introduced
  * between a read and a dependent write on shared state (e.g. async `$ref`
- * loading via {@link loadSchema}, async schema compilation, or persistence),
+ * loading, async schema compilation, or persistence),
  * this lock-free assumption breaks and mutations would need to be serialized
  * explicitly (a promise-chain mutex is the idiomatic TS analogue). Keep
  * mutators synchronous, or reinstate serialization if that stops being
@@ -72,7 +67,7 @@ export type CommitOutcome = 'added' | 'unchanged' | 'conflict';
 export class GtsStore {
   private byId: Map<string, JsonEntity> = new Map();
   // Entities registered but not yet committed. A staged entity is visible to
-  // internal validation/resolution (via `get`, chain building and the Ajv
+  // internal validation/resolution (via `get`, chain building and the engine
   // `$ref` pool) so a batch can resolve intra-batch references regardless of
   // entry order, but it is invisible to public reads (`getCommitted`,
   // `getAll`, `query`) until `commit`. This is how a validate=true
@@ -81,20 +76,19 @@ export class GtsStore {
   // Keyed by a unique staging TOKEN (not the entity id) so two entries that
   // resolve to the same id - a duplicated batch entry or two concurrent
   // registrations - never clobber each other, and commit/discard only affect
-  // the entry they name. `stagedByKey` is the by-id overlay `get` and the Ajv
+  // the entry they name. `stagedByKey` is the by-id overlay `get` and the engine
   // `$ref` pool consult; it holds the most recently staged entity per id and is
   // recomputed when a token is committed or discarded.
   private staged: Map<string, { key: string; entity: JsonEntity }> = new Map();
   private stagedByKey: Map<string, JsonEntity> = new Map();
   private stageSeq = 0;
   private config: GtsConfig;
-  private ajv: Ajv;
-  private ajv2019: Ajv2019;
-  private ajv2020: Ajv2020;
-  // The GTS type currently being validated, used by the `x-gts-ref` Ajv keyword
+  private readonly engine: SchemaEngine;
+  // The GTS type currently being validated, used by the `x-gts-ref` keyword
   // to resolve the `/$id` self-reference during combinator resolution. Set only
   // for the duration of a single synchronous `validate(...)` call.
   private currentSelectedTypeId: string | undefined;
+  private readonly normalizedSchemaCache = new Map<string, any>();
   private sortedIds: string[] | undefined;
 
   constructor(config?: Partial<GtsConfig>) {
@@ -104,33 +98,12 @@ export class GtsStore {
       allowEntityUpdates: config?.allowEntityUpdates ?? false,
     };
 
-    const options = {
-      strict: false,
-      validateSchema: false,
-      addUsedSchema: false,
-      loadSchema: this.loadSchema.bind(this),
-      validateFormats: true,
-      allErrors: true,
-      // Enforce the GTS profile and linear-time matching for schema patterns.
-      code: { regExp: createLinearRegExp },
-    };
-    this.ajv = new Ajv(options);
-    this.ajv2019 = new Ajv2019(options);
-    this.ajv2020 = new Ajv2020(options);
-    applyGtsFormats(this.ajv);
-    applyGtsFormats(this.ajv2019);
-    applyGtsFormats(this.ajv2020);
-    // Register x-gts-ref as a real keyword so the engine evaluates it during
-    // combinator resolution (oneOf/anyOf/allOf), instead of stripping it and
-    // rewriting the schema. Existence and /$id remain in XGtsRefValidator.
-    const selectedTypeIdGetter = () => this.currentSelectedTypeId;
-    applyXGtsRefKeyword(this.ajv, selectedTypeIdGetter);
-    applyXGtsRefKeyword(this.ajv2019, selectedTypeIdGetter);
-    applyXGtsRefKeyword(this.ajv2020, selectedTypeIdGetter);
+    // `x-gts-ref` resolves `/$id` through this getter while a validation runs.
+    this.engine = createSchemaEngine({ getSelectedTypeId: () => this.currentSelectedTypeId });
   }
 
   /**
-   * Runs `fn` (a synchronous Ajv `validate(...)` call) with `selectedTypeId`
+   * Runs `fn` (a synchronous engine `validate(...)` call) with `selectedTypeId`
    * exposed to the `x-gts-ref` keyword so `/$id` resolves to the type being
    * validated. Restores the previous value afterwards so nested validations
    * (e.g. combinator branches that compile sibling schemas) stay correct.
@@ -145,33 +118,49 @@ export class GtsStore {
     }
   }
 
-  // All three registries extend AjvCore, so the common base type lets callers
-  // use compile/addSchema/removeSchema/validateSchema without a cast.
-  // All three registries extend AjvCore, so the common base type lets callers
-  // use compile/addSchema/removeSchema/validateSchema without a cast. Dialect
-  // detection lives in `schema-dialect.ts`.
-  private ajvForSchema(schema: any): AjvCore {
-    const dialect = dialectOf(schema);
-    switch (dialect) {
-      case 'draft-07':
-        return this.ajv;
-      case '2019-09':
-        return this.ajv2019;
-      case '2020-12':
-        return this.ajv2020;
-      default:
-        throw new Error(`Unsupported JSON Schema dialect: ${dialect}`);
-    }
+  private removeEngineSchema(id: string): boolean {
+    const removed = this.engine.removeEngineSchema(id);
+    if (removed) this.normalizedSchemaCache.clear();
+    return removed;
   }
 
-  private removeAjvSchema(id: string): void {
-    for (const ajv of [this.ajv, this.ajv2019, this.ajv2020]) ajv.removeSchema(id);
+  /**
+   * Normalized content of a registered schema entity, computed (and safety-checked)
+   * on first use and reused until the next pool mutation, mirroring the engine's
+   * compiled-schema cache. Nothing is cached when normalization throws.
+   */
+  private normalizedRegisteredSchema(entity: JsonEntity): any {
+    const cached = this.normalizedSchemaCache.get(entity.id);
+    if (cached !== undefined) return cached;
+    const normalized = this.normalizeSchema(entity.content);
+    this.normalizedSchemaCache.set(entity.id, normalized);
+    return normalized;
   }
 
-  private addAjvSchema(entity: JsonEntity): void {
+  private addEngineSchema(entity: JsonEntity): void {
+    this.normalizedSchemaCache.clear();
     const normalized = this.normalizeSchema(entity.content);
     if (!normalized.$id) normalized.$id = entity.id;
-    this.ajvForSchema(normalized).addSchema(normalized, entity.id);
+    this.engine.addEngineSchema(normalized, entity.id);
+  }
+
+  /**
+   * Compiles `schema` (dialect from `dialectSource`, default the schema itself)
+   * and validates `data` with `selectedTypeId` exposed to `x-gts-ref`. Throws
+   * raw engine errors (unresolved `$ref`, unsupported dialect). `cacheKey` is the
+   * registered entity id, passed only when `schema` is that entity's own unmodified
+   * normalized content (derived and transient schemas are never cached).
+   */
+  private validateWithEngine(
+    schema: any,
+    data: unknown,
+    selectedTypeId: string | undefined,
+    dialectSource: any = schema,
+    cacheKey?: string
+  ): ValidationIssue[] {
+    const withDialect = schema.$schema === undefined ? { ...schema, $schema: dialectSource?.$schema } : schema;
+    const compiled = this.engine.compile(withDialect, cacheKey);
+    return this.withSelectedType(selectedTypeId, () => compiled.validate(data));
   }
 
   private invalidateIndexes(): void {
@@ -321,24 +310,6 @@ export class GtsStore {
     return null;
   }
 
-  // Ajv's async `loadSchema` hook. Registered for completeness, but currently
-  // NEVER invoked: every validation compiles synchronously via `.compile()`
-  // (all `$ref` targets are pre-registered with `addSchema`), and Ajv only
-  // calls `loadSchema` from `compileAsync`. If a `compileAsync` path is ever
-  // introduced this hook goes live - and, per the class-level concurrency
-  // invariant, its `await` would then require serializing mutations.
-  private async loadSchema(uri: string): Promise<any> {
-    const normalizedUri = stripUriPrefix(uri);
-
-    if (Gts.isValidGtsID(normalizedUri)) {
-      const entity = this.get(normalizedUri);
-      if (entity && entity.isSchema) {
-        return entity.content;
-      }
-    }
-    throw new Error(`Unresolvable GTS reference: ${uri}`);
-  }
-
   register(entity: JsonEntity): JsonEntity | undefined {
     entity = cloneJsonEntity(entity);
     // A malformed entity id would silently break every ancestor-chain
@@ -401,16 +372,16 @@ export class GtsStore {
     const schemaUnchanged = !!previous && !replacing && previous.isSchema && entity.isSchema;
     if (!schemaUnchanged) {
       if (entity.isSchema && entity.content) assertSafeSchemaPatterns(entity.content);
-      if (previous?.isSchema) this.removeAjvSchema(entity.id);
+      if (previous?.isSchema) this.removeEngineSchema(entity.id);
       try {
-        if (entity.isSchema && entity.content) this.addAjvSchema(entity);
+        if (entity.isSchema && entity.content) this.addEngineSchema(entity);
       } catch {
-        // A document that clears `assertSafeSchemaPatterns` but still fails Ajv
+        // A document that clears `assertSafeSchemaPatterns` but still fails engine
         // compilation (e.g. an unsupported `$schema` dialect) must not leave a
-        // half-added schema behind; roll the Ajv registration back. The entity
+        // half-added schema behind; roll the engine registration back. The entity
         // itself is still stored in `byId` - `validateSchema(id)` recompiles
         // and surfaces the failure on demand.
-        this.removeAjvSchema(entity.id);
+        this.removeEngineSchema(entity.id);
       }
     }
     this.byId.set(entity.id, entity);
@@ -435,24 +406,24 @@ export class GtsStore {
     return entity ? cloneJsonEntity(entity) : undefined;
   }
 
-  // Point the Ajv `$ref` pool for `key` at whatever entity is currently
+  // Point the engine `$ref` pool for `key` at whatever entity is currently
   // authoritative for it: the active staged entity if one remains, otherwise
   // the committed one (removed entirely if neither is a schema). Called whenever
   // a token is staged, committed or discarded so the pool never dangles.
-  private refreshAjvForKey(key: string): void {
-    this.removeAjvSchema(key);
+  private refreshEngineForKey(key: string): void {
+    this.removeEngineSchema(key);
     const active = this.stagedByKey.get(key) ?? this.byId.get(key);
     if (active?.isSchema && active.content) {
       try {
-        this.addAjvSchema(active);
+        this.addEngineSchema(active);
       } catch {
-        this.removeAjvSchema(key);
+        this.removeEngineSchema(key);
       }
     }
   }
 
   // Drop the staged entry named by `token` and rebuild the by-key overlay for
-  // its key from any other tokens that still target it, then refresh the Ajv
+  // its key from any other tokens that still target it, then refresh the engine
   // pool for that key.
   private removeStaged(token: string, entry: { key: string; entity: JsonEntity }): void {
     this.staged.delete(token);
@@ -460,12 +431,12 @@ export class GtsStore {
     for (const other of this.staged.values()) {
       if (other.key === entry.key) this.stagedByKey.set(entry.key, other.entity);
     }
-    this.refreshAjvForKey(entry.key);
+    this.refreshEngineForKey(entry.key);
   }
 
   /**
    * Stage an entity WITHOUT publishing it: it is visible to internal
-   * validation (via {@link get} and the Ajv `$ref` pool) but invisible to
+   * validation (via {@link get} and the engine `$ref` pool) but invisible to
    * public reads until {@link commit}. Returns a unique staging token. Throws
    * {@link EntityConflictError} when a committed entity with different content
    * already holds the id and updates are not allowed. Callers MUST eventually
@@ -499,11 +470,11 @@ export class GtsStore {
     }
     const token = `stg-${++this.stageSeq}`;
     this.staged.set(token, { key: entity.id, entity });
-    // Point the Ajv `$ref` pool at the staged version so a sibling being
+    // Point the engine `$ref` pool at the staged version so a sibling being
     // validated resolves `$ref`s to it; the committed version (if any) is
     // restored on discard/commit.
     this.stagedByKey.set(entity.id, entity);
-    this.refreshAjvForKey(entity.id);
+    this.refreshEngineForKey(entity.id);
     this.invalidateIndexes();
     return token;
   }
@@ -530,7 +501,7 @@ export class GtsStore {
     }
     this.byId.set(entry.key, entry.entity);
     this.invalidateIndexes();
-    this.refreshAjvForKey(entry.key);
+    this.refreshEngineForKey(entry.key);
     return committed ? 'unchanged' : 'added';
   }
 
@@ -581,7 +552,7 @@ export class GtsStore {
       this.removeStaged(tokens[i], entry);
       if (outcomes[i] === 'added') {
         this.byId.set(entry.key, entry.entity);
-        this.refreshAjvForKey(entry.key);
+        this.refreshEngineForKey(entry.key);
       }
     }
     this.invalidateIndexes();
@@ -592,7 +563,7 @@ export class GtsStore {
    * Drop the staged entity named by `token` that failed validation. The
    * committed state is untouched: a client never observes the discarded
    * (invalid) entity, and any prior committed version under the same id
-   * (including its Ajv `$ref` entry) is preserved/restored.
+   * (including its engine `$ref` entry) is preserved/restored.
    */
   discard(token: string): void {
     const entry = this.staged.get(token);
@@ -605,7 +576,7 @@ export class GtsStore {
    * Roll back a `register()` call. Some post-registration gates (e.g.
    * `validateSchemaAgainstParent`) can only run once the entity is looked up
    * by id, so a caller that rejects the entity after registering it must undo
-   * both the `byId` index and the Ajv schema entry to avoid leaving the store
+   * both the `byId` index and the engine schema entry to avoid leaving the store
    * in an inconsistent, "rejected but still retrievable" state.
    */
   unregister(id: string): void {
@@ -617,7 +588,7 @@ export class GtsStore {
     this.invalidateIndexes();
     if (entity.isSchema) {
       try {
-        this.removeAjvSchema(id);
+        this.removeEngineSchema(id);
       } catch (err) {
         // Ignore errors removing schema - mirrors the best-effort addSchema above.
       }
@@ -830,21 +801,26 @@ export class GtsStore {
         };
       }
 
-      const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
-      const isValid = this.withSelectedType(obj.schemaId, () => validate(obj.content));
+      const issues = this.validateWithEngine(
+        this.normalizedRegisteredSchema(schemaEntity),
+        obj.content,
+        obj.schemaId,
+        undefined,
+        schemaEntity.id
+      );
 
-      if (!isValid) {
+      if (issues.length > 0) {
         // P6-4: routed through the same `formatValidationError` the
         // transient `/validate-json` paths use, so `/validate-instance` and
         // `/validate-json` report the identical failure with the identical
-        // wording instead of two different Ajv-error-to-string conventions.
-        const errors = validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
+        // wording instead of two different issue-to-string conventions.
+        const errors = issues.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
         return {
           id: gtsId,
           ok: false,
           valid: false,
           error: errors,
-          errors: this.validationIssuesFromAjv(validate.errors),
+          errors: issues,
         };
       }
 
@@ -948,12 +924,17 @@ export class GtsStore {
         };
       }
 
-      const validate = this.ajvForSchema(schemaEntity.content).compile(this.normalizeSchema(schemaEntity.content));
-      const isValid = this.withSelectedType(typeId, () => validate(content));
+      const issues = this.validateWithEngine(
+        this.normalizedRegisteredSchema(schemaEntity),
+        content,
+        typeId,
+        undefined,
+        schemaEntity.id
+      );
 
-      if (!isValid) {
-        const errors = validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
-        return { id, ok: false, error: errors, errors: this.validationIssuesFromAjv(validate.errors) };
+      if (issues.length > 0) {
+        const errors = issues.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
+        return { id, ok: false, error: errors, errors: issues };
       }
 
       const xGtsRefValidator = new XGtsRefValidator(this, refValidation);
@@ -978,25 +959,6 @@ export class GtsStore {
     } catch (error) {
       return { id, ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-  }
-
-  private validationIssueFromAjv(error: import('ajv').ErrorObject, instancePathPrefix: string = ''): ValidationIssue {
-    const instancePath = `${instancePathPrefix}${error.instancePath}` || '/';
-    return {
-      instancePath,
-      schemaPath: error.schemaPath || '#',
-      keyword: error.keyword,
-      message: error.message || 'Validation failed',
-      params: error.params as Record<string, unknown>,
-      data: error.data,
-    };
-  }
-
-  private validationIssuesFromAjv(
-    errors: import('ajv').ErrorObject[] | null | undefined,
-    instancePathPrefix: string = ''
-  ): ValidationIssue[] {
-    return (errors || []).map((error) => this.validationIssueFromAjv(error, instancePathPrefix));
   }
 
   private validationIssue(
@@ -1105,14 +1067,14 @@ export class GtsStore {
   }
 
   /**
-   * Formats one Ajv validation error. Mirrors the canonical conformance
+   * Formats one validation issue. Mirrors the canonical conformance
    * suite's reference validator (Python `jsonschema`) wording for the
    * `type` keyword - `"<path> is not of type '<expected>'"` - rather than
    * Ajv's own `"<path> must be <expected>"`, since
    * `test_op6_schema_validation.py` asserts against that exact phrase
    * (`assert_contains("body.error", "is not of type 'string'")`).
    */
-  private formatValidationError(e: import('ajv').ErrorObject): string {
+  private formatValidationError(e: ValidationIssue): string {
     if (e.keyword === 'type') {
       const types = Array.isArray(e.params?.type) ? e.params.type : [e.params?.type];
       const typeList = types.map((t: string) => `'${t}'`).join(', ');
@@ -1136,14 +1098,14 @@ export class GtsStore {
   }
 
   /**
-   * Trait-aware rendering of a single Ajv error from the OP#13 completeness
-   * check. Unlike {@link formatValidationError}, which leaks Ajv's bare root
+   * Trait-aware rendering of a single issue from the OP#13 completeness
+   * check. Unlike {@link formatValidationError}, which leaks the bare root
    * path (`/`) and generic "property" wording, this names the offending
    * *trait* and states the constraint in trait terms, so the author knows to
    * look in `x-gts-traits` rather than the type's own `properties`.
    */
-  private formatTraitValidationError(e: import('ajv').ErrorObject): string {
-    // The materialized traits object is what Ajv validated, so a leaf's
+  private formatTraitValidationError(e: ValidationIssue): string {
+    // The materialized traits object is what the engine validated, so a leaf's
     // instancePath (minus the leading `/`) is the trait name/path.
     const traitPath = e.instancePath.replace(/^\//, '').replace(/\//g, '.');
     const traitName = traitPath ? `trait '${traitPath}'` : 'traits';
@@ -1187,7 +1149,7 @@ export class GtsStore {
     const normalized: any = {};
 
     for (const [key, value] of Object.entries(obj)) {
-      // x-gts-ref is kept: it is a registered Ajv keyword (see applyXGtsRefKeyword),
+      // x-gts-ref is kept: it is a registered engine keyword (see schema-engine.ts),
       // so the engine evaluates it natively during combinator resolution.
       const newKey = key;
       let newValue = value;
@@ -1736,11 +1698,16 @@ export class GtsStore {
   validateCastResult(toSchema: any, casted: any): string | null {
     try {
       const modifiedSchema = this.removeGtsConstConstraints(toSchema);
-      const validate = this.ajvForSchema(toSchema).compile(this.normalizeSchema(modifiedSchema, toSchema));
-      if (!this.withSelectedType(toSchema?.$id, () => validate(casted))) {
+      const issues = this.validateWithEngine(
+        this.normalizeSchema(modifiedSchema, toSchema),
+        casted,
+        toSchema?.$id,
+        toSchema
+      );
+      if (issues.length > 0) {
         // P6-4: shared formatter, so a cast-result failure reads the same
-        // way as every other validation path instead of raw Ajv wording.
-        return validate.errors?.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
+        // way as every other validation path instead of raw engine wording.
+        return issues.map((e) => this.formatValidationError(e)).join('; ') || 'Validation failed';
       }
 
       // `x-gts-ref` is an assertion enforced on instances (§9.6), so a cast
@@ -1819,10 +1786,9 @@ export class GtsStore {
   private validateSchemaStructure(content: any, schemaId: string): ValidationResult {
     try {
       const normalized = this.normalizeSchema(content);
-      const ajv = this.ajvForSchema(normalized);
-      if (ajv.validateSchema(normalized)) return { id: schemaId, ok: true, error: '' };
-      const issues = this.validationIssuesFromAjv(ajv.errors);
-      const error = (ajv.errors || []).map((item) => this.formatValidationError(item)).join('; ');
+      const issues = this.engine.validateSchemaDocument(normalized);
+      if (issues.length === 0) return { id: schemaId, ok: true, error: '' };
+      const error = issues.map((item) => this.formatValidationError(item)).join('; ');
       return {
         id: schemaId,
         ok: false,
@@ -1845,7 +1811,7 @@ export class GtsStore {
     if (!structural.ok) return structural;
     try {
       const normalized = this.normalizeSchema(content);
-      this.ajvForSchema(normalized).compile(normalized);
+      this.engine.compile(normalized);
       return structural;
     } catch (error) {
       const message = `JSON Schema validation failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -1897,7 +1863,7 @@ export class GtsStore {
    * Unlike `validateSchemaAgainstParent` below, which looks the schema up by
    * id (so it can only run once the schema is already registered),
    * everything here works from `content` directly: meta-schema validity
-   * (`ajv.validateSchema`, deliberately never run at registration time -
+   * (engine `schemaErrors`, deliberately never run at registration time -
    * see the class-level comment on `validateSchema: false` above), the
    * shared document-level rules (`checkTypeSchemaRules`), and - reusing the
    * same base-comparison machinery `validateSchemaAgainstParent` uses -
@@ -2438,10 +2404,15 @@ export class GtsStore {
     try {
       const schemaForValidation = isAbstract ? this.withoutRequired(effectiveSchema) : effectiveSchema;
       const host = self?.content ?? schemaForValidation;
-      const validate = this.ajvForSchema(host).compile(this.normalizeSchema(schemaForValidation, host));
-      if (!this.withSelectedType(schemaId, () => validate(materialized))) {
+      const traitIssues = this.validateWithEngine(
+        this.normalizeSchema(schemaForValidation, host),
+        materialized,
+        schemaId,
+        host
+      );
+      if (traitIssues.length > 0) {
         const details =
-          validate.errors?.map((e) => this.formatTraitValidationError(e)).join('; ') ||
+          traitIssues.map((e) => this.formatTraitValidationError(e)).join('; ') ||
           'trait values do not satisfy the effective trait schema';
         // A single, trait-specific hint (not repeated per error) telling the
         // author the three ways to satisfy the completeness check.
@@ -2452,7 +2423,13 @@ export class GtsStore {
           id: schemaId,
           ok: false,
           error: `trait validation: ${details} — ${hint}`,
-          errors: this.validationIssuesFromAjv(validate.errors, '/x-gts-traits'),
+          errors: traitIssues.map((issue) => ({
+            ...issue,
+            instancePath:
+              issue.instancePath === '/' || issue.instancePath === ''
+                ? '/x-gts-traits'
+                : `/x-gts-traits${issue.instancePath}`,
+          })),
         };
       }
     } catch (e) {
@@ -2463,7 +2440,7 @@ export class GtsStore {
       };
     }
 
-    // `x-gts-ref` is an assertion keyword (§9.6) that plain Ajv validation
+    // `x-gts-ref` is an assertion keyword (§9.6) that plain schema validation
     // ignores, so materialized trait values must also be checked against it
     // explicitly - mirroring the same check applied to cast results above.
     // The store is passed here (as `this`, matching the instance-side check
@@ -3085,7 +3062,7 @@ export class GtsStore {
   // through it - a count that doubles per level and can reach the millions
   // within `MAX_SCHEMA_DEPTH`. This function's own tree-walk is cheap even
   // at that path count (well under a second - see the shared MAX_SCHEMA_PATHS'
-  // budget below), but the resulting *inlined* schema handed to Ajv is not:
+  // budget below), but the resulting *inlined* schema handed to the engine is not:
   // Ajv's compiled validator has one function-call node per occurrence, so
   // validating even a single instance against it becomes exponential too.
   // A mutable holder (rather than a primitive `count`) is used so every

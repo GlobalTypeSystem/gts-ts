@@ -1,9 +1,78 @@
 # Changelog
 
+<!-- toc -->
+
+- [0.10.0 - 2026-10-22](#0100---2026-10-22)
+  - [Breaking](#breaking)
+  - [Changed](#changed)
+  - [Security](#security)
+  - [Fixed](#fixed)
+- [0.9.0 - 2026-10-09](#090---2026-10-09)
+  - [Breaking](#breaking-1)
+  - [Changed](#changed-1)
+  - [Security](#security-1)
+- [0.8.0 - 2026-09-25](#080---2026-09-25)
+  - [Breaking](#breaking-2)
+  - [Fixed](#fixed-1)
+- [0.7.0 - 2026-09-21](#070---2026-09-21)
+  - [Added](#added)
+  - [Fixed](#fixed-2)
+- [0.6.0 - 2026-09-16](#060---2026-09-16)
+  - [Breaking](#breaking-3)
+  - [Added](#added-1)
+  - [Fixed](#fixed-3)
+- [0.5.0 - 2026-09-15](#050---2026-09-15)
+  - [Breaking](#breaking-4)
+  - [Added](#added-2)
+  - [Fixed](#fixed-4)
+- [0.4.0 - 2026-08-10](#040---2026-08-10)
+  - [Breaking - HTTP API](#breaking---http-api)
+  - [Breaking - library API](#breaking---library-api)
+  - [Changed - compatibility semantics (spec 0.13 §4)](#changed---compatibility-semantics-spec-013-4)
+  - [Added](#added-3)
+  - [Changed - traits (§9.7.5, ADR-0002/0003/0004)](#changed---traits-975-adr-000200030004)
+  - [Fixed](#fixed-5)
+  - [Notes for implementers](#notes-for-implementers)
+- [0.3.0](#030)
+
+<!-- /toc -->
+
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.10.0] - 2026-10-22
+
+### Breaking
+
+- Replace Ajv with [json-schema-library](https://github.com/sagold/json-schema-library) (exact pin `11.6.14`) as the JSON Schema engine of the core library. Draft-07, 2019-09 and 2020-12 remain supported.
+- The wording and order of `error` and `errors[].message` change: messages now come from the new engine and no longer reproduce Ajv's text. The `params` object changes as well: it carries Ajv-style keys from an explicit adapter table, and the internal `pointer` key is no longer present.
+- `keyword`, `instancePath` and `params` keys are unchanged for the 45 issue codes verified against an Ajv 8 oracle (161 probes across the three dialects), with these exceptions, which are changed:
+  - `invalid-data-error` (2020-12, `items: false`): `instancePath` is the array (`/`), Ajv reported each item (`/0`).
+  - `missing-dependency-error`: `params` no longer carries Ajv's extra `property`, `depsCount` and `deps` keys.
+- `schemaPath` now carries the Ajv-style path of the failing keyword (e.g. `#/properties/x/type`) instead of `#`. Known differences: names under `$defs` / `definitions` / `dependentSchemas` are not pointer-escaped; a `false` subschema under `allOf` / `anyOf` reports `#/allOf/false schema` (Ajv: `#/allOf/0/false schema`).
+- `instancePath` escapes property names containing `/` or `~` per RFC 6901 (`/a~1b`); trait errors at the traits root point to `/x-gts-traits` (not `/x-gts-traits/`).
+- Error count can differ from Ajv's: Ajv's extra branch errors for `anyOf`, `oneOf`, `propertyNames` and `contains` are not emitted, the wrapper issue is identical.
+- Validity (`ok` / `valid`) matches Ajv 8 + ajv-formats 3.0.1 for the verified probes and format tables, with the exceptions listed above. The `JSON Schema validation failed:` prefix, the `is not of type '...'` substring and the exported `ValidationIssue` / `ValidationResult` types are unchanged.
+
+### Changed
+
+- Remove `ajv` and `ajv-formats` from the runtime dependencies (`ajv` stays as a devDependency, used only as a test oracle) and add `json-schema-library` pinned to exactly `11.6.14`.
+- Cache the compiled schema per store and per entity version; the cache is cleared on schema pool changes (a schema added, replaced or removed, including through staging), and its size is bounded by the number of registered entities.
+- Add a CSP static scan, a no-codegen jest run, a headless Chromium test under a strict CSP and a benchmark performance gate to CI.
+- All formats asserted by ajv-formats 3.0.1 `full` mode are asserted by built-in checkers with ajv-formats semantics (e.g. `""` fails `email`, `uuid`, `date` and `url`); GTS `date-time`, `time` and `regex` checkers are unchanged; `float`, `double`, `password` and `binary` stay non-asserting, as in ajv-formats.
+- Closed schemas (`additionalProperties: false`, also with `patternProperties`, and `unevaluatedProperties`) reject undeclared keys named like `Object.prototype` members (`constructor`, `toString`, `__proto__`, `hasOwnProperty`), same as Ajv.
+- Normalized registered schemas are cached alongside compiled schemas (cleared on schema pool changes). The CI performance gate runs `npm run bench -- --runs 5` and gates on the median of per-run medians (`scripts/bench.mjs --runs <n>`).
+
+### Security
+
+- The core library no longer needs `'unsafe-eval'` or `'wasm-unsafe-eval'` and is compatible with Content Security Policy and Trusted Types (`require-trusted-types-for 'script'`, `trusted-types 'none'`): runtime schemas are validated by interpretation and never compiled to code. See the README "Content Security Policy" section. The `server/` and `cli/` entry points are out of scope (the Fastify server keeps its own Ajv).
+- Fix unbounded memory growth on repeated validation: Ajv's per-call recompilation of schemas grew its internal cache without bound. Measured over 5,000 calls (heap after GC): `validateInstance` 347.914 MB before, 0.490 MB after; `validateTransientInstance` 185.282 MB before, 0.073 MB after.
+
+### Fixed
+
+- Core validation failed under a CSP without `'unsafe-eval'` and under `node --disallow-code-generation-from-strings` with `Code generation from strings disallowed for this context` (#28).
 
 ## [0.9.0] - 2026-10-09
 
@@ -34,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking
 
 - `POST /type-schemas` now accepts a **JSON array** of GTS Type Schema objects (batch registration) instead of a single `{type_id, type_schema}` object. The external `type_id` field is removed — each entry's GTS Type Identifier is derived from its embedded `$id`. The endpoint returns an aggregate `{ok, results: [...]}` body (top-level `ok` is `true` only when every entry registered); each `results` entry reports `{ok, type_id, error?}`. A non-array body returns `422`.
-- Schema `pattern` / `patternProperties` are now compiled by Ajv with **RE2** (`re2-wasm`), a linear-time regular-expression engine, so an untrusted schema can no longer trigger catastrophic backtracking (ReDoS, CWE-1333) — the same class of protection gts-go and gts-python get from a match timeout, achieved by construction so validation stays synchronous. This replaces the earlier `safe-regex2` star-height heuristic (which false-rejected many common, genuinely linear-time patterns such as ISO-8601 date-time, semver, and dotted-segment ids) and drops the `safe-regex2` dependency; the `MAX_REGEX_LEN` (32 KiB) bound is retained only as a cheap resource cap on the pattern source. RE2 has no ECMA-262 lookaround or backreferences, so the common lookaround idioms are split into RE2 checks with exactly the ECMA-262 semantics: lookarounds directly after a leading `^` and fixed-width atoms (e.g. `^P(?!$).+`, `^(?=.*[A-Z])(?=.*\d).{8,}$`) or directly before a trailing `$` and fixed-width atoms (e.g. `^[a-z0-9-]+(?<!-)$`) stay supported and linear-time. **A lookaround anywhere else, or a backreference, cannot be matched in guaranteed linear time and is rejected** when the schema is compiled, with an explanatory error; the `regex` string *format* check is unaffected and still accepts those constructs.
+- Schema `pattern` / `patternProperties` are now compiled by Ajv with **RE2** (`re2-wasm`), a linear-time regular-expression engine, so an untrusted schema can no longer trigger catastrophic backtracking (ReDoS, CWE-1333) — the same class of protection gts-go and gts-python get from a match timeout, achieved by construction so validation stays synchronous. This replaces the earlier `safe-regex2` star-height heuristic (which false-rejected many common, genuinely linear-time patterns such as ISO-8601 date-time, semver, and dotted-segment ids) and drops the `safe-regex2` dependency; the `MAX_REGEX_LEN` (32 KiB) bound is retained only as a cheap resource cap on the pattern source. RE2 has no ECMA-262 lookaround or backreferences, so the common lookaround idioms are split into RE2 checks with exactly the ECMA-262 semantics: lookarounds directly after a leading `^` and fixed-width atoms (e.g. `^P(?!$).+`, `^(?=.*[A-Z])(?=.*\d).{8,}$`) or directly before a trailing `$` and fixed-width atoms (e.g. `^[a-z0-9-]+(?<!-)$`) stay supported and linear-time. **A lookaround anywhere else, or a backreference, cannot be matched in guaranteed linear time and is rejected** when the schema is compiled, with an explanatory error; the `regex` string _format_ check is unaffected and still accepts those constructs.
 
 ### Fixed
 

@@ -14,7 +14,7 @@ export class RegexCompilationError extends Error {
   }
 }
 
-/** The subset of `RegExp` Ajv uses for `pattern` / `patternProperties`. */
+/** The subset of `RegExp` the schema engine uses for `pattern` / `patternProperties`. */
 export interface SafePattern {
   /** True when the expression matches anywhere in `input`. */
   test(input: string): boolean;
@@ -62,10 +62,3 @@ export function compileSafePattern(pattern: string, flags = 'u'): SafePattern {
     toString: () => source,
   };
 }
-
-/** Ajv calls this factory without `new` and uses its matcher's test method. */
-export const createLinearRegExp: ((pattern: string, flags: string) => RegExp) & {
-  code: string;
-} = Object.assign((pattern: string, flags: string): RegExp => compileSafePattern(pattern, flags) as RegExp, {
-  code: '(function(p,f){return require("@globaltypesystem/gts-ts/dist/regex-engine").createLinearRegExp(p,f)})',
-});

@@ -1,0 +1,1 @@
+setInterval("work()", 10);

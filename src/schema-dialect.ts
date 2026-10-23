@@ -13,17 +13,16 @@ export type SchemaDialect = 'draft-07' | '2019-09' | '2020-12';
 /**
  * Classify a schema document's declared `$schema` dialect.
  *
- * The Ajv registries are dialect-specific (each holds only its own dialect's
- * vocabulary), and instance validation compiles synchronously, so a `$ref`
- * target must live in the SAME Ajv instance as the schema that references it:
+ * The engine's `$ref` pool is dialect-specific (each dialect holds only its
+ * own schemas), and instance validation compiles synchronously, so a `$ref`
+ * target must live in the SAME dialect pool as the schema that references it:
  * `$ref` composes the referenced schema INTO the referrer's single compiled
  * validation, evaluated under the referrer's one dialect. JSON Schema itself
  * assumes one dialect per validation and defines no semantics for composing
- * subschemas of different dialects, so a cross-dialect `$ref` is not merely an
- * Ajv limitation - it is underspecified. Returning the canonical dialect
- * bucket lets a mismatch across a `$ref` be rejected with a clear error
- * instead of surfacing as a compile throw a surrounding catch turns into a
- * bogus "invalid".
+ * subschemas of different dialects, so a cross-dialect `$ref` is underspecified.
+ * Returning the canonical dialect bucket lets a mismatch across a `$ref` be
+ * rejected with a clear error instead of surfacing as a compile throw a
+ * surrounding catch turns into a bogus "invalid".
  *
  * Throws on an unsupported or malformed `$schema` value; the URI is parsed
  * strictly (scheme + host only, no userinfo/port/query/fragment) to keep the

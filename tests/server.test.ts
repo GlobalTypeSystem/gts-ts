@@ -1428,7 +1428,9 @@ describe('Phase 6 review findings', () => {
     expect(response.statusCode).toBe(200);
     const body = JSON.parse(response.body);
     expect(body.ok).toBe(false);
-    expect(body.error).toBe('/ must NOT have additional properties');
+    // Phase 3: Ajv wording no longer pinned; keep the intent (root path, one space, no leading-space message).
+    expect(body.error).toMatch(/^\/ \S/);
+    expect(body.error).toContain('extra');
 
     await server.stop();
   });

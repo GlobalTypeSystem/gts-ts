@@ -1,6 +1,6 @@
 /*
  * Check regex support and traversal bounds before compiling untrusted schemas.
- * Visit schema positions for the declared dialect and Ajv, including inactive
+ * Visit schema positions for the declared dialect and the schema engine, including inactive
  * branches and local `$ref` targets. Literal data and unknown keywords are
  * visited only through references. Regex checks use regex-engine.ts.
  */
@@ -25,7 +25,6 @@ const SCHEMA_VALUE_KEYWORDS: Record<SchemaDialect, ReadonlySet<string>> = {
     'additionalItems',
     'additionalProperties',
     'contains',
-    'contentSchema',
     'else',
     'if',
     'not',
@@ -37,7 +36,6 @@ const SCHEMA_VALUE_KEYWORDS: Record<SchemaDialect, ReadonlySet<string>> = {
   '2020-12': new Set([
     'additionalProperties',
     'contains',
-    'contentSchema',
     'else',
     'if',
     'not',
@@ -52,11 +50,13 @@ const SCHEMA_ARRAY_KEYWORDS: Record<SchemaDialect, ReadonlySet<string>> = {
   '2019-09': new Set(['allOf', 'anyOf', 'oneOf']),
   '2020-12': new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems']),
 };
-// Ajv executes schema-valued `dependencies` even in 2019-09 and 2020-12.
+// The schema engine compiles schema-valued `dependencies` in every dialect, and both `$defs` and
+// `definitions` (it does not tie either keyword to a dialect). `contentSchema` is an annotation
+// the engine never evaluates, so it is not traversed.
 const SCHEMA_MAP_KEYWORDS: Record<SchemaDialect, ReadonlySet<string>> = {
-  'draft-07': new Set(['definitions', 'dependencies', 'patternProperties', 'properties']),
-  '2019-09': new Set(['$defs', 'dependencies', 'dependentSchemas', 'patternProperties', 'properties']),
-  '2020-12': new Set(['$defs', 'dependencies', 'dependentSchemas', 'patternProperties', 'properties']),
+  'draft-07': new Set(['$defs', 'definitions', 'dependencies', 'patternProperties', 'properties']),
+  '2019-09': new Set(['$defs', 'definitions', 'dependencies', 'dependentSchemas', 'patternProperties', 'properties']),
+  '2020-12': new Set(['$defs', 'definitions', 'dependencies', 'dependentSchemas', 'patternProperties', 'properties']),
 };
 
 interface Keywords {
@@ -115,13 +115,12 @@ function isEmbeddedResource(value: any): boolean {
   return typeof value.$id === 'string' && value.$id !== '' && !value.$id.startsWith('#');
 }
 
-// Keys under which Ajv does not let an `$id` change the resolution scope of a
-// JSON Pointer (ajv/lib/compile/index.ts).
+// Keys under which an `$id` does not change the resolution scope of a JSON Pointer.
 const PREVENT_SCOPE_CHANGE = new Set(['properties', 'patternProperties', 'enum', 'dependencies', 'definitions']);
 
 /**
- * Resolve a local pointer and return its target and resource, following Ajv's
- * embedded `$id` scopes. External refs return undefined; anchors are skipped
+ * Resolve a local pointer and return its target and resource, following embedded
+ * `$id` scopes. External refs return undefined; anchors are skipped
  * because their schema positions are already visited.
  */
 function resolveLocalRef(root: any, resource: any, ref: unknown): { target: unknown; resource: any } | undefined {

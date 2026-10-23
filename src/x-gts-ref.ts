@@ -3,7 +3,6 @@
  * Validates that string values match specified GTS ID patterns
  */
 
-import type Ajv from 'ajv';
 import { Gts } from './gts';
 import {
   EntityLookup,
@@ -33,7 +32,7 @@ function matchesAtSegmentBoundary(value: string, pattern: string): boolean {
  * Pure pattern matching (concrete id, type prefix, or single trailing wildcard);
  * registry existence and the `/$id` self-reference are decided by
  * {@link XGtsRefValidator}, not here. Shared by that walker and the structural
- * `x-gts-ref` Ajv keyword so both agree on matching.
+ * `x-gts-ref` engine keyword so both agree on matching.
  */
 export function gtsPatternViolation(value: string, pattern: string): string | null {
   if (!Gts.isValidGtsID(value)) {
@@ -50,41 +49,28 @@ export function gtsPatternViolation(value: string, pattern: string): string | nu
 }
 
 /**
- * Registers `x-gts-ref` as a first-class Ajv keyword so `oneOf`/`anyOf`/`allOf`
- * resolve correctly: branches that differ only by `x-gts-ref` stay distinct
- * instead of collapsing to identical match-all schemas once stripped. This is
- * the same design gts-go and gts-rust use (a registered keyword/vocabulary) and
- * removes the need to strip x-gts-ref and rewrite `oneOf`→`anyOf`.
- *
- * Concrete/wildcard patterns are enforced here. The `/$id` self-reference is
- * resolved through `getSelectedTypeId` (the type currently being validated) so
- * it participates in `oneOf`/`anyOf` branch selection like any other pattern
- * instead of matching unconditionally; without a selected type it defers to
- * XGtsRefValidator. Registry existence always stays with XGtsRefValidator.
+ * Engine-independent core of the structural `x-gts-ref` keyword (registered by
+ * `schema-engine.ts` so it participates in `oneOf`/`anyOf`/`not` evaluation): why `data` violates
+ * `refPattern`, or `null` when it conforms (or the keyword does not apply).
+ * `/$id` resolves to the selected type via `getSelectedTypeId`; without a
+ * selected type it defers to XGtsRefValidator (returns `null`).
  */
-export function applyXGtsRefKeyword(ajv: Ajv, getSelectedTypeId?: () => string | undefined): void {
-  // Named so it can attach a descriptive error (Ajv reads `validate.errors`
-  // straight after the call), keeping the same "does not match pattern" wording
-  // the standalone walker produces.
-  const validate = function xGtsRefValidate(refPattern: string, data: unknown): boolean {
-    if (typeof refPattern !== 'string') return true;
-    if (typeof data !== 'string') return true;
-    let pattern = refPattern;
-    if (refPattern === X_GTS_REF_SELF) {
-      // Resolve /$id to the selected type so a /$id branch matches only that
-      // type, not every value. If it is unknown here, defer to XGtsRefValidator.
-      const selected = getSelectedTypeId?.();
-      if (!selected) return true;
-      pattern = selected;
-    }
-    const reason = gtsPatternViolation(data, stripUriPrefix(pattern));
-    if (reason === null) return true;
-    (validate as unknown as { errors: unknown[] }).errors = [
-      { keyword: 'x-gts-ref', message: reason, params: { pattern: refPattern } },
-    ];
-    return false;
-  };
-  ajv.addKeyword({ keyword: 'x-gts-ref', schemaType: 'string', errors: true, validate });
+export function xGtsRefKeywordViolation(
+  refPattern: unknown,
+  data: unknown,
+  getSelectedTypeId?: () => string | undefined
+): string | null {
+  if (typeof refPattern !== 'string') return null;
+  if (typeof data !== 'string') return null;
+  let pattern = refPattern;
+  if (refPattern === X_GTS_REF_SELF) {
+    // Resolve /$id to the selected type so a /$id branch matches only that
+    // type, not every value. If it is unknown here, defer to XGtsRefValidator.
+    const selected = getSelectedTypeId?.();
+    if (!selected) return null;
+    pattern = selected;
+  }
+  return gtsPatternViolation(data, stripUriPrefix(pattern));
 }
 
 const SCHEMA_VALUE_KEYWORDS = new Set([
@@ -359,7 +345,7 @@ export class XGtsRefValidator {
     }
 
     if (Array.isArray(schema.anyOf)) {
-      // Only enforce when all branches have x-gts-ref; mixed branches may be valid via non-x-gts-ref path (Ajv handles that)
+      // Only enforce when all branches have x-gts-ref; mixed branches may be valid via non-x-gts-ref path (the engine handles that)
       const refBranches = schema.anyOf.filter((s: any) => this.containsXGtsRef(s));
       if (refBranches.length > 0 && refBranches.length === schema.anyOf.length) {
         const branchResults = refBranches.map((subSchema: any) => {
@@ -377,7 +363,7 @@ export class XGtsRefValidator {
     }
 
     if (Array.isArray(schema.oneOf)) {
-      // Only enforce when all branches have x-gts-ref; mixed branches can't be coordinated with Ajv's branch selection
+      // Only enforce when all branches have x-gts-ref; mixed branches can't be coordinated with the engine's branch selection
       const refBranches = schema.oneOf.filter((s: any) => this.containsXGtsRef(s));
       if (refBranches.length > 0 && refBranches.length === schema.oneOf.length) {
         const branchResults = refBranches.map((subSchema: any) => {

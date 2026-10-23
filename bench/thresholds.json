@@ -1,0 +1,10 @@
+{
+  "status": "approved",
+  "approvedAt": "2026-10-22T06:44:45Z",
+  "margin": 3,
+  "node": "v24.16.0",
+  "measuredOn": { "node": "v24.16.0", "cpu": "Apple M3 Pro", "os": "Darwin 27.0.0" },
+  "spread": { "cached_validate": 0.101, "first_call": 0.068 },
+  "baseline": { "cached_validate_us": 268.54, "first_call_us": 653.42 },
+  "thresholds": { "cached_validate_us": 805.62, "first_call_us": 1960.26 }
+}

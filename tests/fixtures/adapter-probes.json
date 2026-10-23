@@ -1,0 +1,721 @@
+[
+  {
+    "code": "additional-items-error",
+    "dialects": ["draft-07", "2019-09"],
+    "schema": {
+      "items": [
+        {
+          "type": "string"
+        }
+      ],
+      "additionalItems": false
+    },
+    "data": ["a", 1],
+    "schemaPath": "#/additionalItems"
+  },
+  {
+    "code": "type-error",
+    "schema": {
+      "allOf": [
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "data": 5,
+    "label": "inside allOf (the library reports the inner error, as Ajv does)",
+    "schemaPath": "#/allOf/0/type"
+  },
+  {
+    "code": "any-of-error",
+    "schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "data": true,
+    "schemaPath": "#/anyOf"
+  },
+  {
+    "code": "const-error",
+    "schema": {
+      "const": 1
+    },
+    "data": 2,
+    "schemaPath": "#/const"
+  },
+  {
+    "code": "contains-max-error",
+    "dialects": ["2019-09", "2020-12"],
+    "schema": {
+      "contains": {
+        "type": "string"
+      },
+      "maxContains": 1
+    },
+    "data": ["a", "b"],
+    "schemaPath": "#/contains"
+  },
+  {
+    "code": "contains-min-error",
+    "dialects": ["2019-09", "2020-12"],
+    "schema": {
+      "contains": {
+        "type": "string"
+      },
+      "minContains": 2
+    },
+    "data": ["a"],
+    "omitParams": ["maxContains"],
+    "schemaPath": "#/contains"
+  },
+  {
+    "code": "enum-error",
+    "schema": {
+      "enum": ["a", "b"]
+    },
+    "data": "c",
+    "schemaPath": "#/enum"
+  },
+  {
+    "code": "exclusive-maximum-error",
+    "schema": {
+      "exclusiveMaximum": 5
+    },
+    "data": 5,
+    "schemaPath": "#/exclusiveMaximum"
+  },
+  {
+    "code": "exclusive-minimum-error",
+    "schema": {
+      "exclusiveMinimum": 5
+    },
+    "data": 5,
+    "schemaPath": "#/exclusiveMinimum"
+  },
+  {
+    "code": "format-date-error",
+    "format": "date",
+    "schema": {
+      "format": "date"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-date-time-error",
+    "format": "date-time",
+    "schema": {
+      "format": "date-time"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-duration-error",
+    "format": "duration",
+    "schema": {
+      "format": "duration"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-email-error",
+    "format": "email",
+    "schema": {
+      "format": "email"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-hostname-error",
+    "format": "hostname",
+    "schema": {
+      "format": "hostname"
+    },
+    "data": "-bad-",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-ipv4-error",
+    "format": "ipv4",
+    "schema": {
+      "format": "ipv4"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-ipv6-error",
+    "format": "ipv6",
+    "schema": {
+      "format": "ipv6"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-json-pointer-error",
+    "format": "json-pointer",
+    "schema": {
+      "format": "json-pointer"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-regex-error",
+    "format": "regex",
+    "schema": {
+      "format": "regex"
+    },
+    "data": "(",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-time-error",
+    "format": "time",
+    "schema": {
+      "format": "time"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-uri-error",
+    "format": "uri",
+    "schema": {
+      "format": "uri"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-uri-reference-error",
+    "format": "uri-reference",
+    "schema": {
+      "format": "uri-reference"
+    },
+    "data": "http://[bad",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-uri-template-error",
+    "format": "uri-template",
+    "schema": {
+      "format": "uri-template"
+    },
+    "data": "{bad",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-url-error",
+    "format": "url",
+    "schema": {
+      "format": "url"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-uuid-error",
+    "format": "uuid",
+    "schema": {
+      "format": "uuid"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "invalid-data-error",
+    "dialects": ["2020-12"],
+    "schema": {
+      "type": "array",
+      "items": false
+    },
+    "data": [1],
+    "schemaPath": "#/items/false schema"
+  },
+  {
+    "code": "invalid-property-name-error",
+    "schema": {
+      "propertyNames": {
+        "pattern": "^a"
+      }
+    },
+    "data": {
+      "b": 1
+    },
+    "schemaPath": "#/propertyNames"
+  },
+  {
+    "code": "max-items-error",
+    "schema": {
+      "maxItems": 1
+    },
+    "data": [1, 2],
+    "schemaPath": "#/maxItems"
+  },
+  {
+    "code": "max-length-error",
+    "schema": {
+      "maxLength": 1
+    },
+    "data": "ab",
+    "schemaPath": "#/maxLength"
+  },
+  {
+    "code": "max-properties-error",
+    "schema": {
+      "maxProperties": 1
+    },
+    "data": {
+      "a": 1,
+      "b": 2
+    },
+    "schemaPath": "#/maxProperties"
+  },
+  {
+    "code": "maximum-error",
+    "schema": {
+      "maximum": 5
+    },
+    "data": 6,
+    "schemaPath": "#/maximum"
+  },
+  {
+    "code": "min-items-error",
+    "schema": {
+      "minItems": 2
+    },
+    "data": [1],
+    "schemaPath": "#/minItems"
+  },
+  {
+    "code": "min-length-error",
+    "schema": {
+      "minLength": 2
+    },
+    "data": "a",
+    "schemaPath": "#/minLength"
+  },
+  {
+    "code": "min-properties-error",
+    "schema": {
+      "minProperties": 2
+    },
+    "data": {
+      "a": 1
+    },
+    "schemaPath": "#/minProperties"
+  },
+  {
+    "code": "minimum-error",
+    "schema": {
+      "minimum": 5
+    },
+    "data": 4,
+    "schemaPath": "#/minimum"
+  },
+  {
+    "code": "missing-dependency-error",
+    "schema": {
+      "dependencies": {
+        "a": ["b"]
+      }
+    },
+    "dialects": ["draft-07"],
+    "data": {
+      "a": 1
+    },
+    "schemaPath": "#/dependencies"
+  },
+  {
+    "code": "missing-dependency-error",
+    "schema": {
+      "dependentRequired": {
+        "a": ["b"]
+      }
+    },
+    "dialects": ["2019-09", "2020-12"],
+    "data": {
+      "a": 1
+    },
+    "schemaPath": "#/dependentRequired"
+  },
+  {
+    "code": "multiple-of-error",
+    "schema": {
+      "multipleOf": 3
+    },
+    "data": 4,
+    "schemaPath": "#/multipleOf"
+  },
+  {
+    "code": "multiple-one-of-error",
+    "schema": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "minimum": 0
+        }
+      ]
+    },
+    "data": 1,
+    "schemaPath": "#/oneOf"
+  },
+  {
+    "code": "no-additional-properties-error",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "o": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      }
+    },
+    "data": {
+      "o": {
+        "extra": 1
+      }
+    },
+    "instancePath": "/o",
+    "schemaPath": "#/properties/o/additionalProperties"
+  },
+  {
+    "code": "not-error",
+    "schema": {
+      "not": {
+        "type": "string"
+      }
+    },
+    "data": "a",
+    "schemaPath": "#/not"
+  },
+  {
+    "code": "one-of-error",
+    "schema": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "data": true,
+    "schemaPath": "#/oneOf"
+  },
+  {
+    "code": "pattern-error",
+    "schema": {
+      "pattern": "^a"
+    },
+    "data": "b",
+    "schemaPath": "#/pattern"
+  },
+  {
+    "code": "required-property-error",
+    "schema": {
+      "required": ["a"]
+    },
+    "data": {},
+    "schemaPath": "#/required"
+  },
+  {
+    "code": "type-error",
+    "schema": {
+      "type": "string"
+    },
+    "data": 5,
+    "schemaPath": "#/type"
+  },
+  {
+    "code": "type-error",
+    "label": "type array",
+    "schema": {
+      "type": ["string", "number"]
+    },
+    "data": true,
+    "schemaPath": "#/type"
+  },
+  {
+    "code": "unevaluated-items-error",
+    "dialects": ["2019-09", "2020-12"],
+    "schema": {
+      "unevaluatedItems": false
+    },
+    "data": [1],
+    "schemaPath": "#/unevaluatedItems"
+  },
+  {
+    "code": "unevaluated-property-error",
+    "dialects": ["2019-09", "2020-12"],
+    "schema": {
+      "type": "object",
+      "properties": {
+        "a": {}
+      },
+      "unevaluatedProperties": false
+    },
+    "data": {
+      "a": 1,
+      "top": 1
+    },
+    "schemaPath": "#/unevaluatedProperties"
+  },
+  {
+    "code": "unique-items-error",
+    "schema": {
+      "uniqueItems": true
+    },
+    "data": [1, 2, 1],
+    "schemaPath": "#/uniqueItems"
+  },
+  {
+    "code": "x-gts-ref",
+    "schema": {
+      "x-gts-ref": "gts.acme.core.events.a.v1~"
+    },
+    "data": "gts.acme.core.events.b.v1~",
+    "schemaPath": "#/x-gts-ref"
+  },
+  {
+    "code": "contains-min-error",
+    "label": "with maxContains",
+    "dialects": ["2019-09", "2020-12"],
+    "schema": {
+      "contains": {
+        "type": "string"
+      },
+      "minContains": 2,
+      "maxContains": 3
+    },
+    "data": ["a"],
+    "schemaPath": "#/contains"
+  },
+  {
+    "code": "contains-min-error",
+    "label": "default minContains",
+    "schema": {
+      "contains": {
+        "type": "string"
+      }
+    },
+    "data": [1],
+    "omitParams": ["maxContains"],
+    "schemaPath": "#/contains"
+  },
+  {
+    "code": "invalid-data-error",
+    "label": "properties false schema",
+    "schema": {
+      "properties": {
+        "a": false
+      }
+    },
+    "data": {
+      "a": 1
+    },
+    "instancePath": "/a",
+    "schemaPath": "#/properties/a/false schema"
+  },
+  {
+    "code": "unique-items-error",
+    "label": "nested",
+    "schema": {
+      "properties": {
+        "l": {
+          "uniqueItems": true
+        }
+      }
+    },
+    "data": {
+      "l": ["x", "y", "x"]
+    },
+    "instancePath": "/l",
+    "schemaPath": "#/properties/l/uniqueItems"
+  },
+  {
+    "code": "unevaluated-items-error",
+    "label": "after prefix",
+    "dialects": ["2020-12"],
+    "schema": {
+      "prefixItems": [{}],
+      "unevaluatedItems": false
+    },
+    "data": [1, 2],
+    "schemaPath": "#/unevaluatedItems"
+  },
+  {
+    "code": "additional-items-error",
+    "label": "nested",
+    "dialects": ["draft-07", "2019-09"],
+    "schema": {
+      "properties": {
+        "l": {
+          "items": [
+            {
+              "type": "string"
+            }
+          ],
+          "additionalItems": false
+        }
+      }
+    },
+    "data": {
+      "l": ["a", 1]
+    },
+    "instancePath": "/l",
+    "schemaPath": "#/properties/l/additionalItems"
+  },
+  {
+    "code": "unevaluated-property-error",
+    "label": "nested",
+    "dialects": ["2019-09", "2020-12"],
+    "schema": {
+      "properties": {
+        "o": {
+          "type": "object",
+          "properties": {
+            "a": {}
+          },
+          "unevaluatedProperties": false
+        }
+      }
+    },
+    "data": {
+      "o": {
+        "a": 1,
+        "top": 1
+      }
+    },
+    "instancePath": "/o",
+    "schemaPath": "#/properties/o/unevaluatedProperties"
+  },
+  {
+    "code": "unevaluated-items-error",
+    "label": "nested",
+    "dialects": ["2019-09", "2020-12"],
+    "schema": {
+      "properties": {
+        "l": {
+          "unevaluatedItems": false
+        }
+      }
+    },
+    "data": {
+      "l": [1]
+    },
+    "instancePath": "/l",
+    "schemaPath": "#/properties/l/unevaluatedItems"
+  },
+  {
+    "code": "type-error",
+    "label": "nested array item",
+    "schema": {
+      "properties": {
+        "a": {
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "data": {
+      "a": [1]
+    },
+    "instancePath": "/a/0",
+    "schemaPath": "#/properties/a/items/type"
+  },
+  {
+    "code": "required-property-error",
+    "label": "nested",
+    "schema": {
+      "properties": {
+        "o": {
+          "required": ["k"]
+        }
+      }
+    },
+    "data": {
+      "o": {}
+    },
+    "instancePath": "/o",
+    "schemaPath": "#/properties/o/required"
+  },
+  {
+    "code": "format-iso-time-error",
+    "format": "iso-time",
+    "schema": {
+      "format": "iso-time"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-iso-date-time-error",
+    "format": "iso-date-time",
+    "schema": {
+      "format": "iso-date-time"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-json-pointer-uri-fragment-error",
+    "format": "json-pointer-uri-fragment",
+    "schema": {
+      "format": "json-pointer-uri-fragment"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-relative-json-pointer-error",
+    "format": "relative-json-pointer",
+    "schema": {
+      "format": "relative-json-pointer"
+    },
+    "data": "nope",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-byte-error",
+    "format": "byte",
+    "schema": {
+      "format": "byte"
+    },
+    "data": "@@@@",
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-int32-error",
+    "format": "int32",
+    "schema": {
+      "format": "int32"
+    },
+    "data": 2147483648,
+    "schemaPath": "#/format"
+  },
+  {
+    "code": "format-int64-error",
+    "format": "int64",
+    "schema": {
+      "format": "int64"
+    },
+    "data": 1.5,
+    "schemaPath": "#/format"
+  }
+]

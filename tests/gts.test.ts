@@ -1926,13 +1926,13 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
       expect(store.get(id)?.content.pattern).toBe('^a+$');
     });
 
-    test('rolls the Ajv registration back when a replacement passes the safety check but fails to compile', () => {
-      // Exercises the `try { addAjvSchema } catch { removeAjvSchema }` branch:
+    test('rolls the engine registration back when a replacement passes the safety check but fails to compile', () => {
+      // Exercises the `try { addEngineSchema } catch { removeEngineSchema }` branch:
       // the replacement carries no `pattern`/`patternProperties` (so it clears
       // `assertSafeSchemaPatterns`) but declares an unsupported `$schema`
-      // dialect, which makes `addAjvSchema` throw. Registration must NOT throw
+      // dialect, which makes `addEngineSchema` throw. Registration must NOT throw
       // - the failure is swallowed so the entity is still stored in `byId` -
-      // and the aborted Ajv registration must be rolled back rather than left
+      // and the aborted engine registration must be rolled back rather than left
       // half-added (`validateSchema` recompiles and surfaces the failure on
       // demand).
       const id = 'gts.x.security.dialect.rollback.v1~';
@@ -2180,14 +2180,15 @@ describe('entity content identity', () => {
     expect(store.get(id)?.references.size).toBe(0);
   });
 
-  test('does not add an identical schema to Ajv twice', () => {
+  test('does not add an identical schema to the engine pool twice', () => {
     const store = new GtsStore();
     const content = {
       $id: 'gts://gts.x.unit.hash.schema.v1~',
       $schema: 'http://json-schema.org/draft-07/schema#',
       type: 'object',
     };
-    const addSchema = jest.spyOn(store['ajv'], 'addSchema');
+    // Phase 3: Ajv internals replaced by the engine-neutral pool seam (`engine.addEngineSchema`).
+    const addSchema = jest.spyOn(store['engine'], 'addEngineSchema');
 
     store.register(createJsonEntity(content));
     store.register(createJsonEntity({ type: 'object', $schema: content.$schema, $id: content.$id }));
