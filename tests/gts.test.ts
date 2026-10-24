@@ -2100,6 +2100,38 @@ describe('reference keywords under JSON Schema applicators', () => {
   const validator = new XGtsRefValidator();
   const target = 'gts.x.unit.xref.array_target.v1~';
 
+  // The engine reports a failing `then`/`else` branch, never an `if` failure;
+  // the validator reconstructs the `if` failure from the branch issue.
+  test.each([
+    ['then', { if: { 'x-gts-type-ref': 'gts.*' }, then: { const: 1 } }],
+    ['else', { if: { 'x-gts-type-ref': 'gts.y.*' }, else: { const: 1 } }],
+  ])('reports a nested %s branch selected by a reference condition once, at its instance location', (_name, cond) => {
+    const schema = { properties: { a: { properties: { b: cond } } } };
+    expect(validator.validateInstance({ a: { b: target } }, schema)).toEqual([
+      expect.objectContaining({ fieldPath: '/a/b', value: target, reason: expect.stringMatching(/^if: /) }),
+    ]);
+  });
+
+  test.each(['properties', 'definitions', '$defs'])(
+    'does not mistake a member named if / then under %s for a conditional',
+    (container) => {
+      const members = { if: { type: 'integer' }, then: { 'x-gts-type-ref': 'gts.*' } };
+      const schema =
+        container === 'properties'
+          ? { properties: members }
+          : { [container]: members, properties: { if: { $ref: `#/${container}/if` } } };
+      expect(validator.validateInstance({ if: 'not-an-integer', then: target }, schema)).toEqual([]);
+    }
+  );
+
+  test('reports the instance value only through own properties', () => {
+    const errors = validator.validateInstance(
+      { constructor: target },
+      { properties: { constructor: { not: { 'x-gts-type-ref': 'gts.*' } } } }
+    );
+    expect(errors).toEqual([expect.objectContaining({ fieldPath: '/constructor', value: target })]);
+  });
+
   test('uses additionalItems after Draft-07 tuple items', () => {
     const errors = validator.validateInstance(['tuple-prefix', 'gts.x.unit.xref.other.v1~'], {
       $schema: 'http://json-schema.org/draft-07/schema#',

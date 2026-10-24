@@ -133,14 +133,21 @@ export interface GtsRefContext {
 /** Applicators that can fail without a failing reference keyword beneath them (`not`, `oneOf`, ...). */
 const COMPOSITION_KEYWORDS = new Set(['not', 'oneOf', 'anyOf', 'if', 'contains']);
 
-/** Resolves a JSON Pointer (`#` prefix optional) in `document`, or `undefined`. */
+const CONDITIONAL_KEYWORDS = new Set(['if', 'then', 'else']);
+/** Keywords whose members are named by the schema author, not by JSON Schema. */
+const SCHEMA_MAP_KEYWORDS = new Set(['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas']);
+
+/** Resolves a JSON Pointer (`#` prefix optional) in `document` through own properties only, or `undefined`. */
 function pointerTarget(document: any, pointer: string): any {
   const raw = pointer.replace(/^#/, '');
   if (raw === '') return document;
   let current = document;
-  for (const segment of raw.slice(1).split('/')) {
-    if (current === null || typeof current !== 'object') return undefined;
-    current = current[segment.replace(/~1/g, '/').replace(/~0/g, '~')];
+  for (const escaped of raw.slice(1).split('/')) {
+    const segment = escaped.replace(/~1/g, '/').replace(/~0/g, '~');
+    if (current === null || typeof current !== 'object' || !Object.prototype.hasOwnProperty.call(current, segment)) {
+      return undefined;
+    }
+    current = current[segment];
   }
   return current;
 }
@@ -172,7 +179,9 @@ function parentSchemaOf(issue: ValidationIssue, schema: any): any {
 function conditionalIssue(issue: ValidationIssue, schema: any): ValidationIssue | undefined {
   const segments = issue.schemaPath.split('/');
   for (let index = segments.length - 2; index > 0; index--) {
-    if (!['if', 'then', 'else'].includes(segments[index])) continue;
+    if (!CONDITIONAL_KEYWORDS.has(segments[index])) continue;
+    // A property or definition named `if` / `then` / `else` is not a conditional.
+    if (SCHEMA_MAP_KEYWORDS.has(segments[index - 1])) continue;
     const location = segments.slice(0, index).join('/');
     const node = schemaAt(schema, location);
     if (node && typeof node === 'object' && 'if' in node) {

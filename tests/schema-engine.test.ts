@@ -195,6 +195,40 @@ describe('_id blacklist neutralization (library deviation)', () => {
   });
 });
 
+// XGtsRefValidator (src/x-gts-ref.ts) works around these engine behaviours;
+// if a json-schema-library upgrade changes one, revisit `schemaAt`,
+// `conditionalIssue` and the `$ref` error mapping in `XGtsRefValidator.compile`.
+describe('engine error shapes the reference validator relies on', () => {
+  const engine = makeEngine();
+  const value = 'gts.acme.core.events.a.v1~';
+  const shape = (body: Record<string, unknown>, data: unknown) =>
+    engine
+      .validate(schemaOf('2020-12', body), data)
+      .map(({ instancePath, schemaPath, keyword }) => [instancePath, schemaPath, keyword]);
+
+  test('a failing then / else branch reports its own issue, with the enclosing location repeated', () => {
+    const cond = (branch: string, operand: string) => ({ if: { 'x-gts-type-ref': operand }, [branch]: { const: 1 } });
+    expect(shape({ properties: { a: cond('then', 'gts.*') } }, { a: value })).toEqual([
+      ['/a', '#/properties/a/properties/a/then/const', 'const'],
+    ]);
+    expect(shape({ properties: { a: cond('else', 'gts.y.*') } }, { a: value })).toEqual([
+      ['/a', '#/properties/a/properties/a/else/const', 'const'],
+    ]);
+  });
+
+  test('a false then branch is reported under if, with no if issue', () => {
+    expect(shape({ properties: { a: { if: { 'x-gts-type-ref': 'gts.*' }, then: false } } }, { a: value })).toEqual([
+      ['/a', '#/properties/a/if/false schema', 'false schema'],
+    ]);
+  });
+
+  test("an unresolvable $ref fails compilation with the reference quoted after '$ref'", () => {
+    expect(() => engine.compile(schemaOf('2020-12', { $ref: 'gts://gts.acme.core.events.missing.v1~' }))).toThrow(
+      /\$ref[^']*'gts:\/\/gts\.acme\.core\.events\.missing\.v1~'/
+    );
+  });
+});
+
 describe('GTS reference keywords', () => {
   const engine = makeEngine();
   const ref = (pattern: string) => schemaOf('2020-12', { type: 'string', 'x-gts-type-ref': pattern });
