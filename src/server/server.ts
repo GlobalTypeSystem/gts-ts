@@ -10,7 +10,7 @@ import {
   stripUriPrefix,
   validateSchemaIdentityAndRefs,
 } from '../index';
-import { XGtsRefValidationError, XGtsRefValidator } from '../x-gts-ref';
+import { refSchemaErrorMessage, XGtsRefValidator } from '../x-gts-ref';
 import { RegexCompilationError } from '../regex-engine';
 import {
   ServerConfig,
@@ -36,23 +36,6 @@ function parseGtsRefValidationMode(value: unknown): GtsRefValidationMode | null 
   if (value === undefined) return GtsRefValidationMode.AnyValid;
   const modes = Object.values(GtsRefValidationMode) as unknown[];
   return modes.includes(value) ? (value as GtsRefValidationMode) : null;
-}
-
-/**
- * The message for `XGtsRefValidator.validateSchema` errors. Errors without a
- * reference keyword (a local `$ref` that names no schema, a schema past the
- * walk's limits) are schema errors, not reference failures.
- */
-function refSchemaErrorMessage(errors: XGtsRefValidationError[]): string {
-  const describe = (list: XGtsRefValidationError[]) => list.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ');
-  const general = errors.filter((err) => err.keyword === undefined);
-  const references = errors.filter((err) => err.keyword !== undefined);
-  return [
-    general.length > 0 ? `Invalid schema: ${describe(general)}` : '',
-    references.length > 0 ? `GTS reference validation failed: ${describe(references)}` : '',
-  ]
-    .filter(Boolean)
-    .join('; ');
 }
 
 /**

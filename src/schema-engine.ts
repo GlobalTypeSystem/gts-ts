@@ -58,6 +58,7 @@ import { compileSafePattern, RegexCompilationError } from './regex-engine';
 import { dialectOf, type SchemaDialect } from './schema-dialect';
 import type { GtsID, ValidationIssue } from './types';
 import {
+  assertLiteralRefOperands,
   GTS_REF_KEYWORDS,
   refValueViolation,
   resolveRefOperand,
@@ -660,7 +661,7 @@ export interface CompiledSchema {
 }
 
 export interface SchemaEngine {
-  /** Register (or replace) a schema in its dialect's `$ref` pool under `id`. */
+  /** Register (or replace) a schema in its dialect's `$ref` pool under `id`. Throws `GtsSchemaError` for an invalid literal reference operand, before pooling. */
   addEngineSchema(schema: Record<string, any>, id: string): void;
   /** Remove `id` from every dialect pool; returns true iff an entry was removed (the compiled cache is cleared only then). */
   removeEngineSchema(id: string): boolean;
@@ -763,6 +764,9 @@ export function createSchemaEngine(options: SchemaEngineOptions): SchemaEngine {
   return {
     addEngineSchema(schema, id) {
       const dialect = dialectOf(schema);
+      // Every compile in the dialect builds its remote host from the whole pool,
+      // so one pooled schema that fails to compile would fail them all.
+      assertLiteralRefOperands(schema);
       pools[dialect].set(id, clone(schema));
       delete hosts[dialect];
       cache.clear();

@@ -1,11 +1,12 @@
 import { createSchemaEngine, type SchemaEngine } from './schema-engine';
-import { isPlainSchemaObject, contentHash, cloneJsonEntity } from './json-canonical';
+import { isPlainSchemaObject, contentHash, cloneJsonEntity, canonicalJson } from './json-canonical';
 import { dialectOf, canonicalDialectUri } from './schema-dialect';
 import { assertSafeSchemaPatterns } from './schema-safety';
 import {
   CompatVerdict,
   GtsConfig,
   JsonEntity,
+  JsonValue,
   ValidationResult,
   ValidationIssue,
   EntityConflictError,
@@ -26,6 +27,7 @@ import {
   GtsRefContext,
   GtsRefKeyword,
   isGtsRefKeyword,
+  refSchemaErrorMessage,
   resolveRefOperand,
   XGtsRefValidationError,
   XGtsRefValidator,
@@ -39,7 +41,6 @@ import {
   visitJsonSubschemas,
 } from './schema-walk';
 import { unprovenRefClauses } from './ref-scope';
-import { isDeepStrictEqual } from 'util';
 import { GtsCompatibility, findCrossedBound, isEmptySchema, typesWithin } from './compatibility';
 import { GtsModifiers } from './modifiers';
 
@@ -218,6 +219,9 @@ export class GtsStore {
   // duration of a single synchronous `validate(...)` call.
   private refContext: GtsRefContext = {};
   private readonly normalizedSchemaCache = new Map<string, any>();
+  // Operand-check results of registered schemas, keyed by entity id and
+  // selected type; cleared with `normalizedSchemaCache`.
+  private readonly refOperandErrorCache = new Map<string, ValidationResult | null>();
   private sortedIds: string[] | undefined;
 
   constructor(config?: Partial<GtsConfig>) {
@@ -312,7 +316,7 @@ export class GtsStore {
     return {
       id: selectedTypeId,
       ok: false,
-      error: `GTS reference validation failed: ${errors.map((error) => `${error.fieldPath}: ${error.reason}`).join('; ')}`,
+      error: refSchemaErrorMessage(errors),
       errors: errors.map((error) => this.xGtsRefIssue(error)),
     };
   }
@@ -386,8 +390,26 @@ export class GtsStore {
 
   private removeEngineSchema(id: string): boolean {
     const removed = this.engine.removeEngineSchema(id);
-    if (removed) this.normalizedSchemaCache.clear();
+    if (removed) this.clearSchemaCaches();
     return removed;
+  }
+
+  private clearSchemaCaches(): void {
+    this.normalizedSchemaCache.clear();
+    this.refOperandErrorCache.clear();
+  }
+
+  /**
+   * {@link refOperandErrors} of a registered schema entity, reused until the
+   * next pool mutation: the check depends only on the content and the
+   * selected type, and runs on every validation that reaches the entity.
+   */
+  private registeredRefOperandErrors(entity: JsonEntity, selectedTypeId: string): ValidationResult | null {
+    const key = `${entity.id}\n${selectedTypeId}`;
+    if (this.refOperandErrorCache.has(key)) return this.refOperandErrorCache.get(key)!;
+    const result = this.refOperandErrors(entity.content, selectedTypeId);
+    this.refOperandErrorCache.set(key, result);
+    return result;
   }
 
   /**
@@ -404,7 +426,7 @@ export class GtsStore {
   }
 
   private addEngineSchema(entity: JsonEntity): void {
-    this.normalizedSchemaCache.clear();
+    this.clearSchemaCaches();
     const normalized = this.normalizeSchema(entity.content);
     if (!normalized.$id) normalized.$id = entity.id;
     this.engine.addEngineSchema(normalized, entity.id);
@@ -1022,7 +1044,7 @@ export class GtsStore {
         };
       }
 
-      const schemaError = this.refOperandErrors(schemaEntity.content, obj.schemaId);
+      const schemaError = this.registeredRefOperandErrors(schemaEntity, obj.schemaId);
       if (schemaError) return { ...schemaError, id: gtsId, valid: false };
       const failures = new Map<string, ValidationResult>();
       const references = this.referencePolicy(refValidation, visiting, completed, gtsId, failures);
@@ -1124,7 +1146,7 @@ export class GtsStore {
         };
       }
 
-      const schemaError = this.refOperandErrors(schemaEntity.content, typeId);
+      const schemaError = this.registeredRefOperandErrors(schemaEntity, typeId);
       if (schemaError) return { ...schemaError, id };
       const failures = new Map<string, ValidationResult>();
       const references = this.referencePolicy(refValidation, visiting, completed, id || undefined, failures);
@@ -1202,8 +1224,9 @@ export class GtsStore {
     });
   }
 
+  /** A reference error as an issue; one without a reference keyword is a plain schema error. */
   private xGtsRefIssue(error: XGtsRefValidationError): ValidationIssue {
-    return this.validationIssue(error.reason, error.fieldPath || '/', error.keyword ?? 'x-gts-type-ref', {
+    return this.validationIssue(error.reason, error.fieldPath || '/', error.keyword ?? 'schema', {
       value: error.value,
       refPattern: error.refPattern,
     });
@@ -2381,7 +2404,7 @@ export class GtsStore {
         };
       }
 
-      const schemaError = this.refOperandErrors(content, schemaId);
+      const schemaError = this.registeredRefOperandErrors(entity, schemaId);
       if (schemaError) return schemaError;
       const targetErrors = this.refOperandTargetErrors(
         content,
@@ -3720,7 +3743,11 @@ export class GtsStore {
     }
     const merged: any = { ...base };
     for (const [key, val] of Object.entries(overlay)) {
-      if (CONJOINED_KEYWORDS.has(key) && merged[key] !== undefined && !isDeepStrictEqual(merged[key], val)) {
+      if (
+        CONJOINED_KEYWORDS.has(key) &&
+        merged[key] !== undefined &&
+        canonicalJson(merged[key]) !== canonicalJson(val as JsonValue)
+      ) {
         // Both apply under `allOf`; replacing one would drop a constraint.
         merged.allOf = [...(Array.isArray(merged.allOf) ? merged.allOf : []), { [key]: val }];
       } else if (key === 'properties' && merged.properties) {

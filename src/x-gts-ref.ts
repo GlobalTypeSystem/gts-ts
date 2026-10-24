@@ -222,6 +222,34 @@ export interface XGtsRefValidationError {
   reason: string;
 }
 
+/**
+ * The message for `XGtsRefValidator.validateSchema` errors. Errors without a
+ * reference keyword (a local `$ref` that names no schema, a schema past the
+ * walk's limits) are schema errors, not reference failures.
+ */
+export function refSchemaErrorMessage(errors: XGtsRefValidationError[]): string {
+  const describe = (list: XGtsRefValidationError[]) => list.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ');
+  const general = errors.filter((err) => err.keyword === undefined);
+  const references = errors.filter((err) => err.keyword !== undefined);
+  return [
+    general.length > 0 ? `Invalid schema: ${describe(general)}` : '',
+    references.length > 0 ? `GTS reference validation failed: ${describe(references)}` : '',
+  ]
+    .filter(Boolean)
+    .join('; ');
+}
+
+/**
+ * Throws {@link GtsSchemaError} for the first literal operand (not `/$id`)
+ * declared in `schema` that the reference keywords would reject while
+ * compiling. Lets a schema pool refuse a schema whose compilation would fail.
+ */
+export function assertLiteralRefOperands(schema: unknown): void {
+  for (const { keyword, operand } of declaredRefOperands(schema)) {
+    if (operand !== X_GTS_REF_SELF) resolveRefOperand(keyword, operand);
+  }
+}
+
 /** Every reference operand declared at a schema location of `schema`, with its location. */
 export function declaredRefOperands(
   schema: unknown,
@@ -254,9 +282,15 @@ export function declaredRefOperands(
  */
 export class XGtsRefValidator {
   private context: GtsRefContext = {};
+  // Built on first use: `validateSchema` (run on every store validation)
+  // needs no engine, and building one is expensive.
+  private engineInstance: SchemaEngine | undefined;
+
   // The store's engine configuration: GTS formats and the linear-time regex
   // profile, so this API never runs a backtracking regex.
-  private readonly engine: SchemaEngine = createSchemaEngine({ getRefContext: () => this.context });
+  private get engine(): SchemaEngine {
+    return (this.engineInstance ??= createSchemaEngine({ getRefContext: () => this.context }));
+  }
 
   /**
    * Operand errors in `schema`, and local `$ref`s that name no schema. `/$id`
