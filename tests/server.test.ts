@@ -58,6 +58,37 @@ describe('dangling local $ref', () => {
   });
 });
 
+describe('POST /entities/bulk', () => {
+  // Review finding: the bulk route skipped the always-on operand check.
+  test('rejects an invalid reference operand without registering it', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const bad = 'gts.x.unit.srv.bulkbad.v1~';
+    const good = 'gts.x.unit.srv.bulkgood.v1~';
+    const schema = (id: string, ref: Record<string, unknown>) => ({
+      $id: `gts://${id}`,
+      $schema: DRAFT7,
+      type: 'object',
+      properties: { ref: { type: 'string', ...ref } },
+    });
+    try {
+      const response = await server.instance.inject({
+        method: 'POST',
+        url: '/entities/bulk',
+        payload: [schema(bad, { 'x-gts-type-ref': 'not-a-gts-id' }), schema(good, {})],
+      });
+      expect(response.json()).toMatchObject({
+        ok: false,
+        registered: [good],
+        errors: [expect.stringMatching(/^GTS reference validation failed: .*x-gts-type-ref/)],
+      });
+      const stored = await server.instance.inject({ method: 'GET', url: `/entities/${encodeURIComponent(bad)}` });
+      expect(stored.json().ok).toBe(false);
+    } finally {
+      await server.stop();
+    }
+  });
+});
+
 describe('POST /type-schemas', () => {
   test('rejects a non-array body with 422', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });

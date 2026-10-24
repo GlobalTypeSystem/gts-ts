@@ -55,6 +55,17 @@ function refSchemaErrorMessage(errors: XGtsRefValidationError[]): string {
     .join('; ');
 }
 
+/**
+ * The always-on schema check of every registration route: invalid GTS
+ * reference operands, and local `$ref`s whose targets they would be checked
+ * through. These are schema errors a later validation would report anyway,
+ * and §9.6.3 permits early rejection. Returns the error message, or null.
+ */
+function refOperandError(content: unknown): string | null {
+  const errors = new XGtsRefValidator().validateSchema(content);
+  return errors.length > 0 ? refSchemaErrorMessage(errors) : null;
+}
+
 export class GtsServer {
   private fastify: FastifyInstance;
   private store: GTS;
@@ -378,16 +389,11 @@ export class GtsServer {
         };
       }
 
-      // GTS reference operands, and local `$ref`s whose targets they would be
-      // checked through, are checked on every schema registration, even with
-      // validate=false: these are schema errors that a later validation would
-      // report anyway, and §9.6.3 permits early rejection.
-      if (entity.isSchema) {
-        const xGtsRefErrors = new XGtsRefValidator().validateSchema(content);
-        if (xGtsRefErrors.length > 0) {
-          reply.code(422);
-          return { ok: false, is_type_schema: true, error: refSchemaErrorMessage(xGtsRefErrors) };
-        }
+      // Checked on every schema registration, even with validate=false.
+      const operandError = entity.isSchema ? refOperandError(content) : null;
+      if (operandError) {
+        reply.code(422);
+        return { ok: false, is_type_schema: true, error: operandError };
       }
 
       // Validate instance if requested
@@ -501,7 +507,8 @@ export class GtsServer {
           // The bulk endpoint has no `validate` switch, so it applies the same
           // always-on rules as POST /entities and none of the gated guards.
           const declarationError = entity.isSchema
-            ? this.store.checkTypeSchemaRules(content, entity.id, { enforceGuards: false })
+            ? (this.store.checkTypeSchemaRules(content, entity.id, { enforceGuards: false }) ??
+              refOperandError(content))
             : null;
           if (declarationError) {
             errors.push(declarationError);
@@ -694,8 +701,8 @@ export class GtsServer {
   private schemaReferenceError(content: any, id: string, refValidation: GtsRefValidationMode): string | null {
     const documentResult = this.store.validateSchemaDocument(content, id);
     if (!documentResult.ok) return documentResult.error;
-    const xGtsRefErrors = new XGtsRefValidator().validateSchema(content);
-    if (xGtsRefErrors.length > 0) return refSchemaErrorMessage(xGtsRefErrors);
+    const operandError = refOperandError(content);
+    if (operandError) return operandError;
     const parentResult = this.store.validateSchemaAgainstParent(id, refValidation);
     if (!parentResult.ok) return `Derived schema is not compatible with base: ${parentResult.error}`;
     return null;
