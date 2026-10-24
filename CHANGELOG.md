@@ -2,37 +2,41 @@
 
 <!-- toc -->
 
-- [0.10.0 - 2026-10-22](#0100---2026-10-22)
+- [0.11.0 - 2026-10-24](#0110---2026-10-24)
   - [Breaking](#breaking)
   - [Added](#added)
   - [Changed](#changed)
-  - [Security](#security)
   - [Fixed](#fixed)
-- [0.9.0 - 2026-10-09](#090---2026-10-09)
+- [0.10.0 - 2026-10-22](#0100---2026-10-22)
   - [Breaking](#breaking-1)
   - [Changed](#changed-1)
+  - [Security](#security)
+  - [Fixed](#fixed-1)
+- [0.9.0 - 2026-10-09](#090---2026-10-09)
+  - [Breaking](#breaking-2)
+  - [Changed](#changed-2)
   - [Security](#security-1)
 - [0.8.0 - 2026-09-25](#080---2026-09-25)
-  - [Breaking](#breaking-2)
-  - [Fixed](#fixed-1)
+  - [Breaking](#breaking-3)
+  - [Fixed](#fixed-2)
 - [0.7.0 - 2026-09-21](#070---2026-09-21)
   - [Added](#added-1)
-  - [Fixed](#fixed-2)
-- [0.6.0 - 2026-09-16](#060---2026-09-16)
-  - [Breaking](#breaking-3)
-  - [Added](#added-2)
   - [Fixed](#fixed-3)
-- [0.5.0 - 2026-09-15](#050---2026-09-15)
+- [0.6.0 - 2026-09-16](#060---2026-09-16)
   - [Breaking](#breaking-4)
-  - [Added](#added-3)
+  - [Added](#added-2)
   - [Fixed](#fixed-4)
+- [0.5.0 - 2026-09-15](#050---2026-09-15)
+  - [Breaking](#breaking-5)
+  - [Added](#added-3)
+  - [Fixed](#fixed-5)
 - [0.4.0 - 2026-08-10](#040---2026-08-10)
   - [Breaking - HTTP API](#breaking---http-api)
   - [Breaking - library API](#breaking---library-api)
   - [Changed - compatibility semantics (spec 0.13 §4)](#changed---compatibility-semantics-spec-013-4)
   - [Added](#added-4)
   - [Changed - traits (§9.7.5, ADR-0002/0003/0004)](#changed---traits-975-adr-000200030004)
-  - [Fixed](#fixed-5)
+  - [Fixed](#fixed-6)
   - [Notes for implementers](#notes-for-implementers)
 - [0.3.0](#030)
 
@@ -43,7 +47,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.10.0] - 2026-10-22
+## [0.11.0] - 2026-10-24
 
 Upgrades the implementation from GTS spec **v0.15.0** to **[v0.17.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.17.0)** (through v0.16.0 and v0.16.1).
 
@@ -54,15 +58,6 @@ Upgrades the implementation from GTS spec **v0.15.0** to **[v0.17.0](https://git
 - Identifier matching follows the formal §10 grammar: an omitted minor matches any minor in every type and instance segment; `v1.*` requires an explicit minor; a wildcard may only follow a complete token or the version marker `v`; version components outside the unsigned 32-bit range are invalid. Identifiers are validated as spelled, without trimming.
 - OP#4 matches a pattern candidate when the filter covers it (`M(candidate) ⊆ M(filter)`), and OP#10 chain wildcards (`type.v1~*`) include the type itself. `matchIDPattern` and `GtsStore.query` no longer take the `chainSuffixMatchesSelf` option.
 - `XGtsRefValidator` is rewritten: the constructor takes no arguments; `validateSchema` reports invalid operands (and local `$ref`s that name no schema) at every schema location; `validateInstance` checks the reference keywords structurally, without registry lookup, also reporting failures of applicators (`not`, `oneOf`, ...) whose subschemas use reference keywords, and throws `GtsSchemaError` for a schema error, including a `$ref` to another resource, which it cannot resolve without a registry. `validateSchemaRefExistence`, `getReferencedIds`, `getReferencedWildcardPatterns`, and `isSelfReference` are removed.
-- Replace Ajv with [json-schema-library](https://github.com/sagold/json-schema-library) (exact pin `11.6.14`) as the JSON Schema engine of the core library. Draft-07, 2019-09 and 2020-12 remain supported.
-- The wording and order of `error` and `errors[].message` change: messages now come from the new engine and no longer reproduce Ajv's text. The `params` object changes as well: it carries Ajv-style keys from an explicit adapter table, and the internal `pointer` key is no longer present.
-- `keyword`, `instancePath` and `params` keys are unchanged for the 45 issue codes verified against an Ajv 8 oracle (161 probes across the three dialects), with these exceptions, which are changed:
-  - `invalid-data-error` (2020-12, `items: false`): `instancePath` is the array (`/`), Ajv reported each item (`/0`).
-  - `missing-dependency-error`: `params` no longer carries Ajv's extra `property`, `depsCount` and `deps` keys.
-- `schemaPath` now carries the Ajv-style path of the failing keyword (e.g. `#/properties/x/type`) instead of `#`. Known differences: names under `$defs` / `definitions` / `dependentSchemas` are not pointer-escaped; a `false` subschema under `allOf` / `anyOf` reports `#/allOf/false schema` (Ajv: `#/allOf/0/false schema`).
-- `instancePath` escapes property names containing `/` or `~` per RFC 6901 (`/a~1b`); trait errors at the traits root point to `/x-gts-traits` (not `/x-gts-traits/`).
-- Error count can differ from Ajv's: Ajv's extra branch errors for `anyOf`, `oneOf`, `propertyNames` and `contains` are not emitted, the wrapper issue is identical.
-- Validity (`ok` / `valid`) matches Ajv 8 + ajv-formats 3.0.1 for the verified probes and format tables, with the exceptions listed above. The `JSON Schema validation failed:` prefix, the `is not of type '...'` substring and the exported `ValidationIssue` / `ValidationResult` types are unchanged.
 
 ### Added
 
@@ -81,6 +76,29 @@ Upgrades the implementation from GTS spec **v0.15.0** to **[v0.17.0](https://git
 - OP#12 compares a restated property with the base as a whole schema: dropping `type`, omitting a constrained base property, or restating it as `true` is a widening. A proven inclusion is not second-guessed by the keyword-by-keyword checks, and an unproven one fails only when either side reaches a reference keyword (through any applicator, including `if`/`then`/`else`, local `$ref`s and anchors, and `$ref`s to registered schemas).
 - OP#8 and OP#12 compare an `anyOf`/`oneOf` branch by branch and infer types from `anyOf`/`oneOf`/`allOf` branches and from `const`/`enum` values.
 - The server labels a schema error that involves no reference keyword (such as a local `$ref` that names no schema) `Invalid schema:` instead of `GTS reference validation failed:`.
+
+### Fixed
+
+- OP#8 flattening no longer drops a differing conjunct of an `allOf`; unmodeled conjuncts make the verdict `unknown`. Differing annotations are not conjuncts, and a branch's `additionalProperties` applies to properties only another branch declares.
+- A local `$ref` that resolves to a scalar or an array fails closed instead of accepting the subtree.
+- `GET /match-id-pattern` reports an empty `pattern` or `candidate` as an invalid identifier instead of a missing parameter.
+
+## [0.10.0] - 2026-10-22
+
+### Breaking
+
+- Replace Ajv with [json-schema-library](https://github.com/sagold/json-schema-library) (exact pin `11.6.14`) as the JSON Schema engine of the core library. Draft-07, 2019-09 and 2020-12 remain supported.
+- The wording and order of `error` and `errors[].message` change: messages now come from the new engine and no longer reproduce Ajv's text. The `params` object changes as well: it carries Ajv-style keys from an explicit adapter table, and the internal `pointer` key is no longer present.
+- `keyword`, `instancePath` and `params` keys are unchanged for the 45 issue codes verified against an Ajv 8 oracle (161 probes across the three dialects), with these exceptions, which are changed:
+  - `invalid-data-error` (2020-12, `items: false`): `instancePath` is the array (`/`), Ajv reported each item (`/0`).
+  - `missing-dependency-error`: `params` no longer carries Ajv's extra `property`, `depsCount` and `deps` keys.
+- `schemaPath` now carries the Ajv-style path of the failing keyword (e.g. `#/properties/x/type`) instead of `#`. Known differences: names under `$defs` / `definitions` / `dependentSchemas` are not pointer-escaped; a `false` subschema under `allOf` / `anyOf` reports `#/allOf/false schema` (Ajv: `#/allOf/0/false schema`).
+- `instancePath` escapes property names containing `/` or `~` per RFC 6901 (`/a~1b`); trait errors at the traits root point to `/x-gts-traits` (not `/x-gts-traits/`).
+- Error count can differ from Ajv's: Ajv's extra branch errors for `anyOf`, `oneOf`, `propertyNames` and `contains` are not emitted, the wrapper issue is identical.
+- Validity (`ok` / `valid`) matches Ajv 8 + ajv-formats 3.0.1 for the verified probes and format tables, with the exceptions listed above. The `JSON Schema validation failed:` prefix, the `is not of type '...'` substring and the exported `ValidationIssue` / `ValidationResult` types are unchanged.
+
+### Changed
+
 - Remove `ajv` and `ajv-formats` from the runtime dependencies (`ajv` stays as a devDependency, used only as a test oracle) and add `json-schema-library` pinned to exactly `11.6.14`.
 - Cache the compiled schema per store and per entity version; the cache is cleared on schema pool changes (a schema added, replaced or removed, including through staging), and its size is bounded by the number of registered entities.
 - Add a CSP static scan, a no-codegen jest run, a headless Chromium test under a strict CSP and a benchmark performance gate to CI.
@@ -95,9 +113,6 @@ Upgrades the implementation from GTS spec **v0.15.0** to **[v0.17.0](https://git
 
 ### Fixed
 
-- OP#8 flattening no longer drops a differing conjunct of an `allOf`; unmodeled conjuncts make the verdict `unknown`. Differing annotations are not conjuncts, and a branch's `additionalProperties` applies to properties only another branch declares.
-- A local `$ref` that resolves to a scalar or an array fails closed instead of accepting the subtree.
-- `GET /match-id-pattern` reports an empty `pattern` or `candidate` as an invalid identifier instead of a missing parameter.
 - Core validation failed under a CSP without `'unsafe-eval'` and under `node --disallow-code-generation-from-strings` with `Code generation from strings disallowed for this context` (#28).
 
 ## [0.9.0] - 2026-10-09
