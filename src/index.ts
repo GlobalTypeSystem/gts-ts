@@ -6,8 +6,16 @@ export { GtsRelationships } from './relationships';
 export { GtsCompatibility } from './compatibility';
 export { GtsQuery } from './query';
 export { GtsModifiers, DOCUMENT_LEVEL_KEYWORDS } from './modifiers';
-export { XGtsRefValidator, X_GTS_REF_SELF } from './x-gts-ref';
-export type { XGtsRefValidationError } from './x-gts-ref';
+export {
+  XGtsRefValidator,
+  GtsSchemaError,
+  X_GTS_REF_SELF,
+  X_GTS_TYPE_REF,
+  X_GTS_INSTANCE_REF,
+  X_GTS_PATTERN_REF,
+  GTS_REF_KEYWORDS,
+} from './x-gts-ref';
+export type { XGtsRefValidationError, GtsRefKeyword } from './x-gts-ref';
 export { validateSchemaIdentityAndRefs, validateSchemaRefs } from './schema-refs';
 export {
   parseJSONC,

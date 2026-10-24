@@ -12,7 +12,7 @@ const OPEN_DIALECTS = DIALECT_NAMES.filter((dialect) => dialect !== 'draft-07');
 
 let engine: SchemaEngine;
 beforeEach(() => {
-  engine = createSchemaEngine({ getSelectedTypeId: () => 'gts.acme.core.events.a.v1~' });
+  engine = createSchemaEngine({ getRefContext: () => ({ selectedTypeId: 'gts.acme.core.events.a.v1~' }) });
 });
 const schemaOf = (dialect: Dialect, body: Record<string, unknown>) => ({ $schema: DIALECTS[dialect], ...body });
 
@@ -322,13 +322,13 @@ describe('F6: schemaPath is the erroring node location plus the keyword', () => 
     expect(pathsOf(dialect, body, { c: 1 })).toEqual([['#/properties/a~1b/type', '/c']]);
   });
 
-  test.each(DIALECT_NAMES)('[%s] x-gts-ref', (dialect) => {
+  test.each(DIALECT_NAMES)('[%s] x-gts-type-ref', (dialect) => {
     const issues = engine.validate(
-      schemaOf(dialect, { properties: { r: { 'x-gts-ref': 'gts.acme.core.events.a.v1~' } } }),
+      schemaOf(dialect, { properties: { r: { 'x-gts-type-ref': 'gts.acme.core.events.a.v1~' } } }),
       { r: 'gts.acme.core.events.b.v1~' }
     );
     expect(issues.map((issue) => [issue.schemaPath, issue.instancePath, issue.keyword])).toEqual([
-      ['#/properties/r/x-gts-ref', '/r', 'x-gts-ref'],
+      ['#/properties/r/x-gts-type-ref', '/r', 'x-gts-type-ref'],
     ]);
   });
 
