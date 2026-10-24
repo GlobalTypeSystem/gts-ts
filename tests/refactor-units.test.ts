@@ -31,6 +31,43 @@ import {
 import { dialectOf, canonicalDialectUri } from '../src/schema-dialect';
 import { assertSafeSchemaPatterns } from '../src/schema-safety';
 import { MAX_REGEX_EXPANDED_LENGTH } from '../src/regex-profile';
+import { forEachSchemaNode } from '../src/schema-walk';
+
+describe('schema walk from applied subschemas', () => {
+  const reached = (root: any, subschemas: unknown[]) => {
+    const nodes: any[] = [];
+    forEachSchemaNode(root, (node) => nodes.push(node), root, undefined, {
+      subschemas,
+      resource: { schema: root, path: '' },
+    });
+    return nodes;
+  };
+
+  test('skips declarations no $ref uses', () => {
+    const unused = { type: 'number' };
+    const traits = { type: 'boolean' };
+    const applied = { type: 'string', definitions: { unused }, $defs: { unused }, 'x-gts-traits-schema': traits };
+    const nodes = reached({ not: applied }, [applied]);
+    expect(nodes).toEqual([applied]);
+  });
+
+  test('follows a local $ref into a declaration of its own resource', () => {
+    const own = { type: 'string' };
+    const other = { type: 'number' };
+    const applied = { $id: 'https://example.com/inner', $ref: '#/definitions/R', definitions: { R: own } };
+    const root = { $id: 'https://example.com/root', not: applied, definitions: { R: other } };
+    const nodes = reached(root, [applied]);
+    expect(nodes).toContain(own);
+    expect(nodes).not.toContain(other);
+  });
+
+  test('a full walk still visits every declaration', () => {
+    const unused = { type: 'number' };
+    const nodes: any[] = [];
+    forEachSchemaNode({ definitions: { unused } }, (node) => nodes.push(node));
+    expect(nodes).toContain(unused);
+  });
+});
 
 describe('prefix helpers', () => {
   it('detects and strips the gts:// URI prefix', () => {

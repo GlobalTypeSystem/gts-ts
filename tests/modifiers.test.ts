@@ -54,7 +54,7 @@ describe('GTS Type Schema Modifiers (spec §9.11)', () => {
         type: 'object',
         allOf: [{ $$ref: 'gts://gts.x.unit.mod.base.v1~' }, { type: 'object', 'x-gts-final': true }],
       });
-      expect(found).toEqual(['allOf[1]/x-gts-final']);
+      expect(found).toEqual(['/allOf/1/x-gts-final']);
     });
 
     test('rejects a keyword nested in a property subschema', () => {
@@ -62,7 +62,7 @@ describe('GTS Type Schema Modifiers (spec §9.11)', () => {
         type: 'object',
         properties: { nested: { type: 'object', 'x-gts-traits': { topicRef: 'x' } } },
       });
-      expect(found).toEqual(['properties/nested/x-gts-traits']);
+      expect(found).toEqual(['/properties/nested/x-gts-traits']);
     });
 
     test('rejects a keyword nested in a definitions entry', () => {
@@ -70,7 +70,7 @@ describe('GTS Type Schema Modifiers (spec §9.11)', () => {
         type: 'object',
         definitions: { Sub: { type: 'object', 'x-gts-abstract': true } },
       });
-      expect(found).toEqual(['definitions/Sub/x-gts-abstract']);
+      expect(found).toEqual(['/definitions/Sub/x-gts-abstract']);
     });
 
     test('reports every misplacement, not just the first', () => {
@@ -87,7 +87,7 @@ describe('GTS Type Schema Modifiers (spec §9.11)', () => {
         type: 'array',
         contains: { 'x-gts-final': true },
       });
-      expect(found).toEqual(['contains/x-gts-final']);
+      expect(found).toEqual(['/contains/x-gts-final']);
     });
 
     test('rejects a keyword nested under propertyNames', () => {
@@ -95,7 +95,7 @@ describe('GTS Type Schema Modifiers (spec §9.11)', () => {
         type: 'object',
         propertyNames: { 'x-gts-final': true },
       });
-      expect(found).toEqual(['propertyNames/x-gts-final']);
+      expect(found).toEqual(['/propertyNames/x-gts-final']);
     });
 
     test('rejects a keyword nested under additionalItems', () => {
@@ -103,7 +103,7 @@ describe('GTS Type Schema Modifiers (spec §9.11)', () => {
         type: 'array',
         additionalItems: { 'x-gts-final': true },
       });
-      expect(found).toEqual(['additionalItems/x-gts-final']);
+      expect(found).toEqual(['/additionalItems/x-gts-final']);
     });
 
     test('rejects a keyword nested in a dependencies entry using the schema-dependency form', () => {
@@ -111,7 +111,7 @@ describe('GTS Type Schema Modifiers (spec §9.11)', () => {
         type: 'object',
         dependencies: { n: { 'x-gts-final': true } },
       });
-      expect(found).toEqual(['dependencies/n/x-gts-final']);
+      expect(found).toEqual(['/dependencies/n/x-gts-final']);
     });
 
     test('does not scan a dependencies entry using the property-dependency (array) form', () => {
@@ -127,7 +127,7 @@ describe('GTS Type Schema Modifiers (spec §9.11)', () => {
         type: 'object',
         dependentSchemas: { creditCard: { 'x-gts-final': true } },
       });
-      expect(found).toEqual(['dependentSchemas/creditCard/x-gts-final']);
+      expect(found).toEqual(['/dependentSchemas/creditCard/x-gts-final']);
     });
 
     test('fails closed when a document is nested too deeply to scan', () => {
@@ -140,7 +140,7 @@ describe('GTS Type Schema Modifiers (spec §9.11)', () => {
 
       const found = GtsModifiers.findMisplacedKeywords({ type: 'object', ...deep });
       expect(found.length).toBeGreaterThan(0);
-      expect(found[0]).toMatch(/nesting exceeds/);
+      expect(found[0]).toMatch(/nests deeper than/);
     });
 
     test('does not descend into the values of the top-level keywords', () => {
@@ -324,8 +324,9 @@ describe('x-gts-final / x-gts-abstract enforcement through the registry', () => 
  * (it only validates the four known DOCUMENT_LEVEL_KEYWORDS' placement via
  * `GtsModifiers.findMisplacedKeywords`, and validates `x-gts-final`/`x-gts-abstract`
  * value shape via `GtsModifiers.validateDeclaration`). Implementing this needs:
- * (1) a `SUPPORTED_X_GTS_KEYWORDS` allowlist (the five names: x-gts-abstract,
- * x-gts-final, x-gts-traits, x-gts-traits-schema, x-gts-ref) exported from
+ * (1) a `SUPPORTED_X_GTS_KEYWORDS` allowlist (the seven GTS 0.17 names:
+ * x-gts-type-ref, x-gts-instance-ref, x-gts-pattern-ref, x-gts-traits-schema,
+ * x-gts-traits, x-gts-final, x-gts-abstract) exported from
  * src/modifiers.ts alongside `DOCUMENT_LEVEL_KEYWORDS`; (2) a walker that visits
  * every schema position (top level plus everything `GtsModifiers`' private
  * `scan`/`scanSubschemas` already visits for placement checking - the same
@@ -392,8 +393,8 @@ describe('unknown x-gts-* keyword rejection (gts-spec 0.13.3, commit 40c6a67)', 
       },
     },
     {
-      // Near-miss typo of x-gts-ref.
-      name: 'x-gts-reference, a typo of x-gts-ref (TestCaseUnknown_RefTypoRejected)',
+      // Near-miss typo of a reference keyword.
+      name: 'x-gts-reference, a typo of x-gts-type-ref (TestCaseUnknown_RefTypoRejected)',
       content: {
         type: 'object',
         properties: {
@@ -457,8 +458,8 @@ describe('unknown x-gts-* keyword rejection (gts-spec 0.13.3, commit 40c6a67)', 
   });
 
   // Positive control mirroring TestCaseSupportedExtensions_Accepted (:2099):
-  // all five *supported* x-gts-* keywords, in valid (top-level or x-gts-ref's
-  // property-level) positions, must keep registering cleanly. This pins the
+  // all seven *supported* x-gts-* keywords, in valid (top-level or the
+  // reference keywords' property-level) positions, must keep registering cleanly. This pins the
   // rejection direction above to the *unknown keyword name*, not to the
   // x-gts-* prefix wholesale - an implementation that rejected every x-gts-*
   // occurrence indiscriminately would pass every row above but fail this one.
@@ -467,7 +468,7 @@ describe('unknown x-gts-* keyword rejection (gts-spec 0.13.3, commit 40c6a67)', 
   // of course `result` is null), but it stops being vacuous the moment the
   // phase-3 allowlist check exists - if the allowlist were ever satisfied by
   // simply blocking every x-gts-* keyword, this test starts failing.
-  test('accepts all five supported x-gts-* keywords in valid positions (positive control)', () => {
+  test('accepts all seven supported x-gts-* keywords in valid positions (positive control)', () => {
     const result = gts().checkTypeSchemaRules(
       {
         type: 'object',
@@ -478,7 +479,9 @@ describe('unknown x-gts-* keyword rejection (gts-spec 0.13.3, commit 40c6a67)', 
         },
         properties: {
           id: { type: 'string' },
-          ownerRef: { type: 'string', 'x-gts-ref': 'gts.*' },
+          ownerRef: { type: 'string', 'x-gts-instance-ref': 'gts.*' },
+          ownerType: { type: 'string', 'x-gts-type-ref': 'gts.*' },
+          scope: { type: 'string', 'x-gts-pattern-ref': 'gts.*' },
         },
       },
       undefined,
@@ -569,5 +572,64 @@ describe('unknown x-gts-* keyword rejection (gts-spec 0.13.3, commit 40c6a67)', 
       { enforceGuards: true }
     );
     expect(result).toBeNull();
+  });
+});
+
+describe('GTS keyword checks visit every schema location (§9.6.3, §11.0)', () => {
+  const DRAFT2020 = 'https://json-schema.org/draft/2020-12/schema';
+
+  test('a document-level keyword in a prefixItems entry is misplaced', () => {
+    expect(
+      GtsModifiers.findMisplacedKeywords({ $schema: DRAFT2020, type: 'array', prefixItems: [{ 'x-gts-final': true }] })
+    ).toEqual(['/prefixItems/0/x-gts-final']);
+  });
+
+  test('a document-level keyword reached only through a local $ref is misplaced', () => {
+    expect(GtsModifiers.findMisplacedKeywords({ $ref: '#/x-data', 'x-data': { 'x-gts-abstract': true } })).toEqual([
+      '/x-data/x-gts-abstract',
+    ]);
+  });
+
+  test('a document-level keyword inside the trait schema is misplaced', () => {
+    expect(
+      GtsModifiers.findMisplacedKeywords({ type: 'object', 'x-gts-traits-schema': { 'x-gts-traits': {} } })
+    ).toEqual(['/x-gts-traits-schema/x-gts-traits']);
+  });
+
+  test.each([
+    ['draft-07', 'http://json-schema.org/draft-07/schema#'],
+    ['2019-09', 'https://json-schema.org/draft/2019-09/schema'],
+    ['2020-12', DRAFT2020],
+  ])('the removed x-gts-ref in an unused definition is unknown under %s', (_name, dialect) => {
+    expect(
+      GtsModifiers.findUnknownKeywords({ $schema: dialect, definitions: { Unused: { 'x-gts-ref': 'gts.*' } } })
+    ).toEqual(['/definitions/Unused/x-gts-ref']);
+  });
+
+  test('an unknown keyword inside the trait schema is reported; trait values are data', () => {
+    expect(
+      GtsModifiers.findUnknownKeywords({
+        'x-gts-traits-schema': { properties: { a: { 'x-gts-ref': 'gts.*' } } },
+        'x-gts-traits': { 'x-gts-ref': 'data' },
+      })
+    ).toEqual(['/x-gts-traits-schema/properties/a/x-gts-ref']);
+  });
+
+  test.each([
+    ['draft-07', 'http://json-schema.org/draft-07/schema#'],
+    ['2019-09', 'https://json-schema.org/draft/2019-09/schema'],
+    ['2020-12', DRAFT2020],
+  ])('explicit schema validation rejects the removed x-gts-ref under %s', (_name, dialect) => {
+    const gts = new GTS({ validateRefs: false });
+    const id = `gts.x.unit.vocab.legacy${_name.replace('-', '')}.v1~`;
+    gts.register({
+      $id: `gts://${id}`,
+      $schema: dialect,
+      type: 'object',
+      definitions: { Unused: { 'x-gts-ref': 'gts.*' } },
+    });
+    const result = gts.validateSchema(id);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('/definitions/Unused/x-gts-ref');
   });
 });

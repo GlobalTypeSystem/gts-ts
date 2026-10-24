@@ -4,6 +4,7 @@
 
 - [0.10.0 - 2026-10-22](#0100---2026-10-22)
   - [Breaking](#breaking)
+  - [Added](#added)
   - [Changed](#changed)
   - [Security](#security)
   - [Fixed](#fixed)
@@ -15,21 +16,21 @@
   - [Breaking](#breaking-2)
   - [Fixed](#fixed-1)
 - [0.7.0 - 2026-09-21](#070---2026-09-21)
-  - [Added](#added)
+  - [Added](#added-1)
   - [Fixed](#fixed-2)
 - [0.6.0 - 2026-09-16](#060---2026-09-16)
   - [Breaking](#breaking-3)
-  - [Added](#added-1)
+  - [Added](#added-2)
   - [Fixed](#fixed-3)
 - [0.5.0 - 2026-09-15](#050---2026-09-15)
   - [Breaking](#breaking-4)
-  - [Added](#added-2)
+  - [Added](#added-3)
   - [Fixed](#fixed-4)
 - [0.4.0 - 2026-08-10](#040---2026-08-10)
   - [Breaking - HTTP API](#breaking---http-api)
   - [Breaking - library API](#breaking---library-api)
   - [Changed - compatibility semantics (spec 0.13 §4)](#changed---compatibility-semantics-spec-013-4)
-  - [Added](#added-3)
+  - [Added](#added-4)
   - [Changed - traits (§9.7.5, ADR-0002/0003/0004)](#changed---traits-975-adr-000200030004)
   - [Fixed](#fixed-5)
   - [Notes for implementers](#notes-for-implementers)
@@ -44,8 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.10.0] - 2026-10-22
 
+Upgrades the implementation from GTS spec **v0.15.0** to **[v0.17.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.17.0)** (through v0.16.0 and v0.16.1).
+
 ### Breaking
 
+- Replace `x-gts-ref` with the kind-specific `x-gts-type-ref` (concrete Type Identifiers) and `x-gts-instance-ref` (concrete Instance Identifiers) (spec §9.6.1, ADR-0008). `x-gts-ref` is now an unknown `x-gts-*` keyword and is rejected at every schema location. A concrete Instance ID operand is a schema error for `x-gts-type-ref`; pattern candidates are rejected by both keywords.
+- The GTS keyword vocabulary is exactly `x-gts-type-ref`, `x-gts-instance-ref`, `x-gts-pattern-ref`, `x-gts-traits-schema`, `x-gts-traits`, `x-gts-final`, and `x-gts-abstract` (spec §11.0).
+- Identifier matching follows the formal §10 grammar: an omitted minor matches any minor in every type and instance segment; `v1.*` requires an explicit minor; a wildcard may only follow a complete token or the version marker `v`; version components outside the unsigned 32-bit range are invalid. Identifiers are validated as spelled, without trimming.
+- OP#4 matches a pattern candidate when the filter covers it (`M(candidate) ⊆ M(filter)`), and OP#10 chain wildcards (`type.v1~*`) include the type itself. `matchIDPattern` and `GtsStore.query` no longer take the `chainSuffixMatchesSelf` option.
+- `XGtsRefValidator` is rewritten: the constructor takes no arguments; `validateSchema` reports invalid operands (and local `$ref`s that name no schema) at every schema location; `validateInstance` checks the reference keywords structurally, without registry lookup, also reporting failures of applicators (`not`, `oneOf`, ...) whose subschemas use reference keywords, and throws `GtsSchemaError` for a schema error, including a `$ref` to another resource, which it cannot resolve without a registry. `validateSchemaRefExistence`, `getReferencedIds`, `getReferencedWildcardPatterns`, and `isSelfReference` are removed.
 - Replace Ajv with [json-schema-library](https://github.com/sagold/json-schema-library) (exact pin `11.6.14`) as the JSON Schema engine of the core library. Draft-07, 2019-09 and 2020-12 remain supported.
 - The wording and order of `error` and `errors[].message` change: messages now come from the new engine and no longer reproduce Ajv's text. The `params` object changes as well: it carries Ajv-style keys from an explicit adapter table, and the internal `pointer` key is no longer present.
 - `keyword`, `instancePath` and `params` keys are unchanged for the 45 issue codes verified against an Ajv 8 oracle (161 probes across the three dialects), with these exceptions, which are changed:
@@ -56,8 +64,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Error count can differ from Ajv's: Ajv's extra branch errors for `anyOf`, `oneOf`, `propertyNames` and `contains` are not emitted, the wrapper issue is identical.
 - Validity (`ok` / `valid`) matches Ajv 8 + ajv-formats 3.0.1 for the verified probes and format tables, with the exceptions listed above. The `JSON Schema validation failed:` prefix, the `is not of type '...'` substring and the exported `ValidationIssue` / `ValidationResult` types are unchanged.
 
+### Added
+
+- `x-gts-pattern-ref` for pattern-valued fields, such as access-scope resource selectors (spec §9.6.2, ADR-0007): the value must be a valid pattern covered by the operand, independently of the registry and `gts-ref-validation`, in every supported dialect, including materialized trait values.
+- `Gts.patternCovers`, `Gts.idMatchesPattern`, `Gts.parseConcreteID`, `Gts.isConcreteGtsID`, and the exports `GtsSchemaError`, `X_GTS_TYPE_REF`, `X_GTS_INSTANCE_REF`, `X_GTS_PATTERN_REF`, `GTS_REF_KEYWORDS`.
+- OP#12 and OP#8 compare reference scopes by kind-filtered §10 coverage with `/$id` resolved for each compared schema, including `allOf` intersections, `anyOf` unions, `not` negations, and `const`/`enum` values. When reference constraints are not proven to be included, OP#8 reports `incompatible` only with a concrete counterexample and otherwise `unknown`.
+
 ### Changed
 
+- Pin the conformance suite and `.gts-spec` submodule to gts-spec `v0.17.0`.
+- The reference keywords are schema engine keywords, so applicators evaluate them, and registry policy (`any-present` / `any-valid`) is consulted only for a candidate an entity-reference keyword actually checks. Operand targets are still checked schema-wide. Invalid operands are schema errors that `not` cannot invert and `anyOf` cannot rescue, also in definitions, inactive branches, local `$ref` targets, and `x-gts-traits-schema`.
+- Operand-target failures in transitive validation name the declaring keyword and schema location.
+- Under `any-valid`, a reference to an invalid entity that rejects the value carries that entity's structured issues, tagged with its `entityId`.
+- Reference cycles settle on a consistent verdict: a result reached by assuming an entity still in progress valid is revalidated when the assumption fails, and a cycle without a consistent verdict fails closed.
+- A single dialect-aware schema walker (`schema-walk.ts`) serves the regex safety check, the vocabulary and placement checks, and operand checks; it follows local `$ref`s, reports reached nodes at their declaration, and treats `definitions` as a schema location in every dialect.
+- OP#12 compares a restated property with the base as a whole schema: dropping `type`, omitting a constrained base property, or restating it as `true` is a widening. A proven inclusion is not second-guessed by the keyword-by-keyword checks, and an unproven one fails only when either side reaches a reference keyword (through any applicator, including `if`/`then`/`else`, local `$ref`s and anchors, and `$ref`s to registered schemas).
+- OP#8 and OP#12 compare an `anyOf`/`oneOf` branch by branch and infer types from `anyOf`/`oneOf`/`allOf` branches and from `const`/`enum` values.
+- The server labels a schema error that involves no reference keyword (such as a local `$ref` that names no schema) `Invalid schema:` instead of `GTS reference validation failed:`.
 - Remove `ajv` and `ajv-formats` from the runtime dependencies (`ajv` stays as a devDependency, used only as a test oracle) and add `json-schema-library` pinned to exactly `11.6.14`.
 - Cache the compiled schema per store and per entity version; the cache is cleared on schema pool changes (a schema added, replaced or removed, including through staging), and its size is bounded by the number of registered entities.
 - Add a CSP static scan, a no-codegen jest run, a headless Chromium test under a strict CSP and a benchmark performance gate to CI.
@@ -72,6 +95,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OP#8 flattening no longer drops a differing conjunct of an `allOf`; unmodeled conjuncts make the verdict `unknown`. Differing annotations are not conjuncts, and a branch's `additionalProperties` applies to properties only another branch declares.
+- A local `$ref` that resolves to a scalar or an array fails closed instead of accepting the subtree.
+- `GET /match-id-pattern` reports an empty `pattern` or `candidate` as an invalid identifier instead of a missing parameter.
 - Core validation failed under a CSP without `'unsafe-eval'` and under `node --disallow-code-generation-from-strings` with `Code generation from strings disallowed for this context` (#28).
 
 ## [0.9.0] - 2026-10-09

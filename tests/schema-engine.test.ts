@@ -9,6 +9,7 @@ import {
   type SchemaEngine,
 } from '../src/schema-engine';
 import { RegexCompilationError } from '../src/regex-engine';
+import { GTS_REF_KEYWORDS, GtsSchemaError } from '../src/x-gts-ref';
 import { attachSourceLocations } from '../src/source-location';
 import type { SourceSpan } from '../src/types';
 
@@ -21,7 +22,7 @@ const DIALECT_NAMES = Object.keys(DIALECTS) as (keyof typeof DIALECTS)[];
 
 let selected: string | undefined;
 function makeEngine(): SchemaEngine {
-  return createSchemaEngine({ getSelectedTypeId: () => selected });
+  return createSchemaEngine({ getRefContext: () => ({ selectedTypeId: selected }) });
 }
 function schemaOf(dialect: keyof typeof DIALECTS, body: Record<string, unknown>): Record<string, unknown> {
   return { $schema: DIALECTS[dialect], ...body };
@@ -194,9 +195,9 @@ describe('_id blacklist neutralization (library deviation)', () => {
   });
 });
 
-describe('x-gts-ref keyword', () => {
+describe('GTS reference keywords', () => {
   const engine = makeEngine();
-  const ref = (pattern: string) => schemaOf('2020-12', { type: 'string', 'x-gts-ref': pattern });
+  const ref = (pattern: string) => schemaOf('2020-12', { type: 'string', 'x-gts-type-ref': pattern });
   const idA = 'gts.acme.core.events.a.v1~';
   const idB = 'gts.acme.core.events.b.v1~';
 
@@ -204,9 +205,9 @@ describe('x-gts-ref keyword', () => {
     expect(engine.validate(ref('gts.acme.core.events.*'), idA)).toEqual([]);
     const issues = engine.validate(ref(idA), idB);
     expect(issues).toHaveLength(1);
-    expect(issues[0].keyword).toBe('x-gts-ref');
+    expect(issues[0].keyword).toBe('x-gts-type-ref');
     expect(issues[0].message).toContain('does not match pattern');
-    expect(issues[0].params).toEqual({ pattern: idA });
+    expect(issues[0].params).toEqual({ operand: idA });
   });
 
   test('non-string data is ignored', () => {
@@ -216,28 +217,28 @@ describe('x-gts-ref keyword', () => {
   test('works inside oneOf / anyOf / not', () => {
     const oneOf = schemaOf('2020-12', {
       oneOf: [
-        { type: 'string', 'x-gts-ref': idA },
-        { type: 'string', 'x-gts-ref': idB },
+        { type: 'string', 'x-gts-type-ref': idA },
+        { type: 'string', 'x-gts-type-ref': idB },
       ],
     });
     expect(engine.validate(oneOf, idA)).toEqual([]);
     expect(engine.validate(oneOf, idB)).toEqual([]);
     expect(engine.validate(oneOf, 'gts.acme.core.events.c.v1~').length).toBeGreaterThan(0);
 
-    const anyOf = schemaOf('2019-09', { anyOf: [{ 'x-gts-ref': idA }, { 'x-gts-ref': idB }] });
+    const anyOf = schemaOf('2019-09', { anyOf: [{ 'x-gts-type-ref': idA }, { 'x-gts-type-ref': idB }] });
     expect(engine.validate(anyOf, idB)).toEqual([]);
     expect(engine.validate(anyOf, 'gts.acme.core.events.c.v1~').length).toBeGreaterThan(0);
 
-    const not = schemaOf('draft-07' as never, { not: { 'x-gts-ref': idA } });
+    const not = schemaOf('draft-07' as never, { not: { 'x-gts-type-ref': idA } });
     (not as Record<string, unknown>).$schema = DIALECTS['draft-07'];
     expect(engine.validate(not, idA).length).toBeGreaterThan(0);
     expect(engine.validate(not, idB)).toEqual([]);
   });
 
-  test('/$id resolves through getSelectedTypeId on every call', () => {
+  test('/$id resolves through getRefContext on every call', () => {
     const schema = ref('/$id');
     selected = undefined;
-    expect(engine.validate(schema, idB)).toEqual([]);
+    expect(() => engine.validate(schema, idB)).toThrow(GtsSchemaError);
     selected = idA;
     expect(engine.validate(schema, idA)).toEqual([]);
     expect(engine.validate(schema, idB)).toHaveLength(1);
@@ -247,7 +248,7 @@ describe('x-gts-ref keyword', () => {
 
   test('works in every dialect', () => {
     for (const dialect of DIALECT_NAMES) {
-      const schema = schemaOf(dialect, { type: 'string', 'x-gts-ref': idA });
+      const schema = schemaOf(dialect, { type: 'string', 'x-gts-type-ref': idA });
       expect(engine.validate(schema, idA)).toEqual([]);
       expect(engine.validate(schema, idB)).toHaveLength(1);
     }
@@ -435,7 +436,7 @@ describe('validateSchemaDocument', () => {
 });
 
 describe('issue code table', () => {
-  const drafts = buildEngineDrafts(() => selected);
+  const drafts = buildEngineDrafts(() => ({ selectedTypeId: selected }));
   const runtimeCodes = (dialect: keyof typeof DIALECTS): string[] => Object.keys(drafts[dialect].errors);
 
   test.each(DIALECT_NAMES)('has a row for every runtime error code of the %s draft', (dialect) => {
@@ -447,7 +448,7 @@ describe('issue code table', () => {
   test('has no stale row: every row names a code of some runtime errors map', () => {
     const known = new Set(DIALECT_NAMES.flatMap(runtimeCodes));
     expect(Object.keys(ISSUE_CODE_TABLE).filter((code) => !known.has(code))).toEqual([]);
-    expect(ISSUE_CODE_TABLE['x-gts-ref']).toBeDefined();
+    for (const keyword of GTS_REF_KEYWORDS) expect(ISSUE_CODE_TABLE[keyword]).toBeDefined();
   });
 
   test('an unmapped code fails', () => {
@@ -514,7 +515,7 @@ const NOT_PROBED: Record<string, string> = {
 describe('issue adapter probes: every code against real library error data', () => {
   const dialectsOf = (probe: Probe) => probe.dialects ?? DIALECT_NAMES;
   const run = (probe: Probe, dialect: keyof typeof DIALECTS) => {
-    const draft = buildEngineDrafts(() => selected)[dialect];
+    const draft = buildEngineDrafts(() => ({ selectedTypeId: selected }))[dialect];
     const root = compileSchema(schemaOf(dialect, probe.schema), { drafts: [draft] });
     const errors = root.validate(probe.data).errors;
     const raw = errors.find((error) => error.code === probe.code);

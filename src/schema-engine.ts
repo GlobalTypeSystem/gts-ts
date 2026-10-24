@@ -5,7 +5,7 @@
  * pool and its issue adapter; there is no module-level mutable state.
  *
  * GTS extensions applied to the draft-07 / 2019-09 / 2020-12 drafts:
- *  - `x-gts-ref` keyword (shared logic in `xGtsRefKeywordViolation`, `x-gts-ref.ts`);
+ *  - `x-gts-type-ref` / `x-gts-instance-ref` / `x-gts-pattern-ref` keywords (shared logic in `x-gts-ref.ts`);
  *  - `pattern` / `patternProperties` / `format: regex` through `compileSafePattern` (re2js);
  *  - GTS `date-time` / `time` / `regex` formats (ADR-0005) and compatibility checkers for every other
  *    format the former Ajv path asserted (ajv-formats `full` mode);
@@ -56,8 +56,18 @@ import {
 } from './gts-format-checkers';
 import { compileSafePattern, RegexCompilationError } from './regex-engine';
 import { dialectOf, type SchemaDialect } from './schema-dialect';
-import type { ValidationIssue } from './types';
-import { xGtsRefKeywordViolation } from './x-gts-ref';
+import type { GtsID, ValidationIssue } from './types';
+import {
+  GTS_REF_KEYWORDS,
+  refValueViolation,
+  resolveRefOperand,
+  X_GTS_INSTANCE_REF,
+  X_GTS_PATTERN_REF,
+  X_GTS_REF_SELF,
+  X_GTS_TYPE_REF,
+  type GtsRefContext,
+  type GtsRefKeyword,
+} from './x-gts-ref';
 
 // ---------------------------------------------------------------------------
 // Issue adapter
@@ -228,7 +238,9 @@ export const ISSUE_CODE_TABLE: Readonly<Record<string, IssueCodeRow>> = {
   'deprecated-warning': plain('annotation'),
   'unknown-keyword-warning': plain('annotation'),
   'unknown-format-warning': plain('annotation'),
-  'x-gts-ref': row('x-gts-ref', 'pointer', { pattern: from('pattern') }),
+  [X_GTS_TYPE_REF]: row(X_GTS_TYPE_REF, 'pointer', { operand: from('operand') }),
+  [X_GTS_INSTANCE_REF]: row(X_GTS_INSTANCE_REF, 'pointer', { operand: from('operand') }),
+  [X_GTS_PATTERN_REF]: row(X_GTS_PATTERN_REF, 'pointer', { operand: from('operand') }),
 };
 
 /** Keywords whose Ajv `schemaPath` is the node location itself (no keyword segment). */
@@ -286,16 +298,32 @@ function regexSchemaError(node: SchemaNode, pointer: string, value: unknown, err
   return node.createError('schema-error', { pointer, schema: node.schema, value, message, cause: error });
 }
 
-function createXGtsRefKeyword(getSelectedTypeId: () => string | undefined): Keyword {
+/**
+ * A GTS reference keyword (`x-gts-type-ref`, `x-gts-instance-ref`, `x-gts-pattern-ref`). A literal
+ * operand is resolved while parsing, so an invalid one throws {@link GtsSchemaError} at compile time;
+ * `/$id` is resolved on every evaluation from `getRefContext`, which also supplies the registry policy.
+ */
+function createGtsRefKeyword(keyword: GtsRefKeyword, getRefContext: () => GtsRefContext): Keyword {
+  const literals = new WeakMap<SchemaNode, GtsID>();
   return {
-    id: 'x-gts-ref',
-    keyword: 'x-gts-ref',
-    addValidate: ({ schema }) => typeof schema['x-gts-ref'] === 'string',
+    id: keyword,
+    keyword,
+    parse: (node: SchemaNode) => {
+      if (!(keyword in node.schema)) return undefined;
+      const operand = node.schema[keyword];
+      if (operand !== X_GTS_REF_SELF) literals.set(node, resolveRefOperand(keyword, operand));
+      return undefined;
+    },
+    addValidate: ({ schema }) => keyword in schema,
     validate: ({ node, data, pointer = '#' }: JsonSchemaValidatorParams) => {
-      const pattern = node.schema['x-gts-ref'];
-      const reason = xGtsRefKeywordViolation(pattern, data, getSelectedTypeId);
+      if (typeof data !== 'string') return undefined;
+      const operand = node.schema[keyword];
+      const context = getRefContext();
+      const pattern = literals.get(node) ?? resolveRefOperand(keyword, operand, context.selectedTypeId);
+      let reason = refValueViolation(keyword, pattern, data);
+      if (reason === null && keyword !== X_GTS_PATTERN_REF) reason = context.referenceViolation?.(data) ?? null;
       if (reason === null) return undefined;
-      return node.createError('x-gts-ref', { pointer, schema: node.schema, value: data, pattern }, reason);
+      return node.createError(keyword, { pointer, schema: node.schema, value: data, operand, reason }, reason);
     },
   };
 }
@@ -557,10 +585,10 @@ function gtsNumberFormat(code: string, isValid: (value: number) => boolean): For
 /** A format that is registered but never asserts (ajv-formats `password`, `binary`, `float`, `double`). */
 const annotationFormat: FormatFn = () => undefined;
 
-function buildDraft(base: Draft, getSelectedTypeId: () => string | undefined): Draft {
+function buildDraft(base: Draft, getRefContext: () => GtsRefContext): Draft {
   const extended = extendDraft(base, {
     keywords: [
-      createXGtsRefKeyword(getSelectedTypeId),
+      ...GTS_REF_KEYWORDS.map((keyword) => createGtsRefKeyword(keyword, getRefContext)),
       createPatternKeyword(findKeyword(base, 'pattern')),
       createPatternPropertiesKeyword(findKeyword(base, 'patternProperties')),
       createAdditionalPropertiesKeyword(findKeyword(base, 'additionalProperties')),
@@ -571,7 +599,9 @@ function buildDraft(base: Draft, getSelectedTypeId: () => string | undefined): D
         : []),
     ],
     errors: {
-      'x-gts-ref': 'Value does not match x-gts-ref pattern',
+      [X_GTS_TYPE_REF]: '{{reason}}',
+      [X_GTS_INSTANCE_REF]: '{{reason}}',
+      [X_GTS_PATTERN_REF]: '{{reason}}',
       'format-iso-time-error': 'Value `{{value}}` at `{{pointer}}` is not a valid iso-time',
       'format-iso-date-time-error': 'Value `{{value}}` at `{{pointer}}` is not a valid iso-date-time',
       'format-json-pointer-uri-fragment-error':
@@ -620,8 +650,8 @@ function buildDraft(base: Draft, getSelectedTypeId: () => string | undefined): D
 // ---------------------------------------------------------------------------
 
 export interface SchemaEngineOptions {
-  /** Type currently being validated (without `gts://`), read on every `x-gts-ref` evaluation. */
-  getSelectedTypeId: () => string | undefined;
+  /** Inputs of the GTS reference keywords (selected type for `/$id`, registry policy), read on every evaluation. */
+  getRefContext: () => GtsRefContext;
 }
 
 export interface CompiledSchema {
@@ -656,16 +686,16 @@ const HOST_ID = 'gts://__schema_engine_host__';
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 /** The three GTS-extended drafts the engine validates with (exported so tests can read their runtime `errors` maps). */
-export function buildEngineDrafts(getSelectedTypeId: () => string | undefined): Record<SchemaDialect, Draft> {
+export function buildEngineDrafts(getRefContext: () => GtsRefContext = () => ({})): Record<SchemaDialect, Draft> {
   return {
-    'draft-07': buildDraft(draft07, getSelectedTypeId),
-    '2019-09': buildDraft(draft2019, getSelectedTypeId),
-    '2020-12': buildDraft(draft2020, getSelectedTypeId),
+    'draft-07': buildDraft(draft07, getRefContext),
+    '2019-09': buildDraft(draft2019, getRefContext),
+    '2020-12': buildDraft(draft2020, getRefContext),
   };
 }
 
 export function createSchemaEngine(options: SchemaEngineOptions): SchemaEngine {
-  const drafts = buildEngineDrafts(options.getSelectedTypeId);
+  const drafts = buildEngineDrafts(options.getRefContext);
   const pools: Record<SchemaDialect, Map<string, Record<string, any>>> = {
     'draft-07': new Map(),
     '2019-09': new Map(),

@@ -97,14 +97,14 @@ describe('structured validation results', () => {
     expect(result.errors).toEqual(expect.arrayContaining([expect.objectContaining({ instancePath: '/values/0' })]));
   });
 
-  test('returns structured x-gts-ref declaration errors', () => {
+  test('returns structured reference operand errors', () => {
     const gts = new GTS();
     const typeId = 'gts.x.unit.structured.xref.v1~';
     gts.register({
       $id: `gts://${typeId}`,
       $schema: 'http://json-schema.org/draft-07/schema#',
       type: 'object',
-      properties: { link: { type: 'string', 'x-gts-ref': '/unsupported' } },
+      properties: { link: { type: 'string', 'x-gts-type-ref': '/unsupported' } },
     });
 
     const result = gts.validateSchema(typeId);
@@ -112,9 +112,39 @@ describe('structured validation results', () => {
     expect(result.ok).toBe(false);
     expect(result.errors).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ instancePath: '/properties/link/x-gts-ref', keyword: 'x-gts-ref' }),
+        expect.objectContaining({ instancePath: '/properties/link/x-gts-type-ref', keyword: 'x-gts-type-ref' }),
       ])
     );
+  });
+
+  test('attributes an invalid operand target to the declaring keyword and location', () => {
+    const gts = new GTS();
+    const itemId = 'gts.x.unit.structured.item.v1~';
+    const brokenId = `${itemId}x.unit._.broken.v1`;
+    const holderId = 'gts.x.unit.structured.holder.v1~';
+    gts.register({
+      $id: `gts://${itemId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      required: ['name'],
+    });
+    gts.register({ id: brokenId, type: itemId });
+    gts.register({
+      $id: `gts://${holderId}`,
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: { item: { type: 'string', 'x-gts-instance-ref': brokenId } },
+    });
+
+    const result = gts.validateSchema(holderId);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain(`/properties/item/x-gts-instance-ref names '${brokenId}', which is invalid`);
+    expect(result.errors?.[0]).toEqual(
+      expect.objectContaining({ instancePath: '/properties/item/x-gts-instance-ref', keyword: 'x-gts-instance-ref' })
+    );
+    // The invalid target's own issue is kept and tagged with its identity.
+    expect(result.errors).toEqual(expect.arrayContaining([expect.objectContaining({ entityId: brokenId })]));
   });
 
   test('reports derivation issues at the derived property path', () => {
