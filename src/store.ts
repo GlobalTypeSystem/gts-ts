@@ -27,11 +27,9 @@ import {
   GtsRefContext,
   GtsRefKeyword,
   isGtsRefKeyword,
-  refSchemaErrorMessage,
   resolveRefOperand,
-  XGtsRefValidationError,
-  XGtsRefValidator,
-} from './x-gts-ref';
+} from './ref-keywords';
+import { refSchemaErrorMessage, XGtsRefValidationError, XGtsRefValidator } from './x-gts-ref';
 import {
   escapeJsonPointerSegment,
   forEachSchemaNode,

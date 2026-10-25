@@ -68,7 +68,7 @@ import {
   X_GTS_TYPE_REF,
   type GtsRefContext,
   type GtsRefKeyword,
-} from './x-gts-ref';
+} from './ref-keywords';
 
 // ---------------------------------------------------------------------------
 // Issue adapter

@@ -11,7 +11,7 @@
  */
 
 import { forEachSchemaNode } from './schema-walk';
-import { GTS_REF_KEYWORDS } from './x-gts-ref';
+import { GTS_REF_KEYWORDS } from './ref-keywords';
 
 export const X_GTS_FINAL = 'x-gts-final';
 export const X_GTS_ABSTRACT = 'x-gts-abstract';

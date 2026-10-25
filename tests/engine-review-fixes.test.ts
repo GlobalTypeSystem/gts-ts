@@ -491,3 +491,26 @@ describe('N1: root schema errors are told apart from remote host errors', () => 
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// M2: the reference keywords do not depend on module load order
+// ---------------------------------------------------------------------------
+
+describe('M2: reference keyword errors do not depend on which module loads first', () => {
+  const ENTRIES = ['x-gts-ref', 'compatibility', 'modifiers', 'relationships', 'ref-scope', 'schema-engine'];
+
+  test.each(ENTRIES)('loading %s first still maps reference keyword errors', (entry) => {
+    let isolated!: typeof import('../src/schema-engine');
+    jest.isolateModules(() => {
+      require(`../src/${entry}`);
+      isolated = require('../src/schema-engine');
+    });
+    const T = 'gts.acme.core.events.a.v1~';
+    const issues = isolated
+      .createSchemaEngine({ getRefContext: () => ({}) })
+      .validate(schemaOf('draft-07', { 'x-gts-type-ref': T }), 'gts.other.core.events.b.v1~');
+    expect(issues).toHaveLength(1);
+    expect(issues[0].keyword).toBe('x-gts-type-ref');
+    expect(issues[0].message).toContain(`does not match pattern '${T}'`);
+  });
+});

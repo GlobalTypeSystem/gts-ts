@@ -11,7 +11,8 @@ import {
 } from '../src';
 import { MAX_SCHEMA_DEPTH } from '../src/types';
 import { MAX_REGEX_EXPANDED_LENGTH } from '../src/regex-profile';
-import { GtsSchemaError, X_GTS_REF_SELF, XGtsRefValidator } from '../src/x-gts-ref';
+import { GtsSchemaError, X_GTS_REF_SELF } from '../src/ref-keywords';
+import { XGtsRefValidator } from '../src/x-gts-ref';
 
 describe('GTS Core Operations', () => {
   describe('OP#1 - ID Validation', () => {

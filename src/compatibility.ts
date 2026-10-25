@@ -11,7 +11,8 @@ import {
 import { Gts } from './gts';
 import { compileSafePattern, RegexCompilationError, type SafePattern } from './regex-engine';
 import { clauseImplied, isComparedElsewhere, refClauses, usesRefKeywords, witnessCandidates } from './ref-scope';
-import { GTS_REF_KEYWORDS, isGtsRefKeyword, X_GTS_REF_SELF, XGtsRefValidator } from './x-gts-ref';
+import { GTS_REF_KEYWORDS, isGtsRefKeyword, X_GTS_REF_SELF } from './ref-keywords';
+import { XGtsRefValidator } from './x-gts-ref';
 
 const SELF_OPERAND = JSON.stringify(X_GTS_REF_SELF);
 

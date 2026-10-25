@@ -9,7 +9,7 @@ import {
   type SchemaEngine,
 } from '../src/schema-engine';
 import { RegexCompilationError } from '../src/regex-engine';
-import { GTS_REF_KEYWORDS, GtsSchemaError } from '../src/x-gts-ref';
+import { GTS_REF_KEYWORDS, GtsSchemaError } from '../src/ref-keywords';
 import { attachSourceLocations } from '../src/source-location';
 import type { SourceSpan } from '../src/types';
 

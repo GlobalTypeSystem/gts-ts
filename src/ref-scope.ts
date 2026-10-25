@@ -31,7 +31,7 @@ import {
   refValueViolation,
   resolveRefOperand,
   X_GTS_PATTERN_REF,
-} from './x-gts-ref';
+} from './ref-keywords';
 
 /** One reference keyword with its resolved operand. */
 export interface RefAtom {

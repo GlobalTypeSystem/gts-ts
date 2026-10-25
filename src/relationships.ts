@@ -1,7 +1,7 @@
 import { RelationshipResult, stripUriPrefix } from './types';
 import { GtsStore } from './store';
 import { Gts } from './gts';
-import { ENTITY_REF_KEYWORDS } from './x-gts-ref';
+import { ENTITY_REF_KEYWORDS } from './ref-keywords';
 
 export class GtsRelationships {
   static resolveRelationships(store: GtsStore, gtsId: string): RelationshipResult {
