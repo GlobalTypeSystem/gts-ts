@@ -62,11 +62,19 @@ const SCHEMA_MAP_KEYWORDS: Record<SchemaDialect, ReadonlySet<string>> = {
   '2019-09': new Set(['$defs', 'definitions', 'dependencies', 'dependentSchemas', 'patternProperties', 'properties']),
   '2020-12': new Set(['$defs', 'definitions', 'dependencies', 'dependentSchemas', 'patternProperties', 'properties']),
 };
+// The schema engine resolves `$recursiveRef` (2019-09) and `$dynamicRef` (2020-12) like `$ref` for
+// their initial target: a JSON Pointer, the resource itself, or an anchor.
+const SCHEMA_REF_KEYWORDS: Record<SchemaDialect, ReadonlySet<string>> = {
+  'draft-07': new Set(['$ref']),
+  '2019-09': new Set(['$ref', '$recursiveRef']),
+  '2020-12': new Set(['$ref', '$dynamicRef']),
+};
 
 interface Keywords {
   values: ReadonlySet<string>;
   arrays: ReadonlySet<string>;
   maps: ReadonlySet<string>;
+  refs: ReadonlySet<string>;
 }
 
 function union(sets: Record<SchemaDialect, ReadonlySet<string>>): ReadonlySet<string> {
@@ -78,6 +86,7 @@ const ANY_DIALECT: Keywords = {
   values: union(SCHEMA_VALUE_KEYWORDS),
   arrays: union(SCHEMA_ARRAY_KEYWORDS),
   maps: union(SCHEMA_MAP_KEYWORDS),
+  refs: union(SCHEMA_REF_KEYWORDS),
 };
 
 function keywordsFor(dialectSource: any): Keywords {
@@ -91,6 +100,7 @@ function keywordsFor(dialectSource: any): Keywords {
     values: SCHEMA_VALUE_KEYWORDS[dialect],
     arrays: SCHEMA_ARRAY_KEYWORDS[dialect],
     maps: SCHEMA_MAP_KEYWORDS[dialect],
+    refs: SCHEMA_REF_KEYWORDS[dialect],
   };
 }
 
@@ -103,16 +113,15 @@ export function isEmbeddedResource(value: any): boolean {
 const PREVENT_SCOPE_CHANGE = new Set(['properties', 'patternProperties', 'enum', 'dependencies', 'definitions']);
 
 /**
- * Resolve a local pointer and return its target and resource, following
- * embedded `$id` scopes. A local pointer that names no value returns null.
- * External refs return undefined; anchors are skipped because their schema
- * positions are already visited.
+ * The resource a local reference resolves in, and its decoded fragment. A
+ * malformed fragment returns null; a reference to another resource returns
+ * undefined.
  */
-export function resolveLocalRef(
+function localFragment(
   root: any,
   resource: Resource,
   ref: unknown
-): { target: unknown; resource: Resource; path: string } | null | undefined {
+): { scope: Resource; fragment: string } | null | undefined {
   if (typeof ref !== 'string') return undefined;
   const hash = ref.indexOf('#');
   const base = hash < 0 ? ref : ref.slice(0, hash);
@@ -120,12 +129,29 @@ export function resolveLocalRef(
     base === '' || base === resource.schema.$id ? resource : base === root.$id ? { schema: root, path: '' } : undefined;
   if (scope === undefined) return undefined;
   // Decode before splitting: `%2F` separates segments; `~1` is a literal slash.
-  let fragment: string;
   try {
-    fragment = hash < 0 ? '' : decodeURIComponent(ref.slice(hash + 1));
+    return { scope, fragment: hash < 0 ? '' : decodeURIComponent(ref.slice(hash + 1)) };
   } catch {
     return null;
   }
+}
+
+/** A value in a document, its JSON Pointer, and the resource its local references resolve in. */
+interface Located {
+  target: unknown;
+  resource: Resource;
+  path: string;
+}
+
+/**
+ * Resolve a local pointer and return its target and resource, following
+ * embedded `$id` scopes. A local pointer that names no value returns null.
+ * External refs and anchors return undefined.
+ */
+export function resolveLocalRef(root: any, resource: Resource, ref: unknown): Located | null | undefined {
+  const local = localFragment(root, resource, ref);
+  if (!local) return local;
+  const { scope, fragment } = local;
   if (fragment === '') return { target: scope.schema, resource: scope, path: scope.path };
   if (!fragment.startsWith('/')) return undefined;
   let target: any = scope.schema;
@@ -143,6 +169,71 @@ export function resolveLocalRef(
     }
   }
   return { target, resource: targetResource, path };
+}
+
+/** The anchor a local reference names (`#name`), or undefined for any other reference. */
+function localAnchor(root: any, resource: Resource, ref: unknown): string | undefined {
+  const local = localFragment(root, resource, ref);
+  return local && local.fragment !== '' && !local.fragment.startsWith('/') ? local.fragment : undefined;
+}
+
+/** Keywords whose values are literal data, never schemas or keywords. */
+const LITERAL_KEYWORDS = new Set(['const', 'enum', 'default', 'examples', 'x-gts-traits']);
+/** Keywords whose values map names (which may spell keywords) to schemas. */
+const NAME_MAP_KEYWORDS = union(SCHEMA_MAP_KEYWORDS);
+
+/** The anchors `object` declares: `$anchor`, `$dynamicAnchor`, and a draft-07 `$id` fragment. */
+function declaredAnchors(object: Record<string, unknown>): string[] {
+  const anchors = [object.$anchor, object.$dynamicAnchor].filter((name): name is string => typeof name === 'string');
+  const id = typeof object.$id === 'string' ? object.$id : '';
+  const hash = id.indexOf('#');
+  if (hash >= 0) {
+    try {
+      const fragment = decodeURIComponent(id.slice(hash + 1));
+      if (fragment !== '' && !fragment.startsWith('/')) anchors.push(fragment);
+    } catch {
+      // A malformed fragment declares no anchor.
+    }
+  }
+  return anchors;
+}
+
+/**
+ * Every object in `root` that declares an anchor, by name, wherever it sits
+ * outside literal data: the engine resolves a `$dynamicAnchor` even under an
+ * unknown keyword. Anchors of every resource are included, so a reference
+ * may name more targets here than the engine resolves it to, never fewer.
+ */
+function anchorIndex(root: unknown): Map<string, Located[]> {
+  const index = new Map<string, Located[]>();
+  // `names`: the object maps names to schemas, so none of its keys is a keyword.
+  const stack: Array<Located & { names: boolean }> = [
+    { target: root, path: '', resource: { schema: root, path: '' }, names: false },
+  ];
+  let visited = 0;
+  while (stack.length > 0) {
+    const { target, path, resource: enclosing, names } = stack.pop()!;
+    if (target === null || typeof target !== 'object') continue;
+    if (++visited > MAX_SCHEMA_PATHS) throw new Error(`Schema exceeds the ${MAX_SCHEMA_PATHS} path safety limit`);
+    if (Array.isArray(target)) {
+      target.forEach((item, i) =>
+        stack.push({ target: item, path: pointer(path, i), resource: enclosing, names: false })
+      );
+      continue;
+    }
+    const object = target as Record<string, unknown>;
+    const resource = !names && object !== root && isEmbeddedResource(object) ? { schema: object, path } : enclosing;
+    if (!names) {
+      for (const name of declaredAnchors(object)) {
+        index.set(name, [...(index.get(name) ?? []), { target: object, resource, path }]);
+      }
+    }
+    for (const [key, child] of Object.entries(object)) {
+      if (!names && LITERAL_KEYWORDS.has(key)) continue;
+      stack.push({ target: child, path: pointer(path, key), resource, names: !names && NAME_MAP_KEYWORDS.has(key) });
+    }
+  }
+  return index;
 }
 
 /** A schema resource (the document or an embedded `$id` subschema) and its JSON Pointer. */
@@ -221,6 +312,7 @@ export function forEachSchemaNode(
     ? from.subschemas.map((value) => ({ value, path: '', depth: 0, resource: from.resource }))
     : [{ value: root, path: '', depth: 0, resource: { schema: root, path: '' } }];
   const seen = new WeakSet<object>();
+  let anchors: Map<string, Located[]> | undefined;
   let paths = 0;
   while (stack.length > 0) {
     const { value, path, depth, resource: enclosing } = stack.pop()!;
@@ -238,14 +330,22 @@ export function forEachSchemaNode(
       from === undefined
     );
     // References make their targets schema positions, even under unknown keywords.
-    const reference = resolveLocalRef(root, resource, value.$ref);
-    // Ajv compiles a reference to a scalar or an array permissively, so such a
-    // target must be reported rather than silently accepting the subtree.
-    if (reference === null || (reference !== undefined && !isSchemaValue(reference.target))) {
-      onInvalidRef?.(pointer(path, '$ref'), value.$ref);
-    } else if (reference !== undefined) {
+    for (const keyword of keywords.refs) {
+      const ref = value[keyword];
+      const reference = resolveLocalRef(root, resource, ref);
+      // Ajv compiles a reference to a scalar or an array permissively, so such a
+      // target must be reported rather than silently accepting the subtree.
+      if (reference === null || (reference !== undefined && !isSchemaValue(reference.target))) {
+        onInvalidRef?.(pointer(path, keyword), ref);
+        continue;
+      }
+      const name = reference === undefined ? localAnchor(root, resource, ref) : undefined;
+      const targets =
+        reference !== undefined ? [reference] : name !== undefined ? (anchors ??= anchorIndex(root)).get(name) : [];
       // Located where the target is declared, so diagnostics point at it.
-      stack.push({ value: reference.target, path: reference.path, depth: depth + 1, resource: reference.resource });
+      for (const target of targets ?? []) {
+        stack.push({ value: target.target, path: target.path, depth: depth + 1, resource: target.resource });
+      }
     }
   }
 }

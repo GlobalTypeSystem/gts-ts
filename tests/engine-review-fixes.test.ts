@@ -1,5 +1,6 @@
 import { adaptLibraryError, createSchemaEngine, type SchemaEngine } from '../src/schema-engine';
 import { isValidDateTime, isValidRegex, isValidTimePart } from '../src/gts-format-checkers';
+import { GTS, GtsSchemaError, XGtsRefValidator } from '../src';
 
 const DIALECTS = {
   'draft-07': 'http://json-schema.org/draft-07/schema#',
@@ -512,5 +513,88 @@ describe('M2: reference keyword errors do not depend on which module loads first
     expect(issues).toHaveLength(1);
     expect(issues[0].keyword).toBe('x-gts-type-ref');
     expect(issues[0].message).toContain(`does not match pattern '${T}'`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Schema walk: `$dynamicRef`, `$recursiveRef` and anchor targets are schema positions
+// ---------------------------------------------------------------------------
+
+describe('schema walk follows $dynamicRef, $recursiveRef and anchors like $ref', () => {
+  const T = 'gts.acme.core.events.a.v1~';
+  const BAD_OPERAND = { 'x-gts-type-ref': 'not-a-gts-id' };
+  const validator = () => new XGtsRefValidator();
+
+  test('a $dynamicRef to a scalar fails closed, as a $ref does', () => {
+    for (const keyword of ['$ref', '$dynamicRef']) {
+      const errors = validator().validateSchema(schemaOf('2020-12', { [keyword]: '#/x-a', 'x-a': 5 }));
+      expect(errors).toEqual([expect.objectContaining({ fieldPath: `/${keyword}`, value: '#/x-a' })]);
+    }
+  });
+
+  test.each(['$dynamicRef', '$ref'])(
+    'an invalid operand behind a %s under an unknown keyword is rejected',
+    (keyword) => {
+      const errors = validator().validateSchema(schemaOf('2020-12', { [keyword]: '#/x-a', 'x-a': BAD_OPERAND }));
+      expect(errors).toEqual([
+        expect.objectContaining({ keyword: 'x-gts-type-ref', fieldPath: '/x-a/x-gts-type-ref' }),
+      ]);
+    }
+  );
+
+  test('$recursiveRef resolves to the root, which is already walked', () => {
+    const schema = schemaOf('2019-09', { $recursiveAnchor: true, properties: { a: { $recursiveRef: '#' } } });
+    expect(validator().validateSchema(schema)).toEqual([]);
+  });
+
+  test('$dynamicRef is followed only in 2020-12 and $recursiveRef only in 2019-09', () => {
+    const body = { properties: { a: { $dynamicRef: '#/x-a', $recursiveRef: '#/x-b' } }, 'x-a': 5, 'x-b': 5 };
+    const paths = (dialect: Dialect) =>
+      validator()
+        .validateSchema(schemaOf(dialect, body))
+        .map((error) => error.fieldPath);
+    expect(paths('draft-07')).toEqual([]);
+    expect(paths('2019-09')).toEqual(['/properties/a/$recursiveRef']);
+    expect(paths('2020-12')).toEqual(['/properties/a/$dynamicRef']);
+  });
+
+  test('a deep $dynamicRef target hits the nesting limit instead of overflowing the stack', () => {
+    let deep: any = { type: 'string' };
+    for (let i = 0; i < 3000; i++) deep = { properties: { a: deep } };
+    const schema = schemaOf('2020-12', { $dynamicRef: '#/x-a', 'x-a': deep });
+    expect(() => validator().validateInstance({}, schema)).toThrow(GtsSchemaError);
+  });
+
+  test.each(['$anchor', '$dynamicAnchor'])('an invalid operand behind a %s reference is rejected', (anchor) => {
+    const schema = schemaOf('2020-12', { $ref: '#h', 'x-h': { [anchor]: 'h', ...BAD_OPERAND } });
+    expect(validator().validateSchema(schema)).toEqual([
+      expect.objectContaining({ keyword: 'x-gts-type-ref', fieldPath: '/x-h/x-gts-type-ref' }),
+    ]);
+  });
+
+  test('a failing `not` around an anchor reference is reported', () => {
+    const schema = schemaOf('2020-12', {
+      $id: 'gts://gts.acme.core.events.holder.v1~',
+      not: { $ref: '#h' },
+      $defs: { h: { $anchor: 'h', 'x-gts-type-ref': T } },
+    });
+    expect(validator().validateInstance(T, schema)).toEqual([
+      expect.objectContaining({ fieldPath: '/', reason: expect.stringContaining('not:') }),
+    ]);
+  });
+
+  test('the store rejects an invalid operand behind a $dynamicRef target', () => {
+    const gts = new GTS();
+    const id = 'gts.acme.core.events.dyn.v1~';
+    gts.register({
+      $id: `gts://${id}`,
+      $schema: DIALECTS['2020-12'],
+      type: 'object',
+      properties: { a: { $dynamicRef: '#/x-a' } },
+      'x-a': BAD_OPERAND,
+    });
+    const result = gts.validateSchema(id);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('/x-a/x-gts-type-ref');
   });
 });
