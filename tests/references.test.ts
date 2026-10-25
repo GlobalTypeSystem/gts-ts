@@ -1,4 +1,4 @@
-import { GTS, GtsRefValidationMode, MAX_REFERENCE_DEPTH } from '../src';
+import { GTS, GtsRefValidationMode, MAX_REFERENCE_DEPTH, ValidationResult } from '../src';
 
 const DRAFT7 = 'http://json-schema.org/draft-07/schema#';
 const NONE = GtsRefValidationMode.None;
@@ -286,9 +286,10 @@ describe('OP#6 - any-valid through reference cycles (§9.6.1)', () => {
     expect(gts.validateTransientInstance({ first: a, second: b }, holderId, null).ok).toBe(false);
   });
 
-  // The same assumption can produce a failure: under `not`, an in-progress
-  // entity assumed valid makes the negated reference fail.
-  test('a failure that assumed an in-progress entity valid is discarded when it fails', () => {
+  // Under `not`, an in-progress entity assumed valid made the negated reference
+  // fail. A negated reference within its own cycle is undecidable even where
+  // its target also fails on its own (§9.6.1, Reference cycles).
+  test('a negated reference to an in-progress entity is undecidable', () => {
     const gts = setup();
     gts.register({
       $id: `gts://${flip}`,
@@ -304,8 +305,13 @@ describe('OP#6 - any-valid through reference cycles (§9.6.1)', () => {
       second: { 'x-gts-instance-ref': flip },
     });
 
-    expect(gts.validateInstance(f).ok).toBe(true);
-    expect(gts.validateTransientInstance({ first: a, second: f }, holderId, null).ok).toBe(true);
+    for (const result of [
+      gts.validateInstance(f),
+      gts.validateInstance(a),
+      gts.validateTransientInstance({ first: a, second: f }, holderId, null),
+    ]) {
+      expect(result).toMatchObject({ ok: false, errors: [expect.objectContaining({ keyword: 'reference-cycle' })] });
+    }
   });
 
   // Re-validating every result that assumed a failing entity valid repeats
@@ -336,7 +342,7 @@ describe('OP#6 - any-valid through reference cycles (§9.6.1)', () => {
   });
 
   // `p` is valid exactly when `q` is invalid, and `q` exactly when `p` is valid.
-  test('a cycle without a consistent verdict fails closed', () => {
+  test('a cycle without a consistent verdict fails the whole validation', () => {
     const gts = new GTS();
     const p = 'gts.x.unit.refcycle.p.v1~';
     const q = 'gts.x.unit.refcycle.q.v1~';
@@ -352,8 +358,136 @@ describe('OP#6 - any-valid through reference cycles (§9.6.1)', () => {
     gts.register({ id: `${q}x.unit._.q.v1`, type: q, back: `${p}x.unit._.p.v1` });
 
     const result = gts.validateInstance(`${p}x.unit._.p.v1`);
-    expect(result.ok).toBe(false);
-    expect(result.error).toContain('has no consistent verdict');
+    expect(result).toMatchObject({ ok: false, errors: [expect.objectContaining({ keyword: 'reference-cycle' })] });
+    expect(result.error).toContain('is undecidable');
+  });
+
+  // Review findings: the round bound gave up on a solvable cycle, the verdict
+  // of two mutually exclusive entities depended on which was validated first,
+  // and `not` inverted a cycle that failed closed (§9.6.1, Reference cycles).
+  describe('a cycle through negation is undecidable wherever it is entered', () => {
+    const prefix = 'gts.x.unit.refneg.';
+    const ref = { type: 'string', 'x-gts-instance-ref': `${prefix}*` };
+    const typeId = (name: string) => `${prefix}${name}.v1~`;
+    const id = (type: string, name: string) => `${typeId(type)}x.unit._.${name}.v1`;
+
+    /** `and`: both targets valid; `same`: its target valid; `not`: its target invalid; `nor`: both invalid. */
+    function store() {
+      const gts = new GTS();
+      const object = (name: string, properties: Record<string, any>) =>
+        gts.register({ $id: `gts://${typeId(name)}`, $schema: DRAFT7, type: 'object', properties });
+      object('and', { a: ref, b: ref });
+      object('same', { a: ref });
+      object('not', { a: { not: ref } });
+      object('nor', { a: { not: ref }, b: { not: ref } });
+      object('holder', { a: { not: ref }, any: { anyOf: [ref, { type: 'string' }] } });
+      return gts;
+    }
+    const undecidable = (result: ValidationResult) => {
+      expect(result).toMatchObject({ ok: false, errors: [expect.objectContaining({ keyword: 'reference-cycle' })] });
+    };
+
+    test('two entities that each require the other to be invalid', () => {
+      const p = id('not', 'p');
+      const q = id('not', 'q');
+      for (const entry of [p, q]) {
+        const gts = store();
+        gts.register({ id: p, type: typeId('not'), a: q });
+        gts.register({ id: q, type: typeId('not'), a: p });
+        undecidable(gts.validateInstance(entry));
+      }
+    });
+
+    test('a cycle with one consistent verdict through negation', () => {
+      // i0 = i2 and i3, i2 = i0, i3 = not i0 and not i2: only i3 valid is consistent.
+      const [i0, i2, i3] = [id('and', 'i0'), id('same', 'i2'), id('nor', 'i3')];
+      for (const entry of [i0, i2, i3]) {
+        const gts = store();
+        gts.register({ id: i0, type: typeId('and'), a: i2, b: i3 });
+        gts.register({ id: i2, type: typeId('same'), a: i0 });
+        gts.register({ id: i3, type: typeId('nor'), a: i0, b: i2 });
+        undecidable(gts.validateInstance(entry));
+      }
+    });
+
+    test('an undecidable cycle is not inverted by `not` or rescued by `anyOf` outside it', () => {
+      // i3 = i1, i1 = not i3: no consistent verdict.
+      const [i1, i3] = [id('not', 'i1'), id('same', 'i3')];
+      for (const payload of [{ a: i3 }, { any: i3 }]) {
+        const gts = store();
+        gts.register({ id: i1, type: typeId('not'), a: i3 });
+        gts.register({ id: i3, type: typeId('same'), a: i1 });
+        undecidable(gts.validateTransientInstance(payload, typeId('holder'), null));
+      }
+    });
+
+    test('`not` around a reference to a cycle without negation inverts it as usual', () => {
+      const gts = store();
+      const [a, b, c] = [id('same', 'a'), id('same', 'b'), id('and', 'c')];
+      gts.register({ id: a, type: typeId('same'), a: b });
+      gts.register({ id: b, type: typeId('same'), a });
+      gts.register({ id: c, type: typeId('and'), a: c, b: 'gts.x.unit.refneg.missing.v1~x.unit._.m.v1' });
+      expect(gts.validateInstance(a).ok).toBe(true);
+      expect(gts.validateTransientInstance({ a }, typeId('holder'), null).ok).toBe(false);
+      expect(gts.validateInstance(c).ok).toBe(false);
+      expect(gts.validateTransientInstance({ a: c }, typeId('holder'), null).ok).toBe(true);
+    });
+
+    test.each([
+      ['oneOf', { oneOf: [ref, { const: 'x' }] }],
+      ['the if of a conditional', { if: ref, then: true, else: false }],
+      ['not through a local $ref', { not: { $ref: '#/definitions/r' } }],
+    ])('a reference under %s within its cycle is undecidable', (_, schema) => {
+      const gts = store();
+      const t = typeId('negating');
+      gts.register({
+        $id: `gts://${t}`,
+        $schema: DRAFT7,
+        type: 'object',
+        properties: { a: schema },
+        definitions: { r: ref },
+      });
+      const [n, s] = [`${t}x.unit._.n.v1`, id('same', 's')];
+      gts.register({ id: n, type: t, a: s });
+      gts.register({ id: s, type: typeId('same'), a: n });
+      undecidable(gts.validateInstance(n));
+      undecidable(gts.validateInstance(s));
+    });
+
+    test('a reference under `then` is not negated', () => {
+      const gts = store();
+      const t = typeId('then');
+      gts.register({
+        $id: `gts://${t}`,
+        $schema: DRAFT7,
+        type: 'object',
+        properties: { a: { if: { type: 'string' }, then: ref } },
+      });
+      const [n, s] = [`${t}x.unit._.n.v1`, id('same', 's')];
+      gts.register({ id: n, type: t, a: s });
+      gts.register({ id: s, type: typeId('same'), a: n });
+      expect(gts.validateInstance(n).ok).toBe(true);
+    });
+
+    test('an entity requiring itself to be invalid is undecidable', () => {
+      const gts = store();
+      const p = id('not', 'self');
+      gts.register({ id: p, type: typeId('not'), a: p });
+      undecidable(gts.validateInstance(p));
+      expect(gts.validateInstance(p, GtsRefValidationMode.AnyPresent).ok).toBe(false);
+    });
+
+    test('a cycle with an invalid member and no negation is invalid, not undecidable', () => {
+      const gts = store();
+      const [a, b] = [id('and', 'a'), id('same', 'b')];
+      gts.register({ id: a, type: typeId('and'), a: b, b: 'gts.x.unit.refneg.missing.v1~x.unit._.m.v1' });
+      gts.register({ id: b, type: typeId('same'), a });
+      for (const entry of [a, b]) {
+        const result = gts.validateInstance(entry);
+        expect(result.ok).toBe(false);
+        expect(result.errors?.map((issue) => issue.keyword)).not.toContain('reference-cycle');
+      }
+    });
   });
 
   test('entities that only reference each other are valid', () => {

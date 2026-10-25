@@ -109,8 +109,10 @@ export interface GtsRefContext {
   /**
    * Registry policy for entity-reference candidates (`gts-ref-validation`):
    * why `value` names no acceptable entity, or `null`. Omitted: no lookup.
+   * `negated`: the reference is evaluated under `not`, `oneOf`, or the `if`
+   * of a conditional, so a valid target can make its schema fail.
    */
-  referenceViolation?: (value: string) => string | null;
+  referenceViolation?: (value: string, negated: boolean) => string | null;
 }
 
 /**

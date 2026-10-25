@@ -523,6 +523,7 @@ describe('M2: reference keyword errors do not depend on which module loads first
 describe('schema walk follows $dynamicRef, $recursiveRef and anchors like $ref', () => {
   const T = 'gts.acme.core.events.a.v1~';
   const BAD_OPERAND = { 'x-gts-type-ref': 'not-a-gts-id' };
+  const NOT_T = { not: { 'x-gts-type-ref': T } };
   const validator = () => new XGtsRefValidator();
 
   test('a $dynamicRef to a scalar fails closed, as a $ref does', () => {
@@ -581,6 +582,36 @@ describe('schema walk follows $dynamicRef, $recursiveRef and anchors like $ref',
     expect(validator().validateInstance(T, schema)).toEqual([
       expect.objectContaining({ fieldPath: '/', reason: expect.stringContaining('not:') }),
     ]);
+  });
+
+  test.each([
+    ['properties > if/then > not', { properties: { a: { if: { type: 'string' }, then: NOT_T } } }],
+    ['then > then', { properties: { a: { if: { type: 'string' }, then: { if: { type: 'string' }, then: NOT_T } } } }],
+    ['else > then', { properties: { a: { if: false, else: { if: { type: 'string' }, then: NOT_T } } } }],
+    ['allOf > then', { properties: { a: { allOf: [{ if: { type: 'string' }, then: NOT_T }] } } }],
+    [
+      '$ref > then',
+      { properties: { a: { $ref: '#/definitions/c' } }, definitions: { c: { if: { type: 'string' }, then: NOT_T } } },
+    ],
+    ['anyOf > not', { properties: { a: { anyOf: [NOT_T, { const: 'x' }] } } }],
+  ])('a failing `not` reached through %s is reported', (_, body) => {
+    for (const dialect of DIALECT_NAMES) {
+      const errors = validator().validateInstance({ a: T }, schemaOf(dialect, body));
+      expect(errors).toEqual([expect.objectContaining({ fieldPath: '/a', value: T })]);
+    }
+  });
+
+  const IF_T = { if: { 'x-gts-type-ref': T }, then: { const: 'x' } };
+  test.each([
+    ['properties', { properties: { a: IF_T } }],
+    ['then', { properties: { a: { if: { type: 'string' }, then: IF_T } } }],
+    ['allOf', { properties: { a: { allOf: [IF_T] } } }],
+    ['$ref', { properties: { a: { $ref: '#/definitions/c' } }, definitions: { c: IF_T } }],
+  ])('a conditional failing on a reference in its `if`, reached through %s, is reported', (_, body) => {
+    for (const dialect of DIALECT_NAMES) {
+      const errors = validator().validateInstance({ a: T }, schemaOf(dialect, body));
+      expect(errors).toEqual([expect.objectContaining({ fieldPath: '/a', reason: expect.stringContaining('if:') })]);
+    }
   });
 
   test('the store rejects an invalid operand behind a $dynamicRef target', () => {

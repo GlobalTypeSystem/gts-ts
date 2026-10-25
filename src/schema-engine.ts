@@ -303,8 +303,13 @@ function regexSchemaError(node: SchemaNode, pointer: string, value: unknown, err
  * A GTS reference keyword (`x-gts-type-ref`, `x-gts-instance-ref`, `x-gts-pattern-ref`). A literal
  * operand is resolved while parsing, so an invalid one throws {@link GtsSchemaError} at compile time;
  * `/$id` is resolved on every evaluation from `getRefContext`, which also supplies the registry policy.
+ * `negated` tells the policy whether the reference is evaluated under negation.
  */
-function createGtsRefKeyword(keyword: GtsRefKeyword, getRefContext: () => GtsRefContext): Keyword {
+function createGtsRefKeyword(
+  keyword: GtsRefKeyword,
+  getRefContext: () => GtsRefContext,
+  negated: () => boolean
+): Keyword {
   const literals = new WeakMap<SchemaNode, GtsID>();
   return {
     id: keyword,
@@ -322,7 +327,9 @@ function createGtsRefKeyword(keyword: GtsRefKeyword, getRefContext: () => GtsRef
       const context = getRefContext();
       const pattern = literals.get(node) ?? resolveRefOperand(keyword, operand, context.selectedTypeId);
       let reason = refValueViolation(keyword, pattern, data);
-      if (reason === null && keyword !== X_GTS_PATTERN_REF) reason = context.referenceViolation?.(data) ?? null;
+      if (reason === null && keyword !== X_GTS_PATTERN_REF) {
+        reason = context.referenceViolation?.(data, negated()) ?? null;
+      }
       if (reason === null) return undefined;
       return node.createError(keyword, { pointer, schema: node.schema, value: data, operand, reason }, reason);
     },
@@ -566,6 +573,59 @@ function withSchemaLocation(keyword: Keyword): Keyword {
   };
 }
 
+/**
+ * Tracks whether evaluation is under negation: inside `not` or `oneOf` (a valid subschema can make
+ * either fail), or inside the `if` subschema of a conditional. A reference evaluated there has a
+ * negated dependency on its target (gts-spec §9.6.1, **Reference cycles**).
+ */
+class NegationTracker {
+  private depth = 0;
+  private readonly conditions = new WeakSet<SchemaNode>();
+
+  get negated(): boolean {
+    return this.depth > 0;
+  }
+
+  /** `keyword` with its whole evaluation under negation. */
+  negating(keyword: Keyword): Keyword {
+    const { validate } = keyword;
+    return validate === undefined ? keyword : { ...keyword, validate: (params) => this.under(() => validate(params)) };
+  }
+
+  /** The `if` keyword, recording each `if` subschema it parses so {@link evaluating} negates it. */
+  conditional(keyword: Keyword): Keyword {
+    const { parse } = keyword;
+    if (parse === undefined) return keyword;
+    return {
+      ...keyword,
+      parse: (node: SchemaNode) => {
+        const result = parse(node);
+        if (node.if) this.conditions.add(node.if);
+        return result;
+      },
+    };
+  }
+
+  /** `keyword`, evaluated under negation where its node is an `if` subschema. */
+  evaluating(keyword: Keyword): Keyword {
+    const { validate } = keyword;
+    if (validate === undefined) return keyword;
+    return {
+      ...keyword,
+      validate: (params) => (this.conditions.has(params.node) ? this.under(() => validate(params)) : validate(params)),
+    };
+  }
+
+  private under<T>(fn: () => T): T {
+    this.depth++;
+    try {
+      return fn();
+    } finally {
+      this.depth--;
+    }
+  }
+}
+
 type FormatFn = (params: JsonSchemaValidatorParams) => ValidationResult;
 
 function gtsFormat(code: string, isValid: (value: string) => boolean): FormatFn {
@@ -587,9 +647,13 @@ function gtsNumberFormat(code: string, isValid: (value: number) => boolean): For
 const annotationFormat: FormatFn = () => undefined;
 
 function buildDraft(base: Draft, getRefContext: () => GtsRefContext): Draft {
+  const negation = new NegationTracker();
   const extended = extendDraft(base, {
     keywords: [
-      ...GTS_REF_KEYWORDS.map((keyword) => createGtsRefKeyword(keyword, getRefContext)),
+      ...GTS_REF_KEYWORDS.map((keyword) => createGtsRefKeyword(keyword, getRefContext, () => negation.negated)),
+      negation.negating(findKeyword(base, 'not')),
+      negation.negating(findKeyword(base, 'oneOf')),
+      negation.conditional(findKeyword(base, 'if')),
       createPatternKeyword(findKeyword(base, 'pattern')),
       createPatternPropertiesKeyword(findKeyword(base, 'patternProperties')),
       createAdditionalPropertiesKeyword(findKeyword(base, 'additionalProperties')),
@@ -643,7 +707,9 @@ function buildDraft(base: Draft, getRefContext: () => GtsRefContext): Draft {
     },
   });
   // Re-extend with the location-tagging wrappers (also re-sanitizes the keyword validators).
-  return extendDraft(extended, { keywords: extended.keywords.map(withSchemaLocation) });
+  return extendDraft(extended, {
+    keywords: extended.keywords.map((keyword) => withSchemaLocation(negation.evaluating(keyword))),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +724,12 @@ export interface SchemaEngineOptions {
 export interface CompiledSchema {
   /** Validate `data`; returns issues (empty when valid). Throws raw errors (for example an invalid `$ref`). */
   validate(data: unknown): ValidationIssue[];
+  /**
+   * {@link validate}, with the JSON Pointer, within the compiled schema, of the node whose keyword
+   * reported each issue (`undefined` for a node outside it, such as a remote `$ref` target).
+   * Unlike `schemaPath`, it locates nodes under nested conditionals.
+   */
+  validateNodes(data: unknown): Array<{ issue: ValidationIssue; location?: string }>;
 }
 
 export interface SchemaEngine {
@@ -685,6 +757,19 @@ export interface SchemaEngine {
 
 const HOST_ID = 'gts://__schema_engine_host__';
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+/** The JSON Pointer of every object in `document`, by identity. */
+function objectPointers(document: unknown): Map<unknown, string> {
+  const pointers = new Map<unknown, string>();
+  const stack: Array<[unknown, string]> = [[document, '']];
+  while (stack.length > 0) {
+    const [value, pointer] = stack.pop()!;
+    if (value === null || typeof value !== 'object' || pointers.has(value)) continue;
+    pointers.set(value, pointer);
+    for (const [key, child] of Object.entries(value)) stack.push([child, `${pointer}/${escapeSegment(key)}`]);
+  }
+  return pointers;
+}
 
 /** The three GTS-extended drafts the engine validates with (exported so tests can read their runtime `errors` maps). */
 export function buildEngineDrafts(getRefContext: () => GtsRefContext = () => ({})): Record<SchemaDialect, Draft> {
@@ -805,8 +890,14 @@ export function createSchemaEngine(options: SchemaEngineOptions): SchemaEngine {
       // under Ajv, instead of being silently ignored during validation.
       if (ownErrors.length > 0) throw new Error(ownErrors.map((error) => error.message).join('; '));
       assertRefsResolve(root);
+      let locations: Map<unknown, string> | undefined;
       const compiled: CompiledSchema = {
         validate: (data) => root.validate(data).errors.map((error) => adaptLibraryError(error)),
+        validateNodes: (data) =>
+          root.validate(data).errors.map((error) => ({
+            issue: adaptLibraryError(error),
+            location: (locations ??= objectPointers(root.schema)).get((error.data as LibraryData | undefined)?.schema),
+          })),
       };
       if (key !== undefined) cache.set(key, compiled);
       return compiled;

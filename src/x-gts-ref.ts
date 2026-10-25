@@ -32,7 +32,7 @@ import {
 } from './ref-keywords';
 import { canonicalDialectUri, dialectOf, type SchemaDialect } from './schema-dialect';
 import { assertSafeSchemaPatterns } from './schema-safety';
-import { createSchemaEngine, type SchemaEngine } from './schema-engine';
+import { createSchemaEngine, type CompiledSchema, type SchemaEngine } from './schema-engine';
 
 /** Applicators that can fail without a failing reference keyword beneath them (`not`, `oneOf`, ...). */
 const COMPOSITION_KEYWORDS = new Set(['not', 'oneOf', 'anyOf', 'if', 'contains']);
@@ -78,10 +78,12 @@ function parentSchemaOf(issue: ValidationIssue, schema: any): any {
 /**
  * The engine reports no `if` failure: a failing `then`/`else` branch reports
  * its own issues. Each such issue stands for an `if` failure of the innermost
- * node with an `if` it lies under, located at that node's `if`.
+ * node with an `if` it lies under, located at that node's `if`. `location`,
+ * the pointer of the node that reported `issue`, locates it more reliably
+ * than its `schemaPath`.
  */
-function conditionalIssue(issue: ValidationIssue, schema: any): ValidationIssue | undefined {
-  const segments = issue.schemaPath.split('/');
+function conditionalIssue(issue: ValidationIssue, schema: any, location?: string): ValidationIssue | undefined {
+  const segments = (location === undefined ? issue.schemaPath : `#${location}/${issue.keyword}`).split('/');
   for (let index = segments.length - 2; index > 0; index--) {
     if (!CONDITIONAL_KEYWORDS.has(segments[index])) continue;
     // A property or definition named `if` / `then` / `else` is not a conditional.
@@ -236,17 +238,21 @@ export class XGtsRefValidator {
     const validate = this.compile(schema);
     const previous = this.context;
     this.context = { selectedTypeId: selected };
-    let issues: ValidationIssue[];
+    let results: Array<{ issue: ValidationIssue; location?: string }>;
     try {
-      issues = validate(instance);
+      results = validate.nodes(instance);
     } finally {
       this.context = previous;
     }
-    if (issues.length === 0) return [];
+    if (results.length === 0) return [];
+    const issues = results.map(({ issue }) => issue);
+    // The location of the node that reported an issue; its `schemaPath` cannot
+    // always locate it (the engine repeats locations under nested conditionals).
+    const locations = new Map(results.map(({ issue, location }) => [issue, location]));
     const conditions = new Set<string>();
     const errors = issues.flatMap((issue) => {
       if (isGtsRefKeyword(issue.keyword) || COMPOSITION_KEYWORDS.has(issue.keyword)) return [issue];
-      const condition = conditionalIssue(issue, schema);
+      const condition = conditionalIssue(issue, schema, locations.get(issue));
       if (condition === undefined) return [issue];
       const key = `${condition.instancePath}\n${condition.schemaPath}`;
       if (conditions.has(key)) return [];
@@ -264,7 +270,12 @@ export class XGtsRefValidator {
       const resources = new Map<object, Resource>();
       forEachSchemaNode(schema, (node, _path, resource) => resources.set(node, resource));
       involved = composed.filter((error) => {
-        const parent = parentSchemaOf(error, schema);
+        const location = locations.get(error);
+        const reporter = location === undefined ? undefined : pointerTarget(schema, location);
+        const parent =
+          reporter !== null && typeof reporter === 'object' && resources.has(reporter)
+            ? reporter
+            : parentSchemaOf(error, schema);
         let reaches = false;
         forEachSchemaNode(
           schema,
@@ -326,7 +337,7 @@ export class XGtsRefValidator {
       const previous = this.context;
       this.context = { selectedTypeId };
       try {
-        return validate(value).length === 0;
+        return validate.issues(value).length === 0;
       } finally {
         this.context = previous;
       }
@@ -338,7 +349,10 @@ export class XGtsRefValidator {
    * declares no supported `$schema`); a `$ref` to another resource is a
    * schema error.
    */
-  private compile(schema: any, dialectSource: any = schema): (data: unknown) => ValidationIssue[] {
+  private compile(
+    schema: any,
+    dialectSource: any = schema
+  ): { issues: CompiledSchema['validate']; nodes: CompiledSchema['validateNodes'] } {
     let dialect: SchemaDialect = 'draft-07';
     try {
       dialect = dialectOf(dialectSource);
@@ -350,7 +364,10 @@ export class XGtsRefValidator {
     const source = { $schema: canonicalDialectUri(dialect), ...rest };
     try {
       const compiled = this.engine.compile(source);
-      return (data) => compiled.validate(data);
+      return {
+        issues: (data) => compiled.validate(data),
+        nodes: (data) => compiled.validateNodes(data),
+      };
     } catch (error) {
       if (error instanceof GtsSchemaError) throw error;
       const message = error instanceof Error ? error.message : String(error);

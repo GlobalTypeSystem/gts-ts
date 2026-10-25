@@ -60,8 +60,11 @@ interface RefSelf {
 
 /** The registry policy for entity-reference candidates during engine validation. */
 interface ReferencePolicy {
-  /** Why `value` names no acceptable entity, or `null`; a target not yet settled is assumed valid and queued. */
-  violation: (value: string) => string | null;
+  /**
+   * Why `value` names no acceptable entity, or `null`; a target not yet settled is assumed valid and queued.
+   * `negated`: the reference is evaluated under negation (§9.6.1, **Reference cycles**).
+   */
+  violation: (value: string, negated: boolean) => string | null;
   /** Settles the queued targets; whether one was assumed valid wrongly, so validation must be repeated. */
   settle: () => boolean;
 }
@@ -83,24 +86,25 @@ interface ResolvedSchema {
  * last. A reference cycle reaches a validation still in progress, whose
  * verdict is then assumed - valid at first - and every result reached
  * through the assumption stays provisional until that validation settles.
- * Either verdict can rest on an assumption (`not` inverts it), so when a
- * settled verdict differs from the assumed one the cycle is validated again
- * with the settled verdicts assumed, until the assumptions hold. Each retry
- * corrects at least one assumption; a cycle whose assumptions never hold
- * fails closed.
+ * When a settled verdict differs from the assumed one the cycle is validated
+ * again with the settled verdicts assumed, until the assumptions hold. Without
+ * negation the assumptions only ever turn from valid to invalid, so they hold
+ * after at most one retry per entity assumed; the verdicts are then the
+ * greatest consistent ones. A cycle through a negated reference is
+ * undecidable (§9.6.1, **Reference cycles**): see {@link dependsOnProgress}.
  *
  * A validation started through {@link reference} is one reference hop deeper
  * than the validation that starts it (§9.6.1). Exceeding
- * {@link MAX_REFERENCE_DEPTH} hops, or exhausting the call stack, aborts the
- * whole validation: {@link aborted} then overrides every verdict computed, so
- * no applicator can invert or rescue it.
+ * {@link MAX_REFERENCE_DEPTH} hops, reaching an undecidable cycle, or
+ * exhausting the call stack aborts the whole validation: {@link aborted} then
+ * overrides every verdict computed, so no applicator can invert or rescue it.
  */
 class ValidationStack {
   private frames: Array<{ key: string; assumed: Set<string>; depth: number }> = [];
   /** Whether the next validation started is a reference hop; see {@link reference}. */
   private hop = false;
-  /** Why the whole validation failed, when it was aborted. */
-  aborted?: string;
+  /** Why the whole validation failed, when it was aborted, as a structured issue. */
+  aborted?: { message: string; keyword: string; params?: Record<string, unknown> };
   /** Cached results that rest on in-progress validations, with the ones they rest on. */
   private provisional: Map<string, Set<string>> = new Map();
   /** The verdict to assume for a validation reached again while in progress. */
@@ -117,7 +121,7 @@ class ValidationStack {
   ): ValidationResult {
     const hop = this.hop;
     this.hop = false;
-    if (this.aborted !== undefined) return { id, ok: false, error: this.aborted };
+    if (this.aborted !== undefined) return { id, ok: false, error: this.aborted.message };
     const cached = completed.get(key);
     if (cached) {
       this.rely(this.provisional.get(key) ?? []);
@@ -135,7 +139,9 @@ class ValidationStack {
     if (depth > MAX_REFERENCE_DEPTH) {
       return this.abort(
         id,
-        `Reference depth limit exceeded: '${id}' is more than ${MAX_REFERENCE_DEPTH} reference hops away`
+        `Reference depth limit exceeded: '${id}' is more than ${MAX_REFERENCE_DEPTH} reference hops away`,
+        'reference-depth',
+        { limit: MAX_REFERENCE_DEPTH }
       );
     }
     const assumedKeys = new Set<string>();
@@ -175,13 +181,42 @@ class ValidationStack {
       }
       for (const member of members) this.provisional.delete(member);
       for (const [assumedKey] of made) this.guesses.delete(assumedKey);
-      if (wrong) {
-        for (const member of members) completed.delete(member);
-        result = { id, ok: false, error: `Reference cycle through '${id}' has no consistent verdict` };
-        completed.set(key, result);
-      }
+      // Unreachable without negation, which is undecidable once detected; kept fail-closed.
+      if (wrong) return this.undecidable(id, 'no verdicts are consistent');
       return result;
     }
+  }
+
+  /**
+   * `compute()` (the check of an entity-reference target from the innermost
+   * validation), and whether its result rests on a validation in progress.
+   * Every validation in progress encloses the innermost one, so such a target
+   * lies in a reference cycle with it.
+   */
+  dependsOnProgress(compute: () => ValidationResult): [ValidationResult, boolean] {
+    const innermost = this.frames[this.frames.length - 1];
+    if (!innermost) return [compute(), false];
+    const enclosing = innermost.assumed;
+    innermost.assumed = new Set();
+    try {
+      const result = compute();
+      return [result, innermost.assumed.size > 0];
+    } finally {
+      innermost.assumed.forEach((assumedKey) => enclosing.add(assumedKey));
+      innermost.assumed = enclosing;
+    }
+  }
+
+  /**
+   * Aborts the whole validation: `id` makes a negated reference to `target`
+   * in its own reference cycle, so the cycle is undecidable (§9.6.1).
+   */
+  negatedCycle(id: string, target: string): void {
+    this.undecidable(id, `it references '${target}' under negation within the cycle`);
+  }
+
+  private undecidable(id: string, reason: string): ValidationResult {
+    return this.abort(id, `Reference cycle through '${id}' is undecidable: ${reason}`, 'reference-cycle');
   }
 
   /**
@@ -205,14 +240,14 @@ class ValidationStack {
   noteError(id: string, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
     if (/Maximum call stack size exceeded|Stack overflow/i.test(message)) {
-      this.abort(id, `Validation aborted while checking '${id}': ${message}`);
+      this.abort(id, `Validation aborted while checking '${id}': ${message}`, 'validation-aborted');
     }
   }
 
   /** The result of a validation that fails as a whole, with `message` unless already aborted. */
-  private abort(id: string, message: string): ValidationResult {
-    this.aborted ??= message;
-    return { id, ok: false, error: this.aborted };
+  private abort(id: string, message: string, keyword: string, params?: Record<string, unknown>): ValidationResult {
+    this.aborted ??= { message, keyword, params };
+    return { id, ok: false, error: this.aborted.message };
   }
 
   /** The innermost validation rests on the in-progress validations `keys`. */
@@ -309,7 +344,7 @@ export class GtsStore {
   private withSelectedType<T>(
     selectedTypeId: string | undefined,
     fn: () => T,
-    referenceViolation?: (value: string) => string | null
+    referenceViolation?: GtsRefContext['referenceViolation']
   ): T {
     const previous = this.refContext;
     this.refContext = {
@@ -340,6 +375,10 @@ export class GtsStore {
    * reference hop therefore adds a few stack frames, not a whole engine
    * evaluation, so {@link MAX_REFERENCE_DEPTH} hops fit on the stack whatever
    * the schemas nest.
+   *
+   * A negated reference to a target in a reference cycle with `selfId` - the
+   * target's check rests on a validation in progress, or is `selfId` itself -
+   * makes the cycle undecidable and aborts the whole validation (§9.6.1).
    */
   private referencePolicy(
     refValidation: GtsRefValidationMode,
@@ -351,8 +390,16 @@ export class GtsStore {
     if (refValidation === GtsRefValidationMode.None) return undefined;
     const verdicts = new Map<string, string | null>();
     const pending = new Set<string>();
+    const negatedTargets = new Set<string>();
+    const cyclicTargets = new Set<string>();
+    const anyValid = refValidation === GtsRefValidationMode.AnyValid;
+    if (anyValid && selfId !== undefined) cyclicTargets.add(selfId);
     return {
-      violation: (value) => {
+      violation: (value, negated) => {
+        if (negated && anyValid) {
+          negatedTargets.add(value);
+          if (cyclicTargets.has(value)) visiting.negatedCycle(selfId ?? '', value);
+        }
         if (value === selfId) return null;
         const known = verdicts.get(value);
         if (known !== undefined) return known;
@@ -371,7 +418,13 @@ export class GtsStore {
       settle: () => {
         let changed = false;
         for (const value of pending) {
-          const result = this.validateReferenceTarget(value, visiting, completed, refValidation);
+          const [result, cyclic] = visiting.dependsOnProgress(() =>
+            this.validateReferenceTarget(value, visiting, completed, refValidation)
+          );
+          if (cyclic) {
+            cyclicTargets.add(value);
+            if (negatedTargets.has(value)) visiting.negatedCycle(selfId ?? '', value);
+          }
           let reason: string | null = null;
           if (!result.ok) {
             // The target's issues, and those of its own invalid dependencies,
@@ -2434,17 +2487,18 @@ export class GtsStore {
 
   /**
    * The result of a top-level validation, unless it was aborted (reference
-   * depth or stack exhaustion), which fails it as a whole.
+   * depth, an undecidable reference cycle, or stack exhaustion), which fails
+   * it as a whole.
    */
   private settled(visiting: ValidationStack, result: ValidationResult): ValidationResult {
     if (visiting.aborted === undefined) return result;
-    const message = visiting.aborted;
+    const { message, keyword, params } = visiting.aborted;
     return {
       id: result.id,
       ok: false,
       ...(result.valid === undefined ? {} : { valid: false }),
       error: message,
-      errors: [this.validationIssue(message, '', 'reference-depth', { limit: MAX_REFERENCE_DEPTH })],
+      errors: [this.validationIssue(message, '', keyword, params)],
     };
   }
 
