@@ -1,4 +1,4 @@
-import { GTS, GtsRefValidationMode } from '../src';
+import { GTS, GtsRefValidationMode, MAX_REFERENCE_DEPTH } from '../src';
 
 const DRAFT7 = 'http://json-schema.org/draft-07/schema#';
 const NONE = GtsRefValidationMode.None;
@@ -406,6 +406,80 @@ describe('OP#6 - any-valid through reference cycles (§9.6.1)', () => {
     const result = gts.validateTransientInstance({ ref: a, count: 'x' }, holderId, null);
     expect(result.ok).toBe(false);
     expect(result.errors?.some((issue) => issue.entityId !== undefined)).toBe(false);
+  });
+});
+
+describe('OP#6 - any-valid reference depth (§9.6.1)', () => {
+  const item = 'gts.x.unit.refdepth.item.v1~';
+  const holderId = 'gts.x.unit.refdepth.holder.v1~';
+  const node = (i: number) => `${item}x.unit._.n${i}.v1`;
+  const nest = (value: Record<string, any>, levels: number, wrap: (inner: any) => any) =>
+    Array.from({ length: levels }).reduce<Record<string, any>>((inner) => wrap(inner), value);
+
+  /** `hops + 1` instances, each referencing the next; `close` makes the last reference the first. */
+  function chain(hops: number, { depth = 0, close = false } = {}) {
+    const gts = new GTS();
+    const properties = nest({ next: { 'x-gts-instance-ref': item } }, depth, (inner) => ({
+      d: { type: 'object', properties: inner },
+    }));
+    gts.register({ $id: `gts://${item}`, $schema: DRAFT7, type: 'object', properties });
+    for (let i = 0; i <= hops; i++) {
+      const next = i < hops ? node(i + 1) : close ? node(0) : undefined;
+      gts.register({ id: node(i), type: item, ...nest(next ? { next } : {}, depth, (inner) => ({ d: inner })) });
+    }
+    return gts;
+  }
+
+  test(`a chain of ${MAX_REFERENCE_DEPTH} hops is valid; one more hop fails the validation explicitly`, () => {
+    expect(chain(MAX_REFERENCE_DEPTH).validateInstance(node(0)).ok).toBe(true);
+    const result = chain(MAX_REFERENCE_DEPTH + 1).validateInstance(node(0));
+    expect(result).toMatchObject({ ok: false, errors: [expect.objectContaining({ keyword: 'reference-depth' })] });
+    expect(result.error).toContain('Reference depth limit exceeded');
+  });
+
+  // Review finding (M1): each hop recursed through the schema engine, so a
+  // chain of about 230 valid hops overflowed the stack and read as invalid.
+  test('every hop fits on the stack however deep the reference sits in its schema', () => {
+    expect(chain(MAX_REFERENCE_DEPTH, { depth: 60 }).validateInstance(node(0)).ok).toBe(true);
+  });
+
+  test('closing a cycle is not a further hop', () => {
+    expect(chain(MAX_REFERENCE_DEPTH, { close: true }).validateInstance(node(0)).ok).toBe(true);
+  });
+
+  test('none and any-present validate no targets, so they have no depth limit', () => {
+    const gts = chain(300);
+    expect(gts.validateInstance(node(0), GtsRefValidationMode.None).ok).toBe(true);
+    expect(gts.validateInstance(node(0), GtsRefValidationMode.AnyPresent).ok).toBe(true);
+  });
+
+  // Review finding (M1): the overflow read as an invalid target, which `not`
+  // turned into a pass.
+  test.each([
+    ['inverted by not', { not: { 'x-gts-instance-ref': item } }],
+    // The reference branch comes first: one that is never evaluated is not checked.
+    ['rescued by anyOf', { anyOf: [{ 'x-gts-instance-ref': item }, { const: node(0) }] }],
+  ])('exceeding the depth is not %s', (_label, ref) => {
+    const gts = chain(300);
+    gts.register({ $id: `gts://${holderId}`, $schema: DRAFT7, type: 'object', properties: { ref } });
+    const result = gts.validateTransientInstance({ ref: node(0) }, holderId, null);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('Reference depth limit exceeded');
+  });
+
+  test('concrete operand targets of type schemas are hops too', () => {
+    const type = (i: number) => `gts.x.unit.refdepth.t${i}.v1~`;
+    const types = (hops: number) => {
+      const gts = new GTS();
+      for (let i = hops; i >= 0; i--) {
+        const ref = i < hops ? { type: 'string', 'x-gts-type-ref': type(i + 1) } : { type: 'string' };
+        gts.register(holder(type(i), ref));
+      }
+      return gts;
+    };
+    expect(types(MAX_REFERENCE_DEPTH).validateSchema(type(0)).ok).toBe(true);
+    expect(types(MAX_REFERENCE_DEPTH + 1).validateSchema(type(0))).toMatchObject({ ok: false });
+    expect(types(MAX_REFERENCE_DEPTH + 1).validateSchema(type(0)).error).toContain('Reference depth limit exceeded');
   });
 });
 

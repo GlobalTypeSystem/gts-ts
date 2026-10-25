@@ -62,6 +62,14 @@ export const MAX_SCHEMA_DEPTH = 64;
  */
 export const MAX_SCHEMA_PATHS = 10_000;
 
+/**
+ * The reference depth every implementation must support under `any-valid`
+ * (gts-spec §9.6.1): the entity-reference target checks one validation
+ * follows in sequence, counted from the validated entity. A longer path fails
+ * the whole validation explicitly; it is never an invalid target.
+ */
+export const MAX_REFERENCE_DEPTH = 64;
+
 export interface GtsIDSegment {
   num: number;
   offset: number;

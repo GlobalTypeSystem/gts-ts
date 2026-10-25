@@ -12,6 +12,7 @@ import {
   EntityConflictError,
   GTS_PREFIX,
   JSON_SCHEMA_HOST,
+  MAX_REFERENCE_DEPTH,
   MAX_SCHEMA_DEPTH,
   MAX_SCHEMA_PATHS,
   GtsRefValidationMode,
@@ -57,6 +58,14 @@ interface RefSelf {
   baseDocument?: any;
 }
 
+/** The registry policy for entity-reference candidates during engine validation. */
+interface ReferencePolicy {
+  /** Why `value` names no acceptable entity, or `null`; a target not yet settled is assumed valid and queued. */
+  violation: (value: string) => string | null;
+  /** Settles the queued targets; whether one was assumed valid wrongly, so validation must be repeated. */
+  settle: () => boolean;
+}
+
 /** Entity-reference operand targets, with the keyword and location that declare each. */
 type OperandTargets = Map<string, { keyword: GtsRefKeyword; path: string }>;
 
@@ -79,9 +88,19 @@ interface ResolvedSchema {
  * with the settled verdicts assumed, until the assumptions hold. Each retry
  * corrects at least one assumption; a cycle whose assumptions never hold
  * fails closed.
+ *
+ * A validation started through {@link reference} is one reference hop deeper
+ * than the validation that starts it (§9.6.1). Exceeding
+ * {@link MAX_REFERENCE_DEPTH} hops, or exhausting the call stack, aborts the
+ * whole validation: {@link aborted} then overrides every verdict computed, so
+ * no applicator can invert or rescue it.
  */
 class ValidationStack {
-  private frames: Array<{ key: string; assumed: Set<string> }> = [];
+  private frames: Array<{ key: string; assumed: Set<string>; depth: number }> = [];
+  /** Whether the next validation started is a reference hop; see {@link reference}. */
+  private hop = false;
+  /** Why the whole validation failed, when it was aborted. */
+  aborted?: string;
   /** Cached results that rest on in-progress validations, with the ones they rest on. */
   private provisional: Map<string, Set<string>> = new Map();
   /** The verdict to assume for a validation reached again while in progress. */
@@ -96,6 +115,9 @@ class ValidationStack {
     completed: Map<string, ValidationResult>,
     compute: () => ValidationResult
   ): ValidationResult {
+    const hop = this.hop;
+    this.hop = false;
+    if (this.aborted !== undefined) return { id, ok: false, error: this.aborted };
     const cached = completed.get(key);
     if (cached) {
       this.rely(this.provisional.get(key) ?? []);
@@ -109,12 +131,24 @@ class ValidationStack {
         ? { id, ok: true, error: '' }
         : { id, ok: false, error: 'invalid, reached again through a reference cycle' };
     }
+    const depth = (this.frames[this.frames.length - 1]?.depth ?? 0) + (hop ? 1 : 0);
+    if (depth > MAX_REFERENCE_DEPTH) {
+      return this.abort(
+        id,
+        `Reference depth limit exceeded: '${id}' is more than ${MAX_REFERENCE_DEPTH} reference hops away`
+      );
+    }
     const assumedKeys = new Set<string>();
     for (let round = 1; ; round++) {
       const start = this.assumptions.length;
-      this.frames.push({ key, assumed: new Set() });
-      let result = compute();
-      const { assumed } = this.frames.pop()!;
+      this.frames.push({ key, assumed: new Set(), depth });
+      let result: ValidationResult;
+      let assumed: Set<string>;
+      try {
+        result = compute();
+      } finally {
+        assumed = this.frames.pop()!.assumed;
+      }
       assumed.delete(key);
       for (const rests of this.provisional.values()) {
         if (rests.delete(key)) assumed.forEach((lower) => rests.add(lower));
@@ -148,6 +182,37 @@ class ValidationStack {
       }
       return result;
     }
+  }
+
+  /**
+   * Validates an entity-reference target with `compute` as a reference hop: the
+   * validation it starts (cached and in-progress ones excepted) counts toward
+   * {@link MAX_REFERENCE_DEPTH}.
+   */
+  reference(compute: () => ValidationResult): ValidationResult {
+    this.hop = true;
+    try {
+      return compute();
+    } finally {
+      this.hop = false;
+    }
+  }
+
+  /**
+   * Aborts the whole validation when `error` reports an exhausted call stack,
+   * which would otherwise read as an ordinary (invertible) failure.
+   */
+  noteError(id: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/Maximum call stack size exceeded|Stack overflow/i.test(message)) {
+      this.abort(id, `Validation aborted while checking '${id}': ${message}`);
+    }
+  }
+
+  /** The result of a validation that fails as a whole, with `message` unless already aborted. */
+  private abort(id: string, message: string): ValidationResult {
+    this.aborted ??= message;
+    return { id, ok: false, error: this.aborted };
   }
 
   /** The innermost validation rests on the in-progress validations `keys`. */
@@ -264,11 +329,17 @@ export class GtsStore {
    * has the required kind and matches the operand, while the engine evaluates the
    * applicators, so a lookup happens only where a reference is actually
    * checked and its verdict counts only where that branch matters.
-   * `x-gts-pattern-ref` never calls it. Verdicts are memoized per validation;
-   * nested validations restore the keyword context (`withSelectedType`).
+   * `x-gts-pattern-ref` never calls it. Verdicts are memoized per validation.
    * `selfId`, the entity being validated, satisfies a reference to itself.
    * `none` performs no lookup. `failures` receives each invalid entity's
    * result, keyed by the reason the keyword reports for it.
+   *
+   * Target validity is never computed inside an engine call: a target whose
+   * validity is not known yet is assumed valid and queued, and
+   * {@link validateWithEngine} settles the queue between engine runs. Each
+   * reference hop therefore adds a few stack frames, not a whole engine
+   * evaluation, so {@link MAX_REFERENCE_DEPTH} hops fit on the stack whatever
+   * the schemas nest.
    */
   private referencePolicy(
     refValidation: GtsRefValidationMode,
@@ -276,31 +347,48 @@ export class GtsStore {
     completed: Map<string, ValidationResult>,
     selfId?: string,
     failures?: Map<string, ValidationResult>
-  ): ((value: string) => string | null) | undefined {
+  ): ReferencePolicy | undefined {
     if (refValidation === GtsRefValidationMode.None) return undefined;
     const verdicts = new Map<string, string | null>();
-    return (value) => {
-      if (value === selfId) return null;
-      const known = verdicts.get(value);
-      if (known !== undefined) return known;
-      let reason: string | null = null;
-      if (!this.get(value)) {
-        reason = `Referenced entity '${value}' not found in registry`;
-      } else if (refValidation === GtsRefValidationMode.AnyValid) {
-        const result = this.validateEntityTransitive(value, visiting, completed, refValidation);
-        if (!result.ok) {
-          // The target's issues, and those of its own invalid dependencies,
-          // travel as structured issues. Its message is quoted only when it
-          // failed on its own, so messages do not nest once per reference.
-          const dependsOnInvalid = result.errors?.some((issue) => issue.entityId !== undefined) ?? false;
-          reason = dependsOnInvalid
-            ? `Referenced entity '${value}' is invalid`
-            : `Referenced entity '${value}' is invalid: ${result.error}`;
-          failures?.set(reason, result);
+    const pending = new Set<string>();
+    return {
+      violation: (value) => {
+        if (value === selfId) return null;
+        const known = verdicts.get(value);
+        if (known !== undefined) return known;
+        if (!this.get(value)) {
+          const reason = `Referenced entity '${value}' not found in registry`;
+          verdicts.set(value, reason);
+          return reason;
         }
-      }
-      verdicts.set(value, reason);
-      return reason;
+        if (refValidation === GtsRefValidationMode.AnyValid) {
+          pending.add(value);
+        } else {
+          verdicts.set(value, null);
+        }
+        return null;
+      },
+      settle: () => {
+        let changed = false;
+        for (const value of pending) {
+          const result = this.validateReferenceTarget(value, visiting, completed, refValidation);
+          let reason: string | null = null;
+          if (!result.ok) {
+            // The target's issues, and those of its own invalid dependencies,
+            // travel as structured issues. Its message is quoted only when it
+            // failed on its own, so messages do not nest once per reference.
+            const dependsOnInvalid = result.errors?.some((issue) => issue.entityId !== undefined) ?? false;
+            reason = dependsOnInvalid
+              ? `Referenced entity '${value}' is invalid`
+              : `Referenced entity '${value}' is invalid: ${result.error}`;
+            failures?.set(reason, result);
+            changed = true;
+          }
+          verdicts.set(value, reason);
+        }
+        pending.clear();
+        return changed && visiting.aborted === undefined;
+      },
     };
   }
 
@@ -433,10 +521,12 @@ export class GtsStore {
   /**
    * Compiles `schema` (dialect from `dialectSource`, default the schema itself)
    * and validates `data` with `selectedTypeId` (and the registry policy
-   * `referenceViolation`) exposed to the reference keywords. Throws
+   * `references`) exposed to the reference keywords. Throws
    * raw engine errors (unresolved `$ref`, unsupported dialect). `cacheKey` is the
    * registered entity id, passed only when `schema` is that entity's own unmodified
    * normalized content (derived and transient schemas are never cached).
+   * Validation is repeated while settling the targets an engine run assumed
+   * valid shows that one is not; the run whose assumptions all held is exact.
    */
   private validateWithEngine(
     schema: any,
@@ -444,11 +534,14 @@ export class GtsStore {
     selectedTypeId: string | undefined,
     dialectSource: any = schema,
     cacheKey?: string,
-    referenceViolation?: (value: string) => string | null
+    references?: ReferencePolicy
   ): ValidationIssue[] {
     const withDialect = schema.$schema === undefined ? { ...schema, $schema: dialectSource?.$schema } : schema;
     const compiled = this.engine.compile(withDialect, cacheKey);
-    return this.withSelectedType(selectedTypeId, () => compiled.validate(data), referenceViolation);
+    const run = () => this.withSelectedType(selectedTypeId, () => compiled.validate(data), references?.violation);
+    let issues = run();
+    while (references?.settle()) issues = run();
+    return issues;
   }
 
   private invalidateIndexes(): void {
@@ -898,7 +991,8 @@ export class GtsStore {
     gtsId: string,
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
   ): ValidationResult {
-    return this.validateInstanceTransitive(gtsId, new ValidationStack(), new Map(), refValidation);
+    const visiting = new ValidationStack();
+    return this.settled(visiting, this.validateInstanceTransitive(gtsId, visiting, new Map(), refValidation));
   }
 
   /**
@@ -920,10 +1014,11 @@ export class GtsStore {
     resultId: string | null,
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
   ): ValidationResult {
-    return this.validateInstanceTransitive(resultId ?? '', new ValidationStack(), new Map(), refValidation, {
-      content,
-      typeId,
-    });
+    const visiting = new ValidationStack();
+    return this.settled(
+      visiting,
+      this.validateInstanceTransitive(resultId ?? '', visiting, new Map(), refValidation, { content, typeId })
+    );
   }
 
   private validateInstanceTransitive(
@@ -1077,6 +1172,7 @@ export class GtsStore {
         error: '',
       };
     } catch (error) {
+      visiting.noteError(gtsId, error);
       return {
         id: gtsId,
         ok: false,
@@ -1169,6 +1265,7 @@ export class GtsStore {
 
       return { id, ok: true, error: '' };
     } catch (error) {
+      visiting.noteError(id, error);
       return { id, ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
@@ -2221,7 +2318,8 @@ export class GtsStore {
     schemaId: string,
     refValidation: GtsRefValidationMode = GtsRefValidationMode.AnyValid
   ): ValidationResult {
-    return this.validateSchemaTransitive(schemaId, new ValidationStack(), new Map(), refValidation);
+    const visiting = new ValidationStack();
+    return this.settled(visiting, this.validateSchemaTransitive(schemaId, visiting, new Map(), refValidation));
   }
 
   private validateSchemaTransitive(
@@ -2284,7 +2382,7 @@ export class GtsStore {
 
     if (refValidation === GtsRefValidationMode.AnyValid) {
       for (const [dependencyId, origin] of referencedIds) {
-        const dependencyResult = this.validateEntityTransitive(dependencyId, visiting, completed, refValidation);
+        const dependencyResult = this.validateReferenceTarget(dependencyId, visiting, completed, refValidation);
         if (!dependencyResult.ok) {
           const message = `${origin.path} names '${dependencyId}', which is invalid: ${dependencyResult.error}`;
           return {
@@ -2324,6 +2422,32 @@ export class GtsStore {
       : this.validateInstanceTransitive(entityId, visiting, completed, refValidation);
   }
 
+  /** {@link validateEntityTransitive} for an entity-reference target: one reference hop (§9.6.1). */
+  private validateReferenceTarget(
+    entityId: string,
+    visiting: ValidationStack,
+    completed: Map<string, ValidationResult>,
+    refValidation: GtsRefValidationMode
+  ): ValidationResult {
+    return visiting.reference(() => this.validateEntityTransitive(entityId, visiting, completed, refValidation));
+  }
+
+  /**
+   * The result of a top-level validation, unless it was aborted (reference
+   * depth or stack exhaustion), which fails it as a whole.
+   */
+  private settled(visiting: ValidationStack, result: ValidationResult): ValidationResult {
+    if (visiting.aborted === undefined) return result;
+    const message = visiting.aborted;
+    return {
+      id: result.id,
+      ok: false,
+      ...(result.valid === undefined ? {} : { valid: false }),
+      error: message,
+      errors: [this.validationIssue(message, '', 'reference-depth', { limit: MAX_REFERENCE_DEPTH })],
+    };
+  }
+
   private hasValidWildcardMatch(
     pattern: string,
     visiting: ValidationStack,
@@ -2331,7 +2455,7 @@ export class GtsStore {
     refValidation: GtsRefValidationMode
   ): boolean {
     return this.matchingIds(pattern).some(
-      (id) => this.validateEntityTransitive(id, visiting, completed, refValidation).ok
+      (id) => this.validateReferenceTarget(id, visiting, completed, refValidation).ok
     );
   }
 
@@ -2483,6 +2607,7 @@ export class GtsStore {
 
       return { id: schemaId, ok: true, error: '' };
     } catch (err) {
+      visiting.noteError(schemaId, err);
       return {
         id: schemaId,
         ok: false,
@@ -2707,6 +2832,7 @@ export class GtsStore {
         };
       }
     } catch (e) {
+      visiting.noteError(schemaId, e);
       return {
         id: schemaId,
         ok: false,
