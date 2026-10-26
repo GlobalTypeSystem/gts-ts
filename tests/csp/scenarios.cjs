@@ -144,25 +144,25 @@ function xref(d, shape) {
 const XR_OK = `${REF}acme.demo.i.one.v1`;
 const XR_BAD = 'gts.acme.demo.t.other.v1~acme.demo.i.one.v1';
 for (const [label, shape, okVal, badVal] of [
-  ['plain', { type: 'string', 'x-gts-ref': `${REF}*` }, XR_OK, XR_BAD],
-  ['oneOf', { oneOf: [{ type: 'string', 'x-gts-ref': `${REF}*` }, { type: 'integer' }] }, XR_OK, XR_BAD],
-  ['anyOf', { anyOf: [{ type: 'string', 'x-gts-ref': `${REF}*` }, { type: 'integer' }] }, XR_OK, XR_BAD],
-  ['not', { not: { type: 'string', 'x-gts-ref': `${REF}*` } }, XR_BAD, XR_OK],
+  ['plain', { type: 'string', 'x-gts-instance-ref': `${REF}*` }, XR_OK, XR_BAD],
+  ['oneOf', { oneOf: [{ type: 'string', 'x-gts-instance-ref': `${REF}*` }, { type: 'integer' }] }, XR_OK, XR_BAD],
+  ['anyOf', { anyOf: [{ type: 'string', 'x-gts-instance-ref': `${REF}*` }, { type: 'integer' }] }, XR_OK, XR_BAD],
+  ['not', { not: { type: 'string', 'x-gts-instance-ref': `${REF}*` } }, XR_BAD, XR_OK],
 ]) {
-  perDialect(`x-gts-ref ${label}`, (d) => {
+  perDialect(`x-gts-instance-ref ${label}`, (d) => {
     const store = storeWith(xref(d, shape));
     expectGood(vi(store, { ref: okVal }, tid('xr')), `${label} valid`);
     expectBad(vi(store, { ref: badVal }, tid('xr')), `${label} invalid`);
   });
 }
 
-perDialect('x-gts-ref /$id per-call context', (d) => {
-  const a = mk(d, 'sa', { properties: { ref: { type: 'string', 'x-gts-ref': '/$id' } } });
-  const b = mk(d, 'sb', { properties: { ref: { type: 'string', 'x-gts-ref': '/$id' } } });
+perDialect('x-gts-type-ref /$id per-call context', (d) => {
+  const a = mk(d, 'sa', { properties: { ref: { type: 'string', 'x-gts-type-ref': '/$id' } } });
+  const b = mk(d, 'sb', { properties: { ref: { type: 'string', 'x-gts-type-ref': '/$id' } } });
   const store = storeWith(a, b);
   const value = tid('sa');
   expectGood(vi(store, { ref: value }, tid('sa')), 'call 1 (type sa)');
-  expectBad(vi(store, { ref: value }, tid('sb')), 'call 2 (type sb)', 'x-gts-ref', '/ref');
+  expectBad(vi(store, { ref: value }, tid('sb')), 'call 2 (type sb)', 'x-gts-type-ref', '/ref');
   expectGood(vi(store, { ref: tid('sb') }, tid('sb')), 'call 3 (type sb)');
 });
 

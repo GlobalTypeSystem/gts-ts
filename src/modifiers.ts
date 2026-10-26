@@ -10,14 +10,13 @@
  * the two trait keywords, so the placement check covers all four.
  */
 
-import { MAX_SCHEMA_DEPTH } from './types';
-import { SCHEMA_KEYWORD_POSITIONS } from './compatibility';
+import { forEachSchemaNode } from './schema-walk';
+import { GTS_REF_KEYWORDS } from './ref-keywords';
 
 export const X_GTS_FINAL = 'x-gts-final';
 export const X_GTS_ABSTRACT = 'x-gts-abstract';
 export const X_GTS_TRAITS = 'x-gts-traits';
 export const X_GTS_TRAITS_SCHEMA = 'x-gts-traits-schema';
-export const X_GTS_REF = 'x-gts-ref';
 
 /**
  * The four keywords that describe the type as a whole and therefore MUST sit at
@@ -26,15 +25,18 @@ export const X_GTS_REF = 'x-gts-ref';
 export const DOCUMENT_LEVEL_KEYWORDS = [X_GTS_FINAL, X_GTS_ABSTRACT, X_GTS_TRAITS_SCHEMA, X_GTS_TRAITS];
 
 /**
- * The complete set of `x-gts-*` schema keywords this implementation defines
- * (gts-spec 0.13.3, README.md:1847, "spec: reject unknown x-gts schema
- * keywords"). Any other `x-gts-`-prefixed key found in a schema keyword
- * position - the document root or any subschema - is a schema-authoring
- * mistake (an unsupported keyword or a typo of one of these) and MUST be
- * rejected. Plain `x-*` vendor extensions that do not carry the `x-gts-`
- * prefix are untouched by this rule.
+ * The GTS keyword vocabulary (gts-spec §11.0). The `x-gts-*` namespace is
+ * reserved: any other `x-gts-`-prefixed key at a schema location - including
+ * the removed `x-gts-ref` - is a schema error. Plain `x-*` vendor extensions
+ * outside the namespace are untouched by this rule.
  */
-export const SUPPORTED_X_GTS_KEYWORDS = [X_GTS_ABSTRACT, X_GTS_FINAL, X_GTS_TRAITS, X_GTS_TRAITS_SCHEMA, X_GTS_REF];
+export const SUPPORTED_X_GTS_KEYWORDS: readonly string[] = [
+  ...GTS_REF_KEYWORDS,
+  X_GTS_TRAITS_SCHEMA,
+  X_GTS_TRAITS,
+  X_GTS_FINAL,
+  X_GTS_ABSTRACT,
+];
 
 export class GtsModifiers {
   /** True when the schema declares `x-gts-final: true`; `false`/absent are no-ops. */
@@ -75,144 +77,50 @@ export class GtsModifiers {
   }
 
   /**
-   * Finds document-level GTS keywords that were placed inside a subschema
-   * (an `allOf` entry, a `properties` value, a `definitions` entry, ...).
-   * Such a keyword attaches to a subschema rather than to the type and MUST be
-   * rejected rather than silently ignored.
+   * Finds document-level GTS keywords placed at a schema location other than
+   * the root - an `allOf` entry, a `properties` value, a definition, a
+   * `prefixItems` entry, a local `$ref` target, the trait schema, ... (shared
+   * walker in schema-walk.ts). Such a keyword attaches to a subschema rather
+   * than to the type and MUST be rejected rather than silently ignored.
    *
-   * Returns the JSON paths of the misplaced keywords, empty when correct.
+   * Returns the JSON Pointers of the misplaced keywords, empty when correct.
    */
   static findMisplacedKeywords(schema: any): string[] {
-    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];
-
-    const found: string[] = [];
-    for (const [key, value] of Object.entries(schema)) {
-      // The top-level occurrences are the correct placement. Their values are
-      // trait data or a trait subschema, never a place for further keywords.
-      if (DOCUMENT_LEVEL_KEYWORDS.includes(key)) continue;
-      this.scanSubschemas(key, value, key, found, 0, this.isMisplacedCandidate);
-    }
-    return found;
+    return this.findKeywords(schema, (key, path) => path !== '' && DOCUMENT_LEVEL_KEYWORDS.includes(key));
   }
 
   /**
-   * Finds `x-gts-*` schema keywords that are not part of the supported set
-   * (gts-spec 0.13.3, README.md:1847), at the document root or in any
-   * subschema. Unlike `findMisplacedKeywords`, this rule is not about
-   * *placement* of an otherwise-known keyword - it flags the keyword *name*
-   * itself, wherever it appears, including the root. A plain `x-*` key
-   * without the `x-gts-` prefix is never flagged (ordinary vendor
-   * extension); a key that merely happens to be spelled like an unsupported
-   * `x-gts-*` keyword but sits in a literal-data position (a `properties` map
-   * key, a `default`/`examples` value, ...) is never visited by the shared
-   * walker below and so is never flagged either.
+   * Finds `x-gts-*` schema keywords outside the GTS vocabulary (§11.0) at
+   * every schema location the dialect defines - the root, definitions,
+   * inactive branches, local `$ref` targets and `x-gts-traits-schema` (shared
+   * walker in schema-walk.ts). Unlike `findMisplacedKeywords`, this rule flags
+   * the keyword *name* itself. Keys in literal data (`const`, `default`,
+   * `x-gts-traits`, ...) and property names are not keywords and are never
+   * flagged.
    *
-   * Returns the JSON paths of the unknown keyword occurrences, empty when
-   * every `x-gts-*` key in the document is one of the five supported ones.
+   * Returns the JSON Pointers of the unknown keyword occurrences, empty when
+   * every `x-gts-*` keyword in the document is supported.
    */
   static findUnknownKeywords(schema: any): string[] {
+    return this.findKeywords(schema, (key) => key.startsWith('x-gts-') && !SUPPORTED_X_GTS_KEYWORDS.includes(key));
+  }
+
+  /** JSON Pointers of the keywords at schema locations of `schema` that `matches`. */
+  private static findKeywords(schema: any, matches: (key: string, path: string) => boolean): string[] {
     if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];
 
     const found: string[] = [];
-    for (const [key, value] of Object.entries(schema)) {
-      if (this.isUnsupportedXGts(key)) found.push(key);
-      this.scanSubschemas(key, value, key, found, 0, this.isUnsupportedXGts);
+    try {
+      forEachSchemaNode(schema, (node, path) => {
+        for (const key of Object.keys(node)) {
+          if (matches(key, path)) found.push(`${path}/${key}`);
+        }
+      });
+    } catch (error) {
+      // Fail closed: a document too deep to walk cannot be shown to be free of
+      // such keywords.
+      found.push(`/ (${error instanceof Error ? error.message : String(error)})`);
     }
     return found;
-  }
-
-  private static isMisplacedCandidate(key: string): boolean {
-    return DOCUMENT_LEVEL_KEYWORDS.includes(key);
-  }
-
-  private static isUnsupportedXGts(key: string): boolean {
-    return key.startsWith('x-gts-') && !SUPPORTED_X_GTS_KEYWORDS.includes(key);
-  }
-
-  /**
-   * Scans a *schema position* (never a data position) for keys matching
-   * `matches`. Position-aware for the same reason `compatibility.ts`'s
-   * `stripAnnotations` walk is: `{ properties: { 'x-gts-abstract': {...} } }`
-   * names a property called `x-gts-abstract`, not an occurrence of the
-   * keyword, and must not be flagged.
-   */
-  private static scan(
-    node: any,
-    path: string,
-    found: string[],
-    depth: number,
-    matches: (key: string) => boolean
-  ): void {
-    if (!node || typeof node !== 'object') return;
-
-    // The guard bounds recursion on pathological input. Stopping silently would
-    // let a misplaced keyword below the limit through, so it fails closed: the
-    // unscanned subtree is itself reported and the document is rejected.
-    if (depth > MAX_SCHEMA_DEPTH) {
-      found.push(`${path} (nesting exceeds ${MAX_SCHEMA_DEPTH} levels; cannot verify keyword placement)`);
-      return;
-    }
-
-    if (Array.isArray(node)) {
-      node.forEach((item, index) => this.scan(item, `${path}[${index}]`, found, depth + 1, matches));
-      return;
-    }
-
-    for (const [key, value] of Object.entries(node)) {
-      const childPath = `${path}/${key}`;
-      if (matches(key)) {
-        found.push(childPath);
-        continue;
-      }
-      this.scanSubschemas(key, value, childPath, found, depth, matches);
-    }
-  }
-
-  /** Recurses into `key`'s value only through the schema-bearing positions it defines. */
-  private static scanSubschemas(
-    key: string,
-    value: any,
-    path: string,
-    found: string[],
-    depth: number,
-    matches: (key: string) => boolean
-  ): void {
-    // `dependencies` (draft-07) is heterogeneous per-entry: each map entry is
-    // either a schema (schema dependency form) or a plain array of property
-    // names (property dependency form). `compatibility.ts`'s KEYWORDS table
-    // can't express that split without regressing its malformed-shape
-    // detection for the array form, so it's handled locally here instead:
-    // only the schema-shaped entries are schema positions worth scanning.
-    if (key === 'dependencies') {
-      if (value && typeof value === 'object' && !Array.isArray(value)) {
-        for (const [name, sub] of Object.entries(value)) {
-          if (sub && typeof sub === 'object' && !Array.isArray(sub)) {
-            this.scan(sub, `${path}/${name}`, found, depth + 1, matches);
-          }
-        }
-      }
-      return;
-    }
-
-    switch (SCHEMA_KEYWORD_POSITIONS[key]) {
-      case 'schema':
-        this.scan(value, path, found, depth + 1, matches);
-        break;
-      case 'schemaList':
-        if (Array.isArray(value))
-          value.forEach((item, index) => this.scan(item, `${path}[${index}]`, found, depth + 1, matches));
-        break;
-      case 'schemaMap':
-        if (value && typeof value === 'object' && !Array.isArray(value)) {
-          for (const [name, sub] of Object.entries(value)) {
-            this.scan(sub, `${path}/${name}`, found, depth + 1, matches);
-          }
-        }
-        break;
-      default:
-        // A data or unmodeled position: never a place a document-level keyword
-        // can legitimately occur, and never a place to look for one either.
-        break;
-    }
   }
 }

@@ -2,36 +2,41 @@
 
 <!-- toc -->
 
-- [0.10.0 - 2026-10-22](#0100---2026-10-22)
+- [0.11.0 - 2026-10-24](#0110---2026-10-24)
   - [Breaking](#breaking)
+  - [Added](#added)
   - [Changed](#changed)
-  - [Security](#security)
   - [Fixed](#fixed)
-- [0.9.0 - 2026-10-09](#090---2026-10-09)
+- [0.10.0 - 2026-10-22](#0100---2026-10-22)
   - [Breaking](#breaking-1)
   - [Changed](#changed-1)
+  - [Security](#security)
+  - [Fixed](#fixed-1)
+- [0.9.0 - 2026-10-09](#090---2026-10-09)
+  - [Breaking](#breaking-2)
+  - [Changed](#changed-2)
   - [Security](#security-1)
 - [0.8.0 - 2026-09-25](#080---2026-09-25)
-  - [Breaking](#breaking-2)
-  - [Fixed](#fixed-1)
-- [0.7.0 - 2026-09-21](#070---2026-09-21)
-  - [Added](#added)
-  - [Fixed](#fixed-2)
-- [0.6.0 - 2026-09-16](#060---2026-09-16)
   - [Breaking](#breaking-3)
+  - [Fixed](#fixed-2)
+- [0.7.0 - 2026-09-21](#070---2026-09-21)
   - [Added](#added-1)
   - [Fixed](#fixed-3)
-- [0.5.0 - 2026-09-15](#050---2026-09-15)
+- [0.6.0 - 2026-09-16](#060---2026-09-16)
   - [Breaking](#breaking-4)
   - [Added](#added-2)
   - [Fixed](#fixed-4)
+- [0.5.0 - 2026-09-15](#050---2026-09-15)
+  - [Breaking](#breaking-5)
+  - [Added](#added-3)
+  - [Fixed](#fixed-5)
 - [0.4.0 - 2026-08-10](#040---2026-08-10)
   - [Breaking - HTTP API](#breaking---http-api)
   - [Breaking - library API](#breaking---library-api)
   - [Changed - compatibility semantics (spec 0.13 §4)](#changed---compatibility-semantics-spec-013-4)
-  - [Added](#added-3)
+  - [Added](#added-4)
   - [Changed - traits (§9.7.5, ADR-0002/0003/0004)](#changed---traits-975-adr-000200030004)
-  - [Fixed](#fixed-5)
+  - [Fixed](#fixed-6)
   - [Notes for implementers](#notes-for-implementers)
 - [0.3.0](#030)
 
@@ -41,6 +46,42 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.11.0] - 2026-10-24
+
+Upgrades the implementation from GTS spec **v0.15.0** to **[v0.17.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.17.0)** (through v0.16.0 and v0.16.1).
+
+### Breaking
+
+- Replace `x-gts-ref` with the kind-specific `x-gts-type-ref` (concrete Type Identifiers) and `x-gts-instance-ref` (concrete Instance Identifiers) (spec §9.6.1, ADR-0008). `x-gts-ref` is now an unknown `x-gts-*` keyword and is rejected at every schema location. A concrete Instance ID operand is a schema error for `x-gts-type-ref`; pattern candidates are rejected by both keywords.
+- The GTS keyword vocabulary is exactly `x-gts-type-ref`, `x-gts-instance-ref`, `x-gts-pattern-ref`, `x-gts-traits-schema`, `x-gts-traits`, `x-gts-final`, and `x-gts-abstract` (spec §11.0).
+- Identifier matching follows the formal §10 grammar: an omitted minor matches any minor in every type and instance segment; `v1.*` requires an explicit minor; a wildcard may only follow a complete token or the version marker `v`; version components outside the unsigned 32-bit range are invalid. Identifiers are validated as spelled, without trimming.
+- OP#4 matches a pattern candidate when the filter covers it (`M(candidate) ⊆ M(filter)`), and OP#10 chain wildcards (`type.v1~*`) include the type itself. `matchIDPattern` and `GtsStore.query` no longer take the `chainSuffixMatchesSelf` option.
+- `XGtsRefValidator` is rewritten: the constructor takes no arguments; `validateSchema` reports invalid operands (and local `$ref`s that name no schema) at every schema location; `validateInstance` checks the reference keywords structurally, without registry lookup, also reporting failures of applicators (`not`, `oneOf`, ...) whose subschemas use reference keywords, and throws `GtsSchemaError` for a schema error, including a `$ref` to another resource, which it cannot resolve without a registry. `validateSchemaRefExistence`, `getReferencedIds`, `getReferencedWildcardPatterns`, and `isSelfReference` are removed.
+
+### Added
+
+- `x-gts-pattern-ref` for pattern-valued fields, such as access-scope resource selectors (spec §9.6.2, ADR-0007): the value must be a valid pattern covered by the operand, independently of the registry and `gts-ref-validation`, in every supported dialect, including materialized trait values.
+- `Gts.patternCovers`, `Gts.idMatchesPattern`, `Gts.parseConcreteID`, `Gts.isConcreteGtsID`, and the exports `GtsSchemaError`, `X_GTS_TYPE_REF`, `X_GTS_INSTANCE_REF`, `X_GTS_PATTERN_REF`, `GTS_REF_KEYWORDS`.
+- OP#12 and OP#8 compare reference scopes by kind-filtered §10 coverage with `/$id` resolved for each compared schema, including `allOf` intersections, `anyOf` unions, `not` negations, and `const`/`enum` values. When reference constraints are not proven to be included, OP#8 reports `incompatible` only with a concrete counterexample and otherwise `unknown`.
+
+### Changed
+
+- Pin the conformance suite and `.gts-spec` submodule to gts-spec `v0.17.0`.
+- The reference keywords are schema engine keywords, so applicators evaluate them, and registry policy (`any-present` / `any-valid`) is consulted only for a candidate an entity-reference keyword actually checks. Operand targets are still checked schema-wide. Invalid operands are schema errors that `not` cannot invert and `anyOf` cannot rescue, also in definitions, inactive branches, local `$ref` targets, and `x-gts-traits-schema`.
+- Operand-target failures in transitive validation name the declaring keyword and schema location.
+- Under `any-valid`, a reference to an invalid entity that rejects the value carries that entity's structured issues, tagged with its `entityId`.
+- Reference cycles settle on the greatest consistent verdict: a result reached by assuming an entity still in progress valid is revalidated when the assumption fails. A cycle through a reference under `not`, `oneOf`, or the `if` of a conditional is undecidable and fails the whole validation with a `reference-cycle` issue that `not` cannot invert and `anyOf` cannot rescue (spec §9.6.1, **Reference cycles**). Whole-validation failures report `reference-depth` (with the limit), `reference-cycle`, or `validation-aborted` (stack exhaustion).
+- A single dialect-aware schema walker (`schema-walk.ts`) serves the regex safety check, the vocabulary and placement checks, and operand checks; it follows local `$ref`s, reports reached nodes at their declaration, and treats `definitions` as a schema location in every dialect.
+- OP#12 compares a restated property with the base as a whole schema: dropping `type`, omitting a constrained base property, or restating it as `true` is a widening. A proven inclusion is not second-guessed by the keyword-by-keyword checks, and an unproven one fails only when either side reaches a reference keyword (through any applicator, including `if`/`then`/`else`, local `$ref`s and anchors, and `$ref`s to registered schemas).
+- OP#8 and OP#12 compare an `anyOf`/`oneOf` branch by branch and infer types from `anyOf`/`oneOf`/`allOf` branches and from `const`/`enum` values.
+- The server labels a schema error that involves no reference keyword (such as a local `$ref` that names no schema) `Invalid schema:` instead of `GTS reference validation failed:`.
+
+### Fixed
+
+- OP#8 flattening no longer drops a differing conjunct of an `allOf`; unmodeled conjuncts make the verdict `unknown`. Differing annotations are not conjuncts, and a branch's `additionalProperties` applies to properties only another branch declares.
+- A local `$ref` that resolves to a scalar or an array fails closed instead of accepting the subtree.
+- `GET /match-id-pattern` reports an empty `pattern` or `candidate` as an invalid identifier instead of a missing parameter.
 
 ## [0.10.0] - 2026-10-22
 

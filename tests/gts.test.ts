@@ -11,7 +11,8 @@ import {
 } from '../src';
 import { MAX_SCHEMA_DEPTH } from '../src/types';
 import { MAX_REGEX_EXPANDED_LENGTH } from '../src/regex-profile';
-import { X_GTS_REF_SELF, XGtsRefValidator } from '../src/x-gts-ref';
+import { GtsSchemaError, X_GTS_REF_SELF } from '../src/ref-keywords';
+import { XGtsRefValidator } from '../src/x-gts-ref';
 
 describe('GTS Core Operations', () => {
   describe('OP#1 - ID Validation', () => {
@@ -1189,7 +1190,7 @@ describe('GTS Store Operations', () => {
     });
   });
 
-  // x-gts-ref combinator tests (oneOf/anyOf/allOf) are in the canonical gts-spec test suite
+  // Reference keyword combinator tests (oneOf/anyOf/allOf) are in the canonical gts-spec test suite
 
   describe('OP#12 - Wildcard Validation (v0.7)', () => {
     test('validates wildcard patterns', () => {
@@ -1465,7 +1466,7 @@ describe('Phase 4 - $$ escaping artifacts are not GTS/JSON-Schema keywords', () 
   });
 
   describe('explicit schema validation resolves GTS references', () => {
-    test('rejects a missing concrete x-gts-ref target reached through a local $ref', () => {
+    test('rejects a missing concrete x-gts-instance-ref target reached through a local $ref', () => {
       const gts = new GTS({ validateRefs: false });
       const id = 'gts.x.test12.xrefmissing.holder.v1~';
       gts.register({
@@ -1476,7 +1477,7 @@ describe('Phase 4 - $$ escaping artifacts are not GTS/JSON-Schema keywords', () 
         definitions: {
           TargetRef: {
             type: 'string',
-            'x-gts-ref': 'gts.x.test12.xrefmissing.target.v1~',
+            'x-gts-instance-ref': 'gts.x.test12.xrefmissing.target.v1~',
           },
         },
       });
@@ -1484,7 +1485,7 @@ describe('Phase 4 - $$ escaping artifacts are not GTS/JSON-Schema keywords', () 
       const result = gts.validateSchemaAgainstParent(id);
       expect(result.ok).toBe(false);
       expect(result.error).toContain(
-        "x-gts-ref constraint type 'gts.x.test12.xrefmissing.target.v1~' is not registered"
+        "/definitions/TargetRef/x-gts-instance-ref constrains values to 'gts.x.test12.xrefmissing.target.v1~', which is not a registered GTS entity"
       );
     });
 
@@ -1539,26 +1540,18 @@ describe('Phase 4 - $$ escaping artifacts are not GTS/JSON-Schema keywords', () 
   });
 });
 
-// Phase 5 - `x-gts-ref` traversal gaps
+// Phase 5 - entity-reference traversal shapes
 // (spec canonical suite: .gts-spec/tests/test_refimpl_x_gts_ref.py,
 // TestCaseXGtsRef_ImplicitObjectAndLocalRef / TestCaseXGtsRef_RootLocalReference).
 //
-// `XGtsRefValidator.visitInstance` (src/x-gts-ref.ts) only recurses into
-// `schema.properties` when `schema.type === 'object'` is explicitly declared,
-// and it has no `$ref` handling at all - so it neither follows a local
-// JSON-pointer `$ref` into `definitions` nor a root `$ref: "#"`. Each `it`
-// below is expected to fail against today's implementation; the paired
-// "control" case pins the same traversal shape with a *correct* reference,
-// which passes today - but vacuously, since the validator does not visit
-// that path at all yet, not because it checked and approved the value. A
-// later phase must make the control case pass for the right reason.
-describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root $ref)', () => {
+// The reference keywords are Ajv keywords, so they apply wherever the JSON
+// Schema engine applies a subschema: without an explicit `type: object`,
+// through a local `$ref` into definitions, and through a root `$ref: "#"`.
+describe('Phase 5 - entity-reference traversal (implicit object, local $ref, root $ref)', () => {
   describe('canonical: TestCaseXGtsRef_ImplicitObjectAndLocalRef (a) - implicit object', () => {
     // The holder schema never declares `type: "object"` - only `required`,
-    // `properties` and `additionalProperties: false` - yet x-gts-ref on
-    // `properties.ref` must still be enforced (gts-spec: "the point is that
-    // x-gts-ref enforcement must not depend on an explicit type: object
-    // declaration").
+    // `properties` and `additionalProperties: false` - yet the reference on
+    // `properties.ref` must still be enforced.
     function registerHolder(gts: GTS, holderId: string, targetId: string) {
       gts.register({
         $id: `gts://${holderId}`,
@@ -1566,22 +1559,14 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
         required: ['id', 'ref'],
         properties: {
           id: { type: 'string' },
-          ref: { type: 'string', 'x-gts-ref': targetId },
+          ref: { type: 'string', 'x-gts-instance-ref': targetId },
         },
         additionalProperties: false,
       });
     }
 
-    // The x-gts-ref registry-existence check (src/x-gts-ref.ts) only engages
-    // once the referenced *type* itself is registered in the store - an
-    // unregistered type prefix is treated as a foreign/documentation
-    // namespace and the check is skipped entirely (see the comment above
-    // the `this.store.get(pattern)` gate). Registering only an *instance*
-    // under the target prefix (as this test previously did, without ever
-    // registering `targetId` itself) never engages that gate, so the
-    // assertion below would pass identically whether or not enforcement
-    // works. Register the target type schema too, so the control actually
-    // pins the enforcement it claims to.
+    // Under the default `any-valid` policy the concrete operand must name a
+    // registered, valid type, so the target type schema is registered too.
     function registerTargetType(gts: GTS, targetId: string) {
       gts.register({
         $id: `gts://${targetId}`,
@@ -1596,12 +1581,7 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
       const holderId = 'gts.x.test5_implicit_ctl._.holder.v1~';
       const targetId = 'gts.x.test5_implicit_ctl._.target.v1~';
       registerHolder(gts, holderId, targetId);
-      // The x-gts-ref registry-existence check requires the referenced
-      // entity to actually be registered (see OP#13 tests and
-      // `TestCaseXGtsRef_PrefixAndSelfRef` in the canonical suite, which
-      // register the referenced capability before validating a good
-      // reference to it), so register the target's type schema and the
-      // referenced instance here too.
+      // The referenced type and instance must be registered and valid.
       registerTargetType(gts, targetId);
       gts.register({ id: `${targetId}x.vendor._.good.v1` });
       gts.register({
@@ -1640,10 +1620,6 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
         ref: 'gts.x.test5_implicit._.other_target.v1~x.vendor._.bad.v1',
       });
       const result = gts.validateInstance(`${holderId}x.vendor._.bad.v1`);
-      // TODO(phase-5): fails today - visitInstance only recurses into
-      // schema.properties when schema.type === 'object' is explicit, so the
-      // implicit-object holder's `ref` property is never visited and no
-      // x-gts-ref error is ever produced (result.ok is true today).
       expect(result.ok).toBe(false);
       expect(result.error).toMatch(/does not match pattern/);
     });
@@ -1661,17 +1637,14 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
           ref: { $ref: '#/definitions/TargetRef' },
         },
         definitions: {
-          TargetRef: { type: 'string', 'x-gts-ref': targetId },
+          TargetRef: { type: 'string', 'x-gts-instance-ref': targetId },
         },
         additionalProperties: false,
       });
     }
 
-    // See the implicit-object control test above: registering only an
-    // *instance* under the target prefix never engages the registry-
-    // existence gate (`store.get(pattern)`), because the gate keys off the
-    // target *type* being registered - so the type schema must be
-    // registered too for this control to pin real enforcement.
+    // See the implicit-object control test above: the operand type must be
+    // registered too.
     function registerTargetType(gts: GTS, targetId: string) {
       gts.register({
         $id: `gts://${targetId}`,
@@ -1724,10 +1697,6 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
         ref: 'gts.x.test5_localref._.other_target.v1~x.vendor._.bad.v1',
       });
       const result = gts.validateInstance(`${holderId}x.vendor._.bad.v1`);
-      // TODO(phase-5): fails today - visitInstance has no `$ref` handling at
-      // all, so `properties.ref` = `{ $ref: '#/definitions/TargetRef' }`
-      // is never resolved into the `TargetRef` definition that actually
-      // carries `x-gts-ref` (result.ok is true today).
       expect(result.ok).toBe(false);
       expect(result.error).toMatch(/does not match pattern/);
     });
@@ -1736,7 +1705,7 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
   describe('canonical: TestCaseXGtsRef_RootLocalReference - recursive $ref: "#" at the root', () => {
     // "A bare $ref: '#' must traverse the complete root schema ... a
     // recursive child points to the root document itself, and the nested
-    // x-gts-ref must still be validated."
+    // reference must still be validated."
     function registerRoot(gts: GTS, rootId: string, targetId: string) {
       gts.register({
         $id: `gts://${rootId}`,
@@ -1744,18 +1713,15 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
         type: 'object',
         properties: {
           id: { type: 'string' },
-          link: { type: 'string', 'x-gts-ref': targetId },
+          link: { type: 'string', 'x-gts-instance-ref': targetId },
           child: { $ref: '#' },
         },
         additionalProperties: false,
       });
     }
 
-    // See the implicit-object control test above: registering only an
-    // *instance* under the target prefix never engages the registry-
-    // existence gate (`store.get(pattern)`), because the gate keys off the
-    // target *type* being registered - so the type schema must be
-    // registered too for this control to pin real enforcement.
+    // See the implicit-object control test above: the operand type must be
+    // registered too.
     function registerTargetType(gts: GTS, targetId: string) {
       gts.register({
         $id: `gts://${targetId}`,
@@ -1808,25 +1774,13 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
         child: { link: 'gts.x.test5_rootref._.other_target.v1~x.vendor._.bad.v1' },
       });
       const result = gts.validateInstance(`${rootId}x.vendor._.bad.v1`);
-      // TODO(phase-5): fails today for the same reason as the local-$ref
-      // case above - visitInstance never follows `$ref`, so `child`'s
-      // nested `link` (reachable only by re-entering the root schema via
-      // `$ref: "#"`) is never visited (result.ok is true today).
       expect(result.ok).toBe(false);
       expect(result.error).toMatch(/does not match pattern/);
     });
 
     // Cycle-safety: a recursive `$ref: "#"` gives an unbounded-depth instance
-    // shape. This test was ORIGINALLY written before `$ref` following
-    // existed, and only asserted "does not hang" - a VACUOUS pass, since
-    // the pre-Phase-5 validator satisfied it by never attempting the
-    // recursive traversal in the first place. Now that `visitInstance`
-    // actually follows `$ref: "#"` (bounded by `MAX_SCHEMA_DEPTH` /
-    // `MAX_SCHEMA_PATHS`, src/types.ts), this is strengthened to assert the
-    // real behavior: a *finite*, well-under-budget recursive shape must
-    // still traverse correctly and reach the nested x-gts-ref check (proven
-    // by registering the deep target and expecting `ok: true`, not merely
-    // "some result came back").
+    // shape; a finite recursive shape must still reach the nested reference
+    // check (the deep target is registered, so the result is `ok: true`).
     test('a self-referential root schema traverses correctly (finite depth, well under budget)', () => {
       const gts = new GTS();
       const rootId = 'gts.x.test5_rootref_cycle._.holder.v1~';
@@ -1849,23 +1803,17 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
       expect(result.ok).toBe(true);
     });
 
-    // The genuine cycle-safety case the test above could not yet exercise:
-    // an instance nested deeper than `MAX_SCHEMA_DEPTH` through the
-    // recursive `child: { $ref: '#' }` shape. This must fail closed with a
-    // bounded error - not hang, and not silently stop traversing and report
-    // no violation - the same contract `resolveTraitSchemaRefs` /
-    // `resolveSchemaFully` (src/store.ts) already guarantee for their own
-    // $ref/allOf recursion.
-    test('an instance nested deeper than MAX_SCHEMA_DEPTH through recursive $ref: "#" fails closed with a bounded error, not a hang', () => {
+    // Recursion through `child: { $ref: '#' }` is evaluated by the JSON Schema
+    // engine, so a reference nested deeper than MAX_SCHEMA_DEPTH is still
+    // checked - here it names an unregistered target and must fail.
+    test('a reference nested deeper than MAX_SCHEMA_DEPTH through recursive $ref: "#" is still checked', () => {
       const gts = new GTS();
       const rootId = 'gts.x.test5_rootref_toodeep._.holder.v1~';
       const targetId = 'gts.x.test5_rootref_toodeep._.target.v1~';
       registerRoot(gts, rootId, targetId);
-      gts.register({ id: `${targetId}x.vendor._.deep.v1` });
+      registerTargetType(gts, targetId);
 
-      // Build an instance nested one level deeper than MAX_SCHEMA_DEPTH
-      // through the recursive `child` shape.
-      let deep: any = { link: `${targetId}x.vendor._.deep.v1` };
+      let deep: any = { link: `${targetId}x.vendor._.missing.v1` };
       for (let i = 0; i < MAX_SCHEMA_DEPTH + 1; i++) {
         deep = { child: deep };
       }
@@ -1876,7 +1824,7 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
       const elapsedMs = Date.now() - start;
       expect(elapsedMs).toBeLessThan(2000);
       expect(result.ok).toBe(false);
-      expect(result.error).toMatch(new RegExp(`nests deeper than ${MAX_SCHEMA_DEPTH} levels`));
+      expect(result.error).toMatch(/not found in registry/);
     });
   });
 
@@ -1994,17 +1942,17 @@ describe('Phase 5 - x-gts-ref traversal gaps (implicit object, local $ref, root 
   });
 });
 
-describe('x-gts-ref schema existence traversal', () => {
-  const missingStore = { get: () => undefined };
+describe('reference operands at schema locations (§9.6.3)', () => {
+  const validator = new XGtsRefValidator();
 
-  test('does not interpret annotation data as a nested schema', () => {
-    const errors = new XGtsRefValidator(missingStore).validateSchemaRefExistence({
-      default: { 'x-gts-ref': 'not-a-gts-id' },
-      const: { 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' },
-      examples: [{ 'x-gts-ref': 42 }],
-    });
-
-    expect(errors).toHaveLength(0);
+  test('keyword-shaped keys in literal data are not operands', () => {
+    expect(
+      validator.validateSchema({
+        default: { 'x-gts-type-ref': 'not-a-gts-id' },
+        const: { 'x-gts-instance-ref': 'gts.x.unit.xref.annotation.v1~x.unit._.a.v1~' },
+        examples: [{ 'x-gts-pattern-ref': 42 }],
+      })
+    ).toHaveLength(0);
 
     const gts = new GTS();
     const id = 'gts.x.unit.xref.annotation_holder.v1~';
@@ -2015,143 +1963,313 @@ describe('x-gts-ref schema existence traversal', () => {
       properties: {
         payload: {
           type: 'object',
-          default: { 'x-gts-ref': 'not-a-gts-id' },
+          default: { 'x-gts-type-ref': 'not-a-gts-id' },
           const: { 'x-gts-ref': 'gts.x.unit.xref.annotation.v1~' },
-          examples: [{ 'x-gts-ref': 42 }],
+          examples: [{ 'x-gts-pattern-ref': 42 }],
         },
       },
     });
     expect(gts.validateSchemaAgainstParent(id).ok).toBe(true);
   });
 
-  test('checks the schema of a property named x-gts-ref', () => {
-    const schema = {
-      properties: {
-        'x-gts-ref': {
-          type: 'string',
-          'x-gts-ref': 'gts.x.unit.xref.property.v1~',
-        },
-      },
-    };
-    const validator = new XGtsRefValidator(missingStore);
-    expect(validator.validateSchema(schema)).toHaveLength(0);
-    const errors = validator.validateSchemaRefExistence(schema);
-
+  test('checks the schema of a property named like a keyword', () => {
+    const errors = validator.validateSchema({
+      properties: { 'x-gts-type-ref': { type: 'string', 'x-gts-type-ref': 'not-a-gts-id' } },
+    });
     expect(errors).toHaveLength(1);
-    expect(errors[0].fieldPath).toBe('/properties/x-gts-ref/x-gts-ref');
+    expect(errors[0].fieldPath).toBe('/properties/x-gts-type-ref/x-gts-type-ref');
+    expect(errors[0].keyword).toBe('x-gts-type-ref');
   });
 
-  test('recognizes only the reserved /$id self-reference', () => {
-    const validator = new XGtsRefValidator(missingStore);
-    expect(validator.isSelfReference(X_GTS_REF_SELF)).toBe(true);
-    expect(validator.isSelfReference('/properties/id')).toBe(false);
-  });
-
-  test.each(['/x-gts-traits-schema/constraintType', '/missing', '/examples'])(
-    'rejects unsupported x-gts-ref pointer %s',
-    (ref) => {
-      const errors = new XGtsRefValidator(missingStore).validateSchema({
-        properties: { link: { type: 'string', 'x-gts-ref': ref } },
-      });
-
+  test('reserves /$id and rejects every other pointer', () => {
+    const schema = (operand: string) => ({
+      $id: 'gts://gts.x.unit.xref.self.v1~',
+      properties: { link: { type: 'string', 'x-gts-type-ref': operand } },
+    });
+    expect(validator.validateSchema(schema(X_GTS_REF_SELF))).toHaveLength(0);
+    for (const pointer of ['/x-gts-traits-schema/constraintType', '/missing', '/$id/', './$id']) {
+      const errors = validator.validateSchema(schema(pointer));
       expect(errors).toHaveLength(1);
-      expect(errors[0].reason).toContain("must be a GTS identifier, wildcard, or '/$id'");
+      expect(errors[0].reason).toContain("must be a GTS identifier, a wildcard pattern or '/$id'");
     }
-  );
+  });
+
+  test('a concrete Instance ID operand is an error only for x-gts-type-ref', () => {
+    const operand = 'gts.x.unit.xref.target.v1~x.unit._.item.v1';
+    const schema = (keyword: string) => ({ properties: { link: { [keyword]: operand } } });
+    expect(validator.validateSchema(schema('x-gts-instance-ref'))).toHaveLength(0);
+    expect(validator.validateSchema(schema('x-gts-type-ref'))[0].reason).toContain('selects no GTS Type Identifiers');
+  });
+
+  test.each([
+    ['2019-09', 'https://json-schema.org/draft/2019-09/schema'],
+    ['2020-12', 'https://json-schema.org/draft/2020-12/schema'],
+  ])('checks operands in unused definitions under %s', (_name, dialect) => {
+    const errors = validator.validateSchema({
+      $schema: dialect,
+      definitions: { Unused: { 'x-gts-pattern-ref': 'gts.vendor*' } },
+    });
+    expect(errors.map((error) => error.fieldPath)).toEqual(['/definitions/Unused/x-gts-pattern-ref']);
+  });
+
+  test('checks operands reached only through a local $ref into literal data, located at their declaration', () => {
+    const errors = validator.validateSchema({
+      $ref: '#/x-data',
+      'x-data': { not: { 'x-gts-type-ref': 'invalid' } },
+    });
+    expect(errors.map((error) => error.fieldPath)).toEqual(['/x-data/not/x-gts-type-ref']);
+
+    // The reported pointer is escaped (`/` as `~1`, `~` as `~0`).
+    const escaped = validator.validateSchema({
+      $ref: '#/x~1data~0',
+      'x/data~': { not: { 'x-gts-type-ref': 'invalid' } },
+    });
+    expect(escaped.map((error) => error.fieldPath)).toEqual(['/x~1data~0/not/x-gts-type-ref']);
+  });
+
+  test('validateInstance reports a schema error before evaluating data', () => {
+    expect(() =>
+      validator.validateInstance({}, { type: 'object', definitions: { Unused: { 'x-gts-type-ref': 'invalid' } } })
+    ).toThrow(GtsSchemaError);
+    expect(() =>
+      validator.validateInstance({}, { type: 'object', properties: { a: { 'x-gts-type-ref': X_GTS_REF_SELF } } })
+    ).toThrow(GtsSchemaError);
+  });
 });
 
-// P5-R2 - `visitInstance` (src/x-gts-ref.ts) must fail closed when a
-// `$ref` it is asked to follow does not resolve to a usable schema, rather
-// than silently `return`ing and reporting no violation. Two distinct
-// failure modes are covered: the pointer resolves nowhere at all
-// (`resolveSchemaRef` returns `null`), and the pointer resolves to
-// something that exists but is not usable as a schema (a non-object, such
-// as a `default` value or an array entry).
-//
-// These exercise `XGtsRefValidator` directly (not through `GTS.register` /
-// `store.validateInstance`) because Ajv itself eagerly resolves every
-// `$ref` at schema-compile time and would reject a genuinely dangling
-// pointer before `XGtsRefValidator` ever ran - the bug this finding is
-// about lives in `XGtsRefValidator`'s own, independent local-pointer
-// resolution (`resolveSchemaRef`), which is what `validateInstance` calls
-// directly, unit-style, in these tests.
+test('validateInstance reports a $ref to another resource as a schema error', () => {
+  const leaf = {
+    $id: 'gts://gts.x.probe._.base.v1~x.probe._.leaf.v1~',
+    allOf: [{ $ref: 'gts://gts.x.probe._.base.v1~' }],
+    properties: { r: { type: 'string', 'x-gts-type-ref': 'gts.x.probe._.base.v1~' } },
+  };
+  expect(() => new XGtsRefValidator().validateInstance({ r: 'gts.x.other._.t.v1~' }, leaf)).toThrow(GtsSchemaError);
+});
+
+// P5-R2 - a `$ref` that does not resolve to a usable schema must fail closed:
+// the subtree behind it cannot be shown to satisfy its reference keywords.
 describe('P5-R2 - $ref resolution fails closed instead of silently skipping the subtree', () => {
-  test('a $ref pointing at a nonexistent location in the schema fails closed, not silently open', () => {
-    const errors = new XGtsRefValidator().validateInstance(
-      { ref: 'totally-not-a-gts-id' },
-      {
-        type: 'object',
-        properties: { ref: { $ref: '#/definitions/Nope' } },
-        definitions: {
-          TargetRef: { type: 'string', 'x-gts-ref': 'gts.x.probe._.target.v1~' },
-        },
-      }
-    );
-    expect(errors).toHaveLength(1);
-    expect(errors[0].reason).toMatch(/Cannot resolve \$ref '#\/definitions\/Nope' for x-gts-ref traversal/);
-    expect(errors[0].refPattern).toBe('');
+  const validator = new XGtsRefValidator();
+  const targetRef = { type: 'string', 'x-gts-type-ref': 'gts.x.probe._.target.v1~', default: 'example-default' };
+
+  test('a $ref pointing at a nonexistent location in the schema fails closed', () => {
+    expect(() =>
+      validator.validateInstance(
+        { ref: 'totally-not-a-gts-id' },
+        { type: 'object', properties: { ref: { $ref: '#/definitions/Nope' } }, definitions: { TargetRef: targetRef } }
+      )
+    ).toThrow(/#\/definitions\/Nope/);
   });
 
-  test('a $ref pointing at a non-schema value (e.g. into a "default") fails closed, not silently open', () => {
-    const errors = new XGtsRefValidator().validateInstance(
-      { ref: 'totally-not-a-gts-id' },
-      {
-        type: 'object',
-        properties: { ref: { $ref: '#/definitions/TargetRef/default' } },
-        definitions: {
-          TargetRef: {
-            type: 'string',
-            default: 'example-default',
-            'x-gts-ref': 'gts.x.probe._.target.v1~',
-          },
-        },
-      }
-    );
-    expect(errors).toHaveLength(1);
-    expect(errors[0].reason).toMatch(
-      /Cannot resolve \$ref '#\/definitions\/TargetRef\/default' for x-gts-ref traversal/
-    );
-    expect(errors[0].refPattern).toBe('');
+  test('a $ref pointing at a non-schema value (e.g. into a "default") fails closed', () => {
+    expect(() =>
+      validator.validateInstance(
+        { ref: 'totally-not-a-gts-id' },
+        {
+          type: 'object',
+          properties: { ref: { $ref: '#/definitions/TargetRef/default' } },
+          definitions: { TargetRef: targetRef },
+        }
+      )
+    ).toThrow();
   });
 
-  test('a $ref pointing at an array (e.g. a "oneOf" list itself, not an element) fails closed, not silently open', () => {
-    const errors = new XGtsRefValidator().validateInstance(
-      { ref: 'totally-not-a-gts-id' },
-      {
-        type: 'object',
-        properties: { ref: { $ref: '#/oneOf' } },
-        oneOf: [{ type: 'string' }, { type: 'number' }],
-      }
-    );
-    expect(errors).toHaveLength(1);
-    expect(errors[0].reason).toMatch(/Cannot resolve \$ref '#\/oneOf' for x-gts-ref traversal/);
-    expect(errors[0].refPattern).toBe('');
+  test('a $ref pointing at an array (e.g. a "oneOf" list itself, not an element) fails closed', () => {
+    expect(() =>
+      validator.validateInstance(
+        { ref: 'totally-not-a-gts-id' },
+        {
+          type: 'object',
+          properties: { ref: { $ref: '#/oneOf' } },
+          oneOf: [{ type: 'string' }, { type: 'number' }],
+        }
+      )
+    ).toThrow();
+  });
+
+  test('a regular expression outside the GTS profile is rejected before any data is evaluated', () => {
+    expect(() =>
+      validator.validateInstance(
+        { ref: 'gts.x.probe._.target.v1~' },
+        { properties: { ref: { type: 'string', pattern: '^(?=gts)', 'x-gts-type-ref': 'gts.*' } } }
+      )
+    ).toThrow();
   });
 });
 
-describe('x-gts-ref array tuple traversal', () => {
+describe('reference keywords under JSON Schema applicators', () => {
+  const validator = new XGtsRefValidator();
   const target = 'gts.x.unit.xref.array_target.v1~';
 
+  // The engine reports a failing `then`/`else` branch, never an `if` failure;
+  // the validator reconstructs the `if` failure from the branch issue.
+  test.each([
+    ['then', { if: { 'x-gts-type-ref': 'gts.*' }, then: { const: 1 } }],
+    ['else', { if: { 'x-gts-type-ref': 'gts.y.*' }, else: { const: 1 } }],
+  ])('reports a nested %s branch selected by a reference condition once, at its instance location', (_name, cond) => {
+    const schema = { properties: { a: { properties: { b: cond } } } };
+    expect(validator.validateInstance({ a: { b: target } }, schema)).toEqual([
+      expect.objectContaining({ fieldPath: '/a/b', value: target, reason: expect.stringMatching(/^if: /) }),
+    ]);
+  });
+
+  test.each(['properties', 'definitions', '$defs'])(
+    'does not mistake a member named if / then under %s for a conditional',
+    (container) => {
+      const members = { if: { type: 'integer' }, then: { 'x-gts-type-ref': 'gts.*' } };
+      const schema =
+        container === 'properties'
+          ? { properties: members }
+          : { [container]: members, properties: { if: { $ref: `#/${container}/if` } } };
+      expect(validator.validateInstance({ if: 'not-an-integer', then: target }, schema)).toEqual([]);
+    }
+  );
+
+  test('reports the instance value only through own properties', () => {
+    const errors = validator.validateInstance(
+      { constructor: target },
+      { properties: { constructor: { not: { 'x-gts-type-ref': 'gts.*' } } } }
+    );
+    expect(errors).toEqual([expect.objectContaining({ fieldPath: '/constructor', value: target })]);
+  });
+
   test('uses additionalItems after Draft-07 tuple items', () => {
-    const errors = new XGtsRefValidator().validateInstance(['tuple-prefix', 'gts.x.unit.xref.other.v1~'], {
+    const errors = validator.validateInstance(['tuple-prefix', 'gts.x.unit.xref.other.v1~'], {
+      $schema: 'http://json-schema.org/draft-07/schema#',
       type: 'array',
       items: [{ type: 'string' }],
-      additionalItems: { type: 'string', 'x-gts-ref': target },
+      additionalItems: { type: 'string', 'x-gts-type-ref': target },
     });
 
     expect(errors).toHaveLength(1);
     expect(errors[0].fieldPath).toBe('/1');
+    expect(errors[0].keyword).toBe('x-gts-type-ref');
   });
 
   test('uses items only after Draft 2020-12 prefixItems', () => {
-    const errors = new XGtsRefValidator().validateInstance(['tuple-prefix', 'gts.x.unit.xref.other.v1~'], {
+    const errors = validator.validateInstance(['tuple-prefix', 'gts.x.unit.xref.other.v1~'], {
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
       type: 'array',
       prefixItems: [{ type: 'string' }],
-      items: { type: 'string', 'x-gts-ref': target },
+      items: { type: 'string', 'x-gts-type-ref': target },
     });
 
     expect(errors).toHaveLength(1);
     expect(errors[0].fieldPath).toBe('/1');
+  });
+
+  test('not inverts a candidate failure, never a schema error', () => {
+    const schema = { properties: { ref: { not: { 'x-gts-type-ref': target } } } };
+    expect(validator.validateInstance({ ref: 'gts.x.unit.xref.other.v1~' }, schema)).toHaveLength(0);
+    expect(() =>
+      validator.validateInstance({ ref: 'x' }, { properties: { ref: { not: { 'x-gts-type-ref': 'bad' } } } })
+    ).toThrow(GtsSchemaError);
+  });
+
+  test('a pattern-ref value must be covered by the operand', () => {
+    const schema = { properties: { scope: { 'x-gts-pattern-ref': 'gts.x.core.resources.resource.*' } } };
+    expect(validator.validateInstance({ scope: 'gts.x.core.resources.resource.v1~' }, schema)).toHaveLength(0);
+    const errors = validator.validateInstance({ scope: 'gts.x.core.resources.*' }, schema);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].keyword).toBe('x-gts-pattern-ref');
+  });
+
+  // Review finding: an applicator rejected because a reference keyword
+  // matched has no failing reference keyword of its own.
+  test('reports an applicator that a matching reference keyword makes fail', () => {
+    const oneOf = { oneOf: [{ 'x-gts-type-ref': 'gts.*' }, { 'x-gts-type-ref': 'gts.x.*' }] };
+    const errors = validator.validateInstance({ ref: target }, { properties: { ref: oneOf } });
+    expect(errors).toEqual([expect.objectContaining({ fieldPath: '/ref', value: target })]);
+    expect(errors[0].keyword).toBeUndefined();
+    expect(validator.validateInstance(target, { not: { 'x-gts-type-ref': 'gts.*' } })).toHaveLength(1);
+    expect(validator.validateInstance(target, { not: { not: { 'x-gts-type-ref': 'gts.y.*' } } })).toHaveLength(1);
+  });
+
+  // Review finding: a schema of reference keywords and applicators only
+  // that rejects the value must report it, whatever the polarity.
+  test.each([
+    ['mixed polarity', { not: { anyOf: [{ 'x-gts-type-ref': 'gts.x.*' }, { not: { 'x-gts-type-ref': 'gts.y.*' } }] } }],
+    [
+      'oneOf through a local $ref',
+      { oneOf: [{ $ref: '#/definitions/R' }, {}], definitions: { R: { 'x-gts-type-ref': 'gts.*' } } },
+    ],
+    [
+      'not through a local $ref',
+      { not: { $ref: '#/definitions/R' }, definitions: { R: { 'x-gts-type-ref': 'gts.*' } } },
+    ],
+    ['a reference condition selecting a false branch', { if: { 'x-gts-type-ref': 'gts.*' }, then: false }],
+  ])('reports a rejection by applicators over reference keywords: %s', (_name, schema) => {
+    expect(validator.acceptor(schema)(target)).toBe(false);
+    expect(validator.validateInstance(target, schema)).toHaveLength(1);
+  });
+
+  test('reports too many items matching a reference keyword', () => {
+    const schema = {
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      contains: { 'x-gts-type-ref': 'gts.*' },
+      minContains: 0,
+      maxContains: 0,
+    };
+    expect(validator.validateInstance([target], schema)).toHaveLength(1);
+  });
+
+  // Review finding: a reference error at one array item does not explain an
+  // applicator failure at another.
+  test('reports an applicator failure at each instance location', () => {
+    const oneOf = { oneOf: [{ 'x-gts-type-ref': 'gts.*' }, { 'x-gts-type-ref': 'gts.x.*' }] };
+    const errors = validator.validateInstance(['bad', target], { items: oneOf });
+    expect(errors.some((error) => error.fieldPath === '/0')).toBe(true);
+    expect(errors.some((error) => error.fieldPath === '/1' && error.keyword === undefined)).toBe(true);
+  });
+
+  // Review finding: a declaration is not a constraint until a `$ref` uses it.
+  test.each([
+    ['definitions', { not: { type: 'string', definitions: { Unused: { 'x-gts-type-ref': 'gts.*' } } } }],
+    [
+      '$defs',
+      {
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        not: { type: 'string', $defs: { Unused: { 'x-gts-type-ref': 'gts.*' } } },
+      },
+    ],
+    [
+      'x-gts-traits-schema',
+      { not: { type: 'string', 'x-gts-traits-schema': { properties: { t: { 'x-gts-type-ref': 'gts.*' } } } } },
+    ],
+  ])('does not count an unused declaration in %s', (_name, schema) => {
+    expect(validator.validateInstance('ordinary', schema)).toEqual([]);
+  });
+
+  test('counts a declaration a local $ref uses', () => {
+    const nested = { not: { $ref: '#/not/definitions/R', definitions: { R: { 'x-gts-type-ref': 'gts.*' } } } };
+    expect(validator.validateInstance(target, nested)).toHaveLength(1);
+    const root = { not: { $ref: '#/$defs/R' }, $defs: { R: { 'x-gts-type-ref': 'gts.*' } } };
+    expect(validator.validateInstance(target, root)).toHaveLength(1);
+  });
+
+  test('does not report an applicator without reference keywords', () => {
+    expect(validator.validateInstance(target, { oneOf: [{ type: 'string' }, { minLength: 1 }] })).toEqual([]);
+    expect(validator.validateInstance(target, { not: { type: 'string' } })).toEqual([]);
+    // Literal data that looks like a schema is not one.
+    expect(validator.validateInstance({}, { oneOf: [{ const: { 'x-gts-type-ref': 'gts.*' } }, true, true] })).toEqual(
+      []
+    );
+    // Ordinary failures beside a satisfied reference keyword.
+    const ref = { 'x-gts-type-ref': 'gts.*' };
+    expect(
+      validator.validateInstance({ ref: target, n: 2 }, { properties: { ref, n: { oneOf: [true, true] } } })
+    ).toEqual([]);
+    expect(validator.validateInstance({ ref: target, n: 1 }, { properties: { ref, n: { type: 'string' } } })).toEqual(
+      []
+    );
+  });
+
+  // Review finding: the reusable Ajv instances registered the schema's `$id`.
+  test('validates copies of a schema with the same $id', () => {
+    const schema = { $id: `gts://${target}`, 'x-gts-type-ref': 'gts.*' };
+    expect(validator.validateInstance(target, schema)).toEqual([]);
+    expect(validator.validateInstance(target, JSON.parse(JSON.stringify(schema)))).toEqual([]);
+    expect(validator.validateInstance('x', JSON.parse(JSON.stringify(schema)))).toHaveLength(1);
   });
 });
 

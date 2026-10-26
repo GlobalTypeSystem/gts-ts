@@ -1,635 +1,379 @@
 /*
- * x-gts-ref validation for GTS schemas
- * Validates that string values match specified GTS ID patterns
+ * GTS identifier references and patterns (gts-spec §9.6, ADR-0007, ADR-0008):
+ *
+ * - `x-gts-type-ref` constrains a string to a concrete GTS Type Identifier;
+ * - `x-gts-instance-ref` constrains it to a concrete GTS Instance Identifier;
+ * - `x-gts-pattern-ref` constrains it to a GTS identifier pattern covered by
+ *   the operand.
+ *
+ * The keywords are registered with the schema engine (`schema-engine.ts`) so `not`, `anyOf`, `oneOf` and the
+ * other applicators treat a candidate failure like any other assertion. An
+ * invalid operand is a schema error instead: it throws {@link GtsSchemaError}
+ * while compiling (or, for `/$id`, while resolving the selected type), so no
+ * applicator can invert or rescue it. {@link XGtsRefValidator.validateSchema}
+ * additionally checks operands at every schema location, including ones no
+ * value reaches.
+ *
+ * Registry lookup applies only to the two entity-reference keywords and is
+ * supplied by the caller through {@link GtsRefContext}; `x-gts-pattern-ref`
+ * never consults the registry.
  */
 
-import { Gts } from './gts';
+import { ValidationIssue } from './types';
+import { forEachSchemaNode, type Resource } from './schema-walk';
 import {
-  EntityLookup,
-  MAX_SCHEMA_DEPTH,
-  MAX_SCHEMA_PATHS,
-  GtsRefValidationMode,
-  GTS_PREFIX,
-  hasUriPrefix,
-  stripUriPrefix,
-} from './types';
+  declaredRefOperands,
+  GTS_REF_KEYWORDS,
+  GtsRefContext,
+  GtsRefKeyword,
+  GtsSchemaError,
+  isGtsRefKeyword,
+  resolveRefOperand,
+} from './ref-keywords';
+import { canonicalDialectUri, dialectOf, type SchemaDialect } from './schema-dialect';
+import { assertSafeSchemaPatterns } from './schema-safety';
+import { createSchemaEngine, type CompiledSchema, type SchemaEngine } from './schema-engine';
 
-export const X_GTS_REF_SELF = '/$id';
+/** Applicators that can fail without a failing reference keyword beneath them (`not`, `oneOf`, ...). */
+const COMPOSITION_KEYWORDS = new Set(['not', 'oneOf', 'anyOf', 'if', 'contains']);
 
-/**
- * Whether `value`, already known to be prefixed by an exact (non-wildcard)
- * `pattern`, matches it on a segment boundary. Type patterns (ending with `~`)
- * admit derived identifiers; any other (exact) pattern requires a full match or
- * a `~` boundary immediately after the pattern, so `…w.v1` does not spuriously
- * accept `…w.v12` / `…w.v1.5`.
- */
-function matchesAtSegmentBoundary(value: string, pattern: string): boolean {
-  return value.length === pattern.length || pattern.endsWith('~') || value[pattern.length] === '~';
-}
+const CONDITIONAL_KEYWORDS = new Set(['if', 'then', 'else']);
+/** Keywords whose members are named by the schema author, not by JSON Schema. */
+const SCHEMA_MAP_KEYWORDS = new Set(['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas']);
 
-/**
- * Why the string `value` does not satisfy `pattern`, or `null` if it matches.
- * Pure pattern matching (concrete id, type prefix, or single trailing wildcard);
- * registry existence and the `/$id` self-reference are decided by
- * {@link XGtsRefValidator}, not here. Shared by that walker and the structural
- * `x-gts-ref` engine keyword so both agree on matching.
- */
-export function gtsPatternViolation(value: string, pattern: string): string | null {
-  if (!Gts.isValidGtsID(value)) {
-    return `Value '${value}' is not a valid GTS identifier`;
+/** Resolves a JSON Pointer (`#` prefix optional) in `document` through own properties only, or `undefined`. */
+function pointerTarget(document: any, pointer: string): any {
+  const raw = pointer.replace(/^#/, '');
+  if (raw === '') return document;
+  let current = document;
+  for (const escaped of raw.slice(1).split('/')) {
+    const segment = escaped.replace(/~1/g, '/').replace(/~0/g, '~');
+    if (current === null || typeof current !== 'object' || !Object.prototype.hasOwnProperty.call(current, segment)) {
+      return undefined;
+    }
+    current = current[segment];
   }
-  if (pattern === GTS_PREFIX + '*') return null;
-  if (pattern.endsWith('*')) {
-    return value.startsWith(pattern.slice(0, -1)) ? null : `Value '${value}' does not match pattern '${pattern}'`;
-  }
-  if (!value.startsWith(pattern) || !matchesAtSegmentBoundary(value, pattern)) {
-    return `Value '${value}' does not match pattern '${pattern}'`;
-  }
-  return null;
+  return current;
 }
 
 /**
- * Engine-independent core of the structural `x-gts-ref` keyword (registered by
- * `schema-engine.ts` so it participates in `oneOf`/`anyOf`/`not` evaluation): why `data` violates
- * `refPattern`, or `null` when it conforms (or the keyword does not apply).
- * `/$id` resolves to the selected type via `getSelectedTypeId`; without a
- * selected type it defers to XGtsRefValidator (returns `null`).
+ * The schema node at an engine schema location. The engine repeats the
+ * enclosing location for `then`/`else` subschemas (`#/p/a/p/a/then`), so a
+ * location made of a doubled prefix also resolves through its first half.
  */
-export function xGtsRefKeywordViolation(
-  refPattern: unknown,
-  data: unknown,
-  getSelectedTypeId?: () => string | undefined
-): string | null {
-  if (typeof refPattern !== 'string') return null;
-  if (typeof data !== 'string') return null;
-  let pattern = refPattern;
-  if (refPattern === X_GTS_REF_SELF) {
-    // Resolve /$id to the selected type so a /$id branch matches only that
-    // type, not every value. If it is unknown here, defer to XGtsRefValidator.
-    const selected = getSelectedTypeId?.();
-    if (!selected) return null;
-    pattern = selected;
-  }
-  return gtsPatternViolation(data, stripUriPrefix(pattern));
+function schemaAt(schema: any, location: string): any {
+  const direct = pointerTarget(schema, location);
+  if (direct !== undefined) return direct;
+  const segments = location.replace(/^#/, '').split('/').slice(1);
+  const half = segments.length / 2;
+  if (!Number.isInteger(half) || segments.slice(0, half).join('/') !== segments.slice(half).join('/')) return undefined;
+  return pointerTarget(schema, `/${segments.slice(0, half).join('/')}`);
 }
 
-const SCHEMA_VALUE_KEYWORDS = new Set([
-  'additionalItems',
-  'additionalProperties',
-  'contains',
-  'contentSchema',
-  'else',
-  'if',
-  'not',
-  'propertyNames',
-  'then',
-  'unevaluatedItems',
-  'unevaluatedProperties',
-  'x-gts-traits-schema',
-]);
-const SCHEMA_ARRAY_KEYWORDS = new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems']);
-const SCHEMA_MAP_KEYWORDS = new Set(['$defs', 'definitions', 'dependentSchemas', 'properties', 'patternProperties']);
-
-export function escapeJsonPointerSegment(segment: string | number): string {
-  return String(segment).replace(/~/g, '~0').replace(/\//g, '~1');
+/** The schema node holding the keyword `issue` reports (its `schemaPath` minus the keyword). */
+function parentSchemaOf(issue: ValidationIssue, schema: any): any {
+  return schemaAt(schema, issue.schemaPath.slice(0, issue.schemaPath.lastIndexOf('/')));
 }
 
-function appendJsonPointer(path: string, segment: string | number): string {
-  return `${path}/${escapeJsonPointerSegment(segment)}`;
-}
-
-export function visitJsonSubschemas(schema: any, path: string, visit: (subschema: any, path: string) => void): void {
-  for (const [key, value] of Object.entries(schema)) {
-    const nestedPath = appendJsonPointer(path, key);
-    if (SCHEMA_VALUE_KEYWORDS.has(key)) {
-      visit(value, nestedPath);
-    } else if (SCHEMA_ARRAY_KEYWORDS.has(key) && Array.isArray(value)) {
-      value.forEach((item, index) => visit(item, appendJsonPointer(nestedPath, index)));
-    } else if (SCHEMA_MAP_KEYWORDS.has(key) && value && typeof value === 'object' && !Array.isArray(value)) {
-      for (const [name, childSchema] of Object.entries(value)) {
-        visit(childSchema, appendJsonPointer(nestedPath, name));
-      }
-    } else if (key === 'items') {
-      if (Array.isArray(value)) {
-        value.forEach((item, index) => visit(item, appendJsonPointer(nestedPath, index)));
-      } else {
-        visit(value, nestedPath);
-      }
-    } else if (key === 'dependencies' && value && typeof value === 'object' && !Array.isArray(value)) {
-      for (const [name, dependency] of Object.entries(value)) {
-        if (!Array.isArray(dependency)) {
-          visit(dependency, appendJsonPointer(nestedPath, name));
-        }
-      }
+/**
+ * The engine reports no `if` failure: a failing `then`/`else` branch reports
+ * its own issues. Each such issue stands for an `if` failure of the innermost
+ * node with an `if` it lies under, located at that node's `if`. `location`,
+ * the pointer of the node that reported `issue`, locates it more reliably
+ * than its `schemaPath`.
+ */
+function conditionalIssue(issue: ValidationIssue, schema: any, location?: string): ValidationIssue | undefined {
+  const segments = (location === undefined ? issue.schemaPath : `#${location}/${issue.keyword}`).split('/');
+  for (let index = segments.length - 2; index > 0; index--) {
+    if (!CONDITIONAL_KEYWORDS.has(segments[index])) continue;
+    // A property or definition named `if` / `then` / `else` is not a conditional.
+    if (SCHEMA_MAP_KEYWORDS.has(segments[index - 1])) continue;
+    const location = segments.slice(0, index).join('/');
+    const node = schemaAt(schema, location);
+    if (node && typeof node === 'object' && 'if' in node) {
+      return { ...issue, keyword: 'if', schemaPath: `${location}/if` };
     }
   }
+  return undefined;
 }
 
+/** The subschemas of the failed applicator `issue` (declared in `parent`) whose results decide it. */
+function applicatorSubschemas(issue: ValidationIssue, parent: any): unknown[] {
+  if (!parent || typeof parent !== 'object') return [];
+  if (issue.keyword === 'if') return [parent.if, parent.then, parent.else];
+  const value = parent[issue.keyword];
+  return Array.isArray(value) ? value : [value];
+}
+
+/** The engine reports the instance root as `/`; reference results use `''`. */
+const instancePathOf = (issue: ValidationIssue): string => (issue.instancePath === '/' ? '' : issue.instancePath);
+
+/** Whether `issue` lies at `ancestor`'s instance location or below it. */
+function isAtOrBelow(issue: ValidationIssue, ancestor: ValidationIssue): boolean {
+  const path = instancePathOf(issue);
+  const ancestorPath = instancePathOf(ancestor);
+  return path === ancestorPath || path.startsWith(`${ancestorPath}/`);
+}
+
+/** A reference keyword violation or schema error, located in the instance or schema. */
 export interface XGtsRefValidationError {
+  /**
+   * The keyword responsible; absent for a failed applicator whose subschemas
+   * use reference keywords, or a general failure to check references.
+   */
+  keyword?: GtsRefKeyword;
   fieldPath: string;
   value: any;
   refPattern: string;
   reason: string;
 }
 
+/**
+ * The message for `XGtsRefValidator.validateSchema` errors. Errors without a
+ * reference keyword (a local `$ref` that names no schema, a schema past the
+ * walk's limits) are schema errors, not reference failures.
+ */
+export function refSchemaErrorMessage(errors: XGtsRefValidationError[]): string {
+  const describe = (list: XGtsRefValidationError[]) => list.map((err) => `${err.fieldPath}: ${err.reason}`).join('; ');
+  const general = errors.filter((err) => err.keyword === undefined);
+  const references = errors.filter((err) => err.keyword !== undefined);
+  return [
+    general.length > 0 ? `Invalid schema: ${describe(general)}` : '',
+    references.length > 0 ? `GTS reference validation failed: ${describe(references)}` : '',
+  ]
+    .filter(Boolean)
+    .join('; ');
+}
+
+/**
+ * Checks GTS reference keywords without a registry.
+ *
+ * - {@link validateSchema} reports invalid operands at every schema location,
+ *   including definitions, inactive branches, local `$ref` targets and
+ *   `x-gts-traits-schema` (§9.6.3).
+ * - {@link validateInstance} reports reference violations of an instance
+ *   under the JSON Schema applicators of the schema's dialect, including
+ *   failures of applicators whose subschemas use reference keywords.
+ */
 export class XGtsRefValidator {
-  private store: EntityLookup | undefined;
-  private mode: GtsRefValidationMode;
-  private referencedIds: Set<string> = new Set();
-  private referencedWildcardPatterns: Set<string> = new Set();
-  private selectedTypeId: string | undefined;
-  private selfId: string | undefined;
+  private context: GtsRefContext = {};
+  // Built on first use: `validateSchema` (run on every store validation)
+  // needs no engine, and building one is expensive.
+  private engineInstance: SchemaEngine | undefined;
 
-  constructor(store?: EntityLookup, mode: GtsRefValidationMode | boolean = GtsRefValidationMode.AnyValid) {
-    this.store = store;
-    this.mode = typeof mode === 'boolean' ? (mode ? GtsRefValidationMode.AnyPresent : GtsRefValidationMode.None) : mode;
-  }
-
-  getReferencedIds(): Set<string> {
-    return new Set(this.referencedIds);
-  }
-
-  getReferencedWildcardPatterns(): Set<string> {
-    return new Set(this.referencedWildcardPatterns);
-  }
-
-  isSelfReference(value: unknown): boolean {
-    return value === X_GTS_REF_SELF;
-  }
-
-  private getSelectedTypeId(schema: any, selectedTypeId?: string): string | undefined {
-    const candidate = selectedTypeId ?? schema?.$id;
-    return typeof candidate === 'string' ? stripUriPrefix(candidate) : undefined;
+  // The store's engine configuration: GTS formats and the linear-time regex
+  // profile, so this API never runs a backtracking regex.
+  private get engine(): SchemaEngine {
+    return (this.engineInstance ??= createSchemaEngine({ getRefContext: () => this.context }));
   }
 
   /**
-   * Validate an instance against x-gts-ref constraints in schema
+   * Operand errors in `schema`, and local `$ref`s that name no schema. `/$id`
+   * resolves to `selectedTypeId`, by default the `$id` of `rootSchema` (or of
+   * `schema` itself).
+   */
+  validateSchema(
+    schema: any,
+    schemaPath: string = '',
+    rootSchema: any = schema,
+    selectedTypeId?: string
+  ): XGtsRefValidationError[] {
+    const selected = selectedTypeId ?? (typeof rootSchema?.$id === 'string' ? rootSchema.$id : undefined);
+    const errors: XGtsRefValidationError[] = [];
+    let declared: ReturnType<typeof declaredRefOperands>;
+    try {
+      // A local `$ref` that names no schema hides its subtree from these
+      // checks, so it fails closed.
+      declared = declaredRefOperands(schema, rootSchema, (path, ref) =>
+        errors.push({
+          fieldPath: `${schemaPath}${path}`,
+          value: ref,
+          refPattern: '',
+          reason: `Cannot resolve $ref '${ref}' to a schema`,
+        })
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return [{ fieldPath: schemaPath || '/', value: schema, refPattern: '', reason }];
+    }
+    for (const { keyword, operand, path } of declared) {
+      try {
+        resolveRefOperand(keyword, operand, selected);
+      } catch (error) {
+        errors.push({
+          keyword,
+          fieldPath: `${schemaPath}${path}`,
+          value: operand,
+          refPattern: typeof operand === 'string' ? operand : '',
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return errors;
+  }
+
+  /**
+   * Reference violations of `instance` against `schema`, without registry
+   * lookup: failing reference keywords, and failures of applicators (`not`,
+   * `oneOf`, ...) whose subschemas use reference keywords. Failures of the
+   * other keywords are not reported. `/$id` resolves to `selectedTypeId`, by
+   * default `schema.$id`.
+   * Throws {@link GtsSchemaError} when the schema has an invalid operand at
+   * any schema location, even one no value reaches (§9.6.3), or a `$ref` to
+   * another resource (there is no registry to resolve it), and rejects
+   * regular expressions outside the GTS profile before compiling (§11.0.1).
    */
   validateInstance(
     instance: any,
     schema: any,
     instancePath: string = '',
-    selectedTypeId?: string,
-    selfId?: string
+    selectedTypeId?: string
   ): XGtsRefValidationError[] {
-    this.selectedTypeId = this.getSelectedTypeId(schema, selectedTypeId);
-    // The id of the entity being validated. A reference to it is satisfied by
-    // that entity itself, so it must bypass the registry-existence check (the
-    // entity may not be registered yet under validate-before-register).
-    this.selfId = typeof selfId === 'string' ? stripUriPrefix(selfId) : undefined;
-    const errors: XGtsRefValidationError[] = [];
-    this.visitInstance(instance, schema, instancePath, schema, errors);
-    return errors;
-  }
-
-  /**
-   * Validate x-gts-ref fields in a schema definition
-   */
-  validateSchema(schema: any, schemaPath: string = '', rootSchema: any = null): XGtsRefValidationError[] {
-    if (!rootSchema) {
-      rootSchema = schema;
+    const selected = selectedTypeId ?? (typeof schema?.$id === 'string' ? schema.$id : undefined);
+    const schemaErrors = this.validateSchema(schema, '', schema, selected);
+    if (schemaErrors.length > 0) {
+      throw new GtsSchemaError(schemaErrors.map((error) => `${error.fieldPath}: ${error.reason}`).join('; '));
     }
-    const errors: XGtsRefValidationError[] = [];
-    this.visitSchema(schema, schemaPath, rootSchema, errors);
-    return errors;
-  }
-
-  private visitInstance(
-    instance: any,
-    schema: any,
-    path: string,
-    rootSchema: any,
-    errors: XGtsRefValidationError[],
-    depth: number = 0,
-    pathBudget: { count: number } = { count: 0 }
-  ): void {
-    if (!schema) return;
-
-    // `$ref` following is the only way this traversal can recurse without
-    // being driven by the instance shrinking (a bare `$ref: "#"` re-enters
-    // the whole root schema), so it's the one place a cycle can actually
-    // blow the stack - bounded the same way `resolveTraitSchemaRefs` /
-    // `resolveSchemaFully` bound their own $ref/allOf recursion in
-    // src/store.ts: a per-chain depth ceiling (`MAX_SCHEMA_DEPTH`) plus a
-    // total-follows budget (`MAX_SCHEMA_PATHS`) shared across the whole
-    // top-level call via the mutable `pathBudget` holder. Failing closed
-    // with a bounded error (rather than silently stopping and reporting no
-    // violation) matches how every other depth guard in this codebase
-    // behaves - a schema this deep is per se suspicious, so surfacing it as
-    // a validation failure is preferable to hiding it.
-    if (
-      typeof schema.$ref === 'string' &&
-      (schema.$ref === '#' || schema.$ref.startsWith('#/') || hasUriPrefix(schema.$ref))
-    ) {
-      if (depth >= MAX_SCHEMA_DEPTH) {
-        errors.push({
-          fieldPath: path || '/',
-          value: instance,
-          refPattern: '',
-          reason: `x-gts-ref traversal via $ref nests deeper than ${MAX_SCHEMA_DEPTH} levels and cannot be resolved`,
-        });
-        return;
-      }
-      pathBudget.count++;
-      if (pathBudget.count > MAX_SCHEMA_PATHS) {
-        errors.push({
-          fieldPath: path || '/',
-          value: instance,
-          refPattern: '',
-          reason: `x-gts-ref traversal $ref graph has too many composition paths (exceeds ${MAX_SCHEMA_PATHS}) and cannot be resolved`,
-        });
-        return;
-      }
-      const resolved = this.resolveSchemaRef(rootSchema, schema.$ref);
-      if (resolved && typeof resolved === 'object' && !Array.isArray(resolved)) {
-        const resolvedRoot = hasUriPrefix(schema.$ref) ? resolved : rootSchema;
-        this.visitInstance(instance, resolved, path, resolvedRoot, errors, depth + 1, pathBudget);
-      } else {
-        // The pointer either resolves nowhere (`resolveSchemaRef` returned
-        // `null`/`undefined`) or resolves to something that isn't usable as
-        // a schema (e.g. into a `default` value, an array index, or any
-        // other non-object). Either way, the subtree behind this `$ref`
-        // cannot be validated - failing open here (silently stopping and
-        // reporting no violation) would let a typo'd, stale, or
-        // non-schema-resolving pointer hide every x-gts-ref constraint
-        // beneath it. Fail closed instead, matching the depth/path-budget
-        // guards above and `resolveTraitSchemaRefs` in src/store.ts, which
-        // throws on an unresolvable reference.
-        errors.push({
-          fieldPath: path || '/',
-          value: instance,
-          refPattern: '',
-          reason: `Cannot resolve $ref '${schema.$ref}' for x-gts-ref traversal`,
-        });
-      }
-      return;
+    assertSafeSchemaPatterns(schema);
+    const validate = this.compile(schema);
+    const previous = this.context;
+    this.context = { selectedTypeId: selected };
+    let results: Array<{ issue: ValidationIssue; location?: string }>;
+    try {
+      results = validate.nodes(instance);
+    } finally {
+      this.context = previous;
     }
-
-    // Check for x-gts-ref constraint
-    if (schema['x-gts-ref'] !== undefined) {
-      if (typeof instance === 'string') {
-        const err = this.validateRefValue(instance, schema['x-gts-ref'], path);
-        if (err) {
-          errors.push(err);
-        }
-      }
-    }
-
-    // Recurse into object properties. `schema.type === 'object'` is not
-    // required: a schema that only declares `required` / `properties` /
-    // `additionalProperties` (no explicit `type`) is still an object schema
-    // under JSON Schema semantics, and x-gts-ref enforcement must not depend
-    // on an explicit `type: object` declaration.
-    if (this.isObjectLikeSchema(schema) && schema.properties) {
-      if (instance && typeof instance === 'object') {
-        for (const propName in schema.properties) {
-          if (propName in instance) {
-            const propPath = appendJsonPointer(path, propName);
-            this.visitInstance(
-              instance[propName],
-              schema.properties[propName],
-              propPath,
-              rootSchema,
-              errors,
-              depth,
-              pathBudget
-            );
-          }
-        }
-      }
-    }
-
-    // Recurse into array items
-    if (schema.type === 'array' && Array.isArray(instance)) {
-      if (Array.isArray(schema.prefixItems)) {
-        schema.prefixItems.forEach((itemSchema: any, idx: number) => {
-          if (idx < instance.length) {
-            const itemPath = appendJsonPointer(path, idx);
-            this.visitInstance(instance[idx], itemSchema, itemPath, rootSchema, errors, depth, pathBudget);
-          }
-        });
-        if (schema.items && !Array.isArray(schema.items)) {
-          instance.slice(schema.prefixItems.length).forEach((item, offset) => {
-            const idx = schema.prefixItems.length + offset;
-            const itemPath = appendJsonPointer(path, idx);
-            this.visitInstance(item, schema.items, itemPath, rootSchema, errors, depth, pathBudget);
-          });
-        }
-      } else if (Array.isArray(schema.items)) {
-        schema.items.forEach((itemSchema: any, idx: number) => {
-          if (idx < instance.length) {
-            const itemPath = appendJsonPointer(path, idx);
-            this.visitInstance(instance[idx], itemSchema, itemPath, rootSchema, errors, depth, pathBudget);
-          }
-        });
-        if (schema.additionalItems && !Array.isArray(schema.additionalItems)) {
-          instance.slice(schema.items.length).forEach((item, offset) => {
-            const idx = schema.items.length + offset;
-            const itemPath = appendJsonPointer(path, idx);
-            this.visitInstance(item, schema.additionalItems, itemPath, rootSchema, errors, depth, pathBudget);
-          });
-        }
-      } else if (schema.items) {
-        instance.forEach((item, idx) => {
-          const itemPath = appendJsonPointer(path, idx);
-          this.visitInstance(item, schema.items, itemPath, rootSchema, errors, depth, pathBudget);
-        });
-      }
-    }
-
-    // Recurse into combinator subschemas
-    if (Array.isArray(schema.allOf)) {
-      for (const subSchema of schema.allOf) {
-        this.visitInstance(instance, subSchema, path, rootSchema, errors, depth, pathBudget);
-      }
-    }
-
-    if (Array.isArray(schema.anyOf)) {
-      // Only enforce when all branches have x-gts-ref; mixed branches may be valid via non-x-gts-ref path (the engine handles that)
-      const refBranches = schema.anyOf.filter((s: any) => this.containsXGtsRef(s));
-      if (refBranches.length > 0 && refBranches.length === schema.anyOf.length) {
-        const branchResults = refBranches.map((subSchema: any) => {
-          const branchErrors: XGtsRefValidationError[] = [];
-          this.visitInstance(instance, subSchema, path, rootSchema, branchErrors, depth, pathBudget);
-          return branchErrors;
-        });
-        const anyPassed = branchResults.some((errs: XGtsRefValidationError[]) => errs.length === 0);
-        if (!anyPassed) {
-          for (const branchErrors of branchResults) {
-            errors.push(...branchErrors);
-          }
-        }
-      }
-    }
-
-    if (Array.isArray(schema.oneOf)) {
-      // Only enforce when all branches have x-gts-ref; mixed branches can't be coordinated with the engine's branch selection
-      const refBranches = schema.oneOf.filter((s: any) => this.containsXGtsRef(s));
-      if (refBranches.length > 0 && refBranches.length === schema.oneOf.length) {
-        const branchResults = refBranches.map((subSchema: any) => {
-          const branchErrors: XGtsRefValidationError[] = [];
-          this.visitInstance(instance, subSchema, path, rootSchema, branchErrors, depth, pathBudget);
-          return branchErrors;
-        });
-        const passingCount = branchResults.filter((errs: XGtsRefValidationError[]) => errs.length === 0).length;
-        if (passingCount === 0) {
-          for (const branchErrors of branchResults) {
-            errors.push(...branchErrors);
-          }
-        } else if (passingCount > 1) {
-          errors.push({
-            fieldPath: path || '/',
-            value: instance,
-            refPattern: '',
-            reason: `Value matches ${passingCount} oneOf branches but must match exactly one`,
-          });
-        }
-      }
-    }
-  }
-
-  /**
-   * Whether a schema describes an object even without an explicit
-   * `type: "object"` - i.e. it declares `properties`, `required` or
-   * `additionalProperties`. JSON Schema does not require `type` to be
-   * present for these keywords to apply.
-   */
-  private isObjectLikeSchema(schema: any): boolean {
-    if (!schema || typeof schema !== 'object') return false;
-    if (schema.type === 'object') return true;
-    if (schema.type !== undefined) return false;
-    return (
-      schema.properties !== undefined || schema.required !== undefined || schema.additionalProperties !== undefined
-    );
-  }
-
-  /** Resolve local and GTS `$ref` targets for x-gts-ref traversal. */
-  private resolveSchemaRef(rootSchema: any, ref: string): any {
-    if (ref === '#') return rootSchema;
-    if (hasUriPrefix(ref)) {
-      return this.store?.get(stripUriPrefix(ref))?.content ?? null;
-    }
-    if (!ref.startsWith('#/')) return null;
-
-    const parts = ref
-      .slice(2)
-      .split('/')
-      .map((part) => decodeURIComponent(part).replace(/~1/g, '/').replace(/~0/g, '~'));
-
-    let current: any = rootSchema;
-    for (const part of parts) {
-      if (!current || typeof current !== 'object') return null;
-      current = current[part];
-      if (current === undefined) return null;
-    }
-    return current;
-  }
-
-  private visitSchema(schema: any, path: string, rootSchema: any, errors: XGtsRefValidationError[]): void {
-    if (!schema || typeof schema !== 'object') return;
-
-    // Check for x-gts-ref field
-    if (schema['x-gts-ref'] !== undefined) {
-      const refPath = appendJsonPointer(path, 'x-gts-ref');
-      const err = this.validateRefPattern(schema['x-gts-ref'], refPath);
-      if (err) {
-        errors.push(err);
-      }
-    }
-
-    visitJsonSubschemas(schema, path, (subschema, subschemaPath) => {
-      this.visitSchema(subschema, subschemaPath, rootSchema, errors);
+    if (results.length === 0) return [];
+    const issues = results.map(({ issue }) => issue);
+    // The location of the node that reported an issue; its `schemaPath` cannot
+    // always locate it (the engine repeats locations under nested conditionals).
+    const locations = new Map(results.map(({ issue, location }) => [issue, location]));
+    const conditions = new Set<string>();
+    const errors = issues.flatMap((issue) => {
+      if (isGtsRefKeyword(issue.keyword) || COMPOSITION_KEYWORDS.has(issue.keyword)) return [issue];
+      const condition = conditionalIssue(issue, schema, locations.get(issue));
+      if (condition === undefined) return [issue];
+      const key = `${condition.instancePath}\n${condition.schemaPath}`;
+      if (conditions.has(key)) return [];
+      conditions.add(key);
+      return [condition];
     });
+    // An applicator can fail with no failing reference keyword beneath it
+    // (`not` around a match, `oneOf` with several). Its failure is reported
+    // when a subschema deciding it reaches a reference keyword through the
+    // schema locations it applies - local `$ref`s followed; literal data such
+    // as `const`, and declarations no `$ref` uses, not.
+    const composed = errors.filter((error) => COMPOSITION_KEYWORDS.has(error.keyword));
+    let involved: ValidationIssue[] = [];
+    if (composed.length > 0) {
+      const resources = new Map<object, Resource>();
+      forEachSchemaNode(schema, (node, _path, resource) => resources.set(node, resource));
+      involved = composed.filter((error) => {
+        const location = locations.get(error);
+        const reporter = location === undefined ? undefined : pointerTarget(schema, location);
+        const parent =
+          reporter !== null && typeof reporter === 'object' && resources.has(reporter)
+            ? reporter
+            : parentSchemaOf(error, schema);
+        let reaches = false;
+        forEachSchemaNode(
+          schema,
+          (node) => (reaches ||= GTS_REF_KEYWORDS.some((keyword) => keyword in node)),
+          schema,
+          undefined,
+          {
+            subschemas: applicatorSubschemas(error, parent),
+            resource: (parent && typeof parent === 'object' && resources.get(parent)) || { schema, path: '' },
+          }
+        );
+        return reaches;
+      });
+    }
+    const reported = [...errors.filter((error) => isGtsRefKeyword(error.keyword)), ...involved];
+    // An applicator whose failure a reported failure beneath it, at the same
+    // instance location or below, already explains adds nothing.
+    return errors
+      .filter(
+        (error) =>
+          reported.includes(error) &&
+          (isGtsRefKeyword(error.keyword) ||
+            !reported.some((other) => other.schemaPath.startsWith(`${error.schemaPath}/`) && isAtOrBelow(other, error)))
+      )
+      .map((error) => {
+        const fieldPath = `${instancePath}${instancePathOf(error)}` || '/';
+        const value = pointerTarget(instance, instancePathOf(error));
+        return isGtsRefKeyword(error.keyword)
+          ? {
+              keyword: error.keyword as GtsRefKeyword,
+              fieldPath,
+              value,
+              refPattern: typeof error.params?.operand === 'string' ? error.params.operand : '',
+              reason: error.message || 'reference validation failed',
+            }
+          : {
+              fieldPath,
+              value,
+              refPattern: '',
+              reason: `${error.keyword}: ${error.message || 'validation failed'} (with reference keywords)`,
+            };
+      });
   }
 
-  private validateRefValue(value: string, refPattern: any, fieldPath: string): XGtsRefValidationError | null {
-    if (typeof refPattern !== 'string') {
-      return {
-        fieldPath,
-        value,
-        refPattern: String(refPattern),
-        reason: `Value must be a string, got ${typeof refPattern}`,
-      };
-    }
-
-    let resolvedPattern = refPattern;
-    if (this.isSelfReference(refPattern)) {
-      if (!this.selectedTypeId) {
-        return {
-          fieldPath,
-          value,
-          refPattern,
-          reason: 'Cannot resolve /$id without a selected GTS Type Schema',
-        };
+  /**
+   * Compiles `schema` once into a test of whether it accepts a value, with
+   * reference keywords checked structurally (no registry) and `/$id` naming
+   * `selectedTypeId`. Used to confirm counterexamples when comparing
+   * schemas. Throws on a schema error.
+   */
+  acceptor(schema: any, selectedTypeId?: string, dialectSource: any = schema): (value: unknown) => boolean {
+    if (typeof schema === 'boolean') return () => schema;
+    assertSafeSchemaPatterns(schema, dialectSource);
+    // An identity would register the fragment as a resource of its own.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { $id, $schema, ...fragment } = schema;
+    const validate = this.compile(fragment, dialectSource);
+    return (value) => {
+      const previous = this.context;
+      this.context = { selectedTypeId };
+      try {
+        return validate.issues(value).length === 0;
+      } finally {
+        this.context = previous;
       }
-      resolvedPattern = this.selectedTypeId;
-    }
-
-    // Validate against GTS pattern
-    return this.validateGtsPattern(value, resolvedPattern, fieldPath);
-  }
-
-  private validateRefPattern(refPattern: any, fieldPath: string): XGtsRefValidationError | null {
-    if (typeof refPattern !== 'string') {
-      return {
-        fieldPath,
-        value: refPattern,
-        refPattern: '',
-        reason: `x-gts-ref value must be a string, got ${typeof refPattern}`,
-      };
-    }
-
-    // Case 1: Absolute GTS pattern
-    if (refPattern.startsWith(GTS_PREFIX)) {
-      return this.validateGtsIDOrPattern(refPattern, fieldPath);
-    }
-
-    if (this.isSelfReference(refPattern)) {
-      return null;
-    }
-
-    return {
-      fieldPath,
-      value: refPattern,
-      refPattern,
-      reason: `Invalid x-gts-ref value: '${refPattern}' must be a GTS identifier, wildcard, or '${X_GTS_REF_SELF}'`,
     };
   }
 
-  private validateGtsIDOrPattern(pattern: string, fieldPath: string): XGtsRefValidationError | null {
-    if (pattern === GTS_PREFIX + '*') {
-      return null; // Valid wildcard
-    }
-
-    if (pattern.includes('*')) {
-      // Wildcard pattern - validate prefix
-      const prefix = pattern.replace('*', '');
-      if (!prefix.startsWith(GTS_PREFIX)) {
-        return {
-          fieldPath,
-          value: pattern,
-          refPattern: pattern,
-          reason: `Invalid GTS wildcard pattern: ${pattern}`,
-        };
-      }
-      return null;
-    }
-
-    // Specific GTS ID
-    if (!Gts.isValidGtsID(pattern)) {
-      return {
-        fieldPath,
-        value: pattern,
-        refPattern: pattern,
-        reason: `Invalid GTS identifier: ${pattern}`,
-      };
-    }
-    return null;
-  }
-
-  private validateGtsPattern(value: string, pattern: string, fieldPath: string): XGtsRefValidationError | null {
-    // Shared pattern matching (also used by the structural x-gts-ref keyword).
-    const reason = gtsPatternViolation(value, pattern);
-    if (reason !== null) {
-      return { fieldPath, value, refPattern: pattern, reason };
-    }
-
-    // The referenced value must resolve to a registered entity when a store is
-    // available and existence enforcement is enabled. Existence is enforced
-    // uniformly for all constraint forms, including wildcard patterns and the
-    // bare `gts.*` wildcard (gts-spec §9.6): the value has already been checked
-    // to be a well-formed GTS id that matches the pattern, so it only remains
-    // to confirm at least one registered type/instance resolves it.
-    if (this.store && this.mode !== GtsRefValidationMode.None) {
-      // A reference to the entity currently being validated (e.g. an instance
-      // whose x-gts-ref value is its own id) is satisfied by that entity
-      // itself. Under validate-before-register the entity is not yet in the
-      // registry, so a plain lookup would spuriously fail; and its validity is
-      // already being decided by this very call, so there is nothing further
-      // to check. This mirrors the transitive cycle guard that handled an
-      // already-registered self-reference, without enqueueing the unregistered
-      // self as a dependency (which `validateEntityTransitive` would reject as
-      // "Entity not found" before its own visiting-guard could apply).
-      if (this.selfId !== undefined && value === this.selfId) {
-        return null;
-      }
-      const entity = this.store.get(value);
-      if (!entity) {
-        return {
-          fieldPath,
-          value,
-          refPattern: pattern,
-          reason: `Referenced entity '${value}' not found in registry`,
-        };
-      }
-      this.referencedIds.add(value);
-    }
-
-    return null;
-  }
-
-  /** Check registry existence for concrete, wildcard, and /$id constraints. */
-  validateSchemaRefExistence(schema: any, schemaPath: string = '', selectedTypeId?: string): XGtsRefValidationError[] {
-    const errors: XGtsRefValidationError[] = [];
-    if (!this.store || this.mode === GtsRefValidationMode.None) {
-      return errors;
-    }
-    this.visitSchemaRefExistence(schema, schemaPath, this.getSelectedTypeId(schema, selectedTypeId), errors);
-    return errors;
-  }
-
-  private visitSchemaRefExistence(
+  /**
+   * Compiles `schema` in the dialect of `dialectSource` (Draft-07 when it
+   * declares no supported `$schema`); a `$ref` to another resource is a
+   * schema error.
+   */
+  private compile(
     schema: any,
-    path: string,
-    selectedTypeId: string | undefined,
-    errors: XGtsRefValidationError[]
-  ): void {
-    if (!schema || typeof schema !== 'object') return;
-
-    const ref = schema['x-gts-ref'];
-    const refPath = appendJsonPointer(path, 'x-gts-ref');
-    const resolvedRef = this.isSelfReference(ref) ? selectedTypeId : ref;
-    if (typeof resolvedRef === 'string' && resolvedRef.startsWith(GTS_PREFIX)) {
-      if (resolvedRef.includes('*')) {
-        const matches =
-          this.store?.getAll?.().filter((entity) => Gts.matchIDPattern(entity.id, resolvedRef).match) ?? [];
-        if (matches.length === 0) {
-          errors.push({
-            fieldPath: refPath,
-            value: ref,
-            refPattern: resolvedRef,
-            reason: `x-gts-ref wildcard constraint '${resolvedRef}' has no registered match`,
-          });
-        } else {
-          this.referencedWildcardPatterns.add(resolvedRef);
-        }
-      } else if (this.store && !this.store.get(resolvedRef)) {
-        errors.push({
-          fieldPath: refPath,
-          value: ref,
-          refPattern: resolvedRef,
-          reason: `x-gts-ref constraint type '${resolvedRef}' is not registered`,
-        });
-      } else {
-        this.referencedIds.add(resolvedRef);
-      }
+    dialectSource: any = schema
+  ): { issues: CompiledSchema['validate']; nodes: CompiledSchema['validateNodes'] } {
+    let dialect: SchemaDialect = 'draft-07';
+    try {
+      dialect = dialectOf(dialectSource);
+    } catch {
+      // Schemas without a supported `$schema` are checked as Draft-07.
     }
-
-    visitJsonSubschemas(schema, path, (subschema, subschemaPath) => {
-      this.visitSchemaRefExistence(subschema, subschemaPath, selectedTypeId, errors);
-    });
-  }
-
-  private containsXGtsRef(schema: any): boolean {
-    if (!schema || typeof schema !== 'object') return false;
-    if (schema['x-gts-ref'] !== undefined) return true;
-    for (const value of Object.values(schema)) {
-      if (Array.isArray(value)) {
-        if (value.some((item) => this.containsXGtsRef(item))) return true;
-      } else if (value && typeof value === 'object') {
-        if (this.containsXGtsRef(value)) return true;
-      }
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { $schema, ...rest } = schema;
+    const source = { $schema: canonicalDialectUri(dialect), ...rest };
+    try {
+      const compiled = this.engine.compile(source);
+      return {
+        issues: (data) => compiled.validate(data),
+        nodes: (data) => compiled.validateNodes(data),
+      };
+    } catch (error) {
+      if (error instanceof GtsSchemaError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      const ref = /\$ref[^']*'([^']*)'/.exec(message);
+      if (ref === null) throw error;
+      throw new GtsSchemaError(`Cannot resolve $ref '${ref[1]}' without a registry`);
     }
-    return false;
   }
 }

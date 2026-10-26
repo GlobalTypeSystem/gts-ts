@@ -191,8 +191,8 @@ describe('validate=true batch staging commit integrity', () => {
   const get = (server: GtsServer, url: string) => server.instance.inject({ method: 'GET', url });
 
   // A survivor must never be published when a sibling it depends on is itself
-  // discarded. Under any-present ref validation, B carries an x-gts-ref to A,
-  // and A carries an x-gts-ref to a type that is never registered. Validated
+  // discarded. Under any-present ref validation, B carries an x-gts-type-ref to A,
+  // and A carries an x-gts-type-ref to a type that is never registered. Validated
   // against the fully staged set, B passes (A is present) while A fails (its
   // target is missing) - a single-pass implementation would then commit B with
   // a dangling reference to the discarded A. The iterative discard-then-
@@ -205,13 +205,13 @@ describe('validate=true batch staging commit integrity', () => {
           $schema: DRAFT7,
           $id: 'gts://gts.x.tsdep._.a.v1~',
           type: 'object',
-          properties: { r: { type: 'string', 'x-gts-ref': 'gts.x.tsdep._.missing.v1~' } },
+          properties: { r: { type: 'string', 'x-gts-type-ref': 'gts.x.tsdep._.missing.v1~' } },
         },
         {
           $schema: DRAFT7,
           $id: 'gts://gts.x.tsdep._.b.v1~',
           type: 'object',
-          properties: { x: { type: 'string', 'x-gts-ref': 'gts.x.tsdep._.a.v1~' } },
+          properties: { x: { type: 'string', 'x-gts-type-ref': 'gts.x.tsdep._.a.v1~' } },
         },
       ];
       const body = JSON.parse(

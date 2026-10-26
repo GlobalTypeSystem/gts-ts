@@ -140,3 +140,44 @@ describe('F4: normalization is skipped for cached compiled schemas', () => {
     expect(store.normalizedSchemaCache.has(typeId)).toBe(false);
   });
 });
+
+describe('reference operand errors in the store', () => {
+  // Review finding: one pooled schema with an invalid operand failed every
+  // later compile in its dialect.
+  test('a registered schema with an invalid operand does not break unrelated validation', () => {
+    const gts = new GTS({ validateRefs: false });
+    const goodId = 'gts.x.unit.stf.pool_good.v1~';
+    const badId = 'gts.x.unit.stf.pool_bad.v1~';
+    const instanceId = `${goodId}x.unit.stf.pool.v1`;
+    gts.register({ $id: `gts://${goodId}`, $schema: DRAFT7, type: 'object', properties: { a: { type: 'string' } } });
+    gts.register({ $id: `gts://${instanceId}`, type: goodId, a: 'x' } as any);
+    gts.register({
+      $id: `gts://${badId}`,
+      $schema: DRAFT7,
+      type: 'object',
+      properties: { r: { type: 'string', 'x-gts-type-ref': 'not-a-gts-id' } },
+    });
+
+    expect(gts.validateInstance(instanceId)).toMatchObject({ ok: true });
+    const bad = gts.validateSchema(badId);
+    expect(bad.ok).toBe(false);
+    expect(bad.errors).toEqual([
+      expect.objectContaining({ instancePath: '/properties/r/x-gts-type-ref', keyword: 'x-gts-type-ref' }),
+    ]);
+  });
+
+  // Review finding: a schema error with no reference keyword was labelled a
+  // reference failure with keyword `x-gts-type-ref`.
+  test('a local $ref that names no schema is a schema error, not a reference failure', () => {
+    const gts = new GTS({ validateRefs: false });
+    const typeId = 'gts.x.unit.stf.dangling.v1~';
+    const result = gts.validateSchemaDocument(
+      { $id: `gts://${typeId}`, $schema: DRAFT7, type: 'object', properties: { a: { $ref: '#/definitions/missing' } } },
+      typeId
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/^Invalid schema: .*Cannot resolve \$ref/);
+    expect(result.error).not.toContain('GTS reference validation failed');
+    expect(result.errors).toEqual([expect.objectContaining({ instancePath: '/properties/a/$ref', keyword: 'schema' })]);
+  });
+});

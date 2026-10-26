@@ -484,12 +484,28 @@
     "schemaPath": "#/uniqueItems"
   },
   {
-    "code": "x-gts-ref",
+    "code": "x-gts-type-ref",
     "schema": {
-      "x-gts-ref": "gts.acme.core.events.a.v1~"
+      "x-gts-type-ref": "gts.acme.core.events.a.v1~"
     },
     "data": "gts.acme.core.events.b.v1~",
-    "schemaPath": "#/x-gts-ref"
+    "schemaPath": "#/x-gts-type-ref"
+  },
+  {
+    "code": "x-gts-instance-ref",
+    "schema": {
+      "x-gts-instance-ref": "gts.acme.core.events.a.v1~*"
+    },
+    "data": "gts.acme.core.events.a.v1~",
+    "schemaPath": "#/x-gts-instance-ref"
+  },
+  {
+    "code": "x-gts-pattern-ref",
+    "schema": {
+      "x-gts-pattern-ref": "gts.acme.core.*"
+    },
+    "data": "gts.other.*",
+    "schemaPath": "#/x-gts-pattern-ref"
   },
   {
     "code": "contains-min-error",

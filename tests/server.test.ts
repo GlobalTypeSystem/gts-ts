@@ -34,6 +34,61 @@ describe('unsupported schema regex', () => {
   });
 });
 
+describe('dangling local $ref', () => {
+  // Review finding: it was reported as a GTS reference failure.
+  test('returns 422 as a schema error, not a reference failure (validate=false)', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    try {
+      const response = await server.instance.inject({
+        method: 'POST',
+        url: '/entities?validate=false',
+        payload: {
+          $id: 'gts://gts.x.unit.srv.dangling.v1~',
+          $schema: DRAFT7,
+          type: 'object',
+          properties: { a: { $ref: '#/definitions/missing' } },
+        },
+      });
+      expect(response.statusCode).toBe(422);
+      expect(response.json().error).toMatch(/^Invalid schema: .*Cannot resolve \$ref/);
+      expect(response.json().error).not.toContain('GTS reference validation failed');
+    } finally {
+      await server.stop();
+    }
+  });
+});
+
+describe('POST /entities/bulk', () => {
+  // Review finding: the bulk route skipped the always-on operand check.
+  test('rejects an invalid reference operand without registering it', async () => {
+    const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
+    const bad = 'gts.x.unit.srv.bulkbad.v1~';
+    const good = 'gts.x.unit.srv.bulkgood.v1~';
+    const schema = (id: string, ref: Record<string, unknown>) => ({
+      $id: `gts://${id}`,
+      $schema: DRAFT7,
+      type: 'object',
+      properties: { ref: { type: 'string', ...ref } },
+    });
+    try {
+      const response = await server.instance.inject({
+        method: 'POST',
+        url: '/entities/bulk',
+        payload: [schema(bad, { 'x-gts-type-ref': 'not-a-gts-id' }), schema(good, {})],
+      });
+      expect(response.json()).toMatchObject({
+        ok: false,
+        registered: [good],
+        errors: [expect.stringMatching(/^GTS reference validation failed: .*x-gts-type-ref/)],
+      });
+      const stored = await server.instance.inject({ method: 'GET', url: `/entities/${encodeURIComponent(bad)}` });
+      expect(stored.json().ok).toBe(false);
+    } finally {
+      await server.stop();
+    }
+  });
+});
+
 describe('POST /type-schemas', () => {
   test('rejects a non-array body with 422', async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
@@ -334,10 +389,10 @@ describe('POST /entities?validate=true accepts a self-referencing new instance (
     $schema: DRAFT7,
     type: 'object',
     required: ['self'],
-    properties: { self: { type: 'string', 'x-gts-ref': 'gts.*' } },
+    properties: { self: { type: 'string', 'x-gts-instance-ref': 'gts.*' } },
   };
 
-  test("an x-gts-ref value equal to the instance's own id validates before registration", async () => {
+  test("an x-gts-instance-ref value equal to the instance's own id validates before registration", async () => {
     const server = new GtsServer({ host: '127.0.0.1', port: 0, verbose: 0 });
     expect((await server.instance.inject({ method: 'POST', url: '/entities', payload: schema })).statusCode).toBe(200);
 
@@ -1500,7 +1555,7 @@ describe('configurable entity update mode (mirrors gts-go --allow-entity-updates
       $id: `gts://${id}`,
       $schema: DRAFT7,
       type: 'object',
-      properties: { ref: { type: 'string', 'x-gts-ref': 'gts.x.unit.srv.missing.v1~' } },
+      properties: { ref: { type: 'string', 'x-gts-type-ref': 'gts.x.unit.srv.missing.v1~' } },
     };
 
     expect((await postEntity(server, content)).statusCode).toBe(200);
@@ -1524,7 +1579,7 @@ describe('configurable entity update mode (mirrors gts-go --allow-entity-updates
     const replacement = {
       ...original,
       title: 'replacement',
-      properties: { ref: { type: 'string', 'x-gts-ref': 'gts.x.unit.srv.missing.v1~' } },
+      properties: { ref: { type: 'string', 'x-gts-type-ref': 'gts.x.unit.srv.missing.v1~' } },
     };
 
     expect((await postEntity(server, original)).statusCode).toBe(200);

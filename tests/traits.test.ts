@@ -1247,7 +1247,7 @@ describe('OP#13 - a single-level x-gts-traits-schema is checked for internal sat
  * verdict of `unknown` (the engine does not model this keyword) was treated
  * identically to a proven `incompatible`, hard-rejecting any descendant
  * trait-schema narrowing that merely used a keyword outside the `KEYWORDS`
- * table - even GTS's own `x-gts-ref`.
+ * table - even GTS's own reference keywords.
  */
 describe('OP#13 - trait narrowing via an unmodeled keyword is not a satisfiability failure', () => {
   function narrow(id: string, kidId: string, baseProperty: any, kidProperty: any) {
@@ -1299,7 +1299,7 @@ describe('OP#13 - trait narrowing via an unmodeled keyword is not a satisfiabili
     expect(validate().ok).toBe(true);
   });
 
-  test('adding x-gts-ref in a descendant is accepted, not rejected as unsatisfiable', () => {
+  test('adding x-gts-type-ref in a descendant is accepted, not rejected as unsatisfiable', () => {
     const patternSchemaId = 'gts.x.unit.trunmodxref.pattern.v1~';
     const gts = new GTS({ validateRefs: false });
     gts.register(baseType(patternSchemaId));
@@ -1317,7 +1317,7 @@ describe('OP#13 - trait narrowing via an unmodeled keyword is not a satisfiabili
         'x-gts-abstract': true,
         'x-gts-traits-schema': {
           type: 'object',
-          properties: { v: { type: 'string', 'x-gts-ref': patternSchemaId } },
+          properties: { v: { type: 'string', 'x-gts-type-ref': patternSchemaId } },
         },
       })
     );
@@ -1846,8 +1846,8 @@ describe('OP#13 - a diamond-shaped x-gts-traits-schema chain is bounded by a pat
   });
 });
 
-describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6)', () => {
-  test('a materialized trait value that violates x-gts-ref fails completeness', () => {
+describe('OP#13 - entity references are enforced against materialized trait values (§9.7.5)', () => {
+  test('a materialized trait value that violates x-gts-type-ref fails', () => {
     const gts = new GTS({ validateRefs: false });
     const topicSchemaId = 'gts.x.unit.trxrefbad.topic.v1~';
     gts.register(baseType(topicSchemaId));
@@ -1858,7 +1858,7 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
         'x-gts-traits-schema': {
           type: 'object',
           required: ['topicRef'],
-          properties: { topicRef: { type: 'string', 'x-gts-ref': topicSchemaId } },
+          properties: { topicRef: { type: 'string', 'x-gts-type-ref': topicSchemaId } },
         },
         'x-gts-traits': { topicRef: 'not-a-valid-gts-ref-at-all' },
       })
@@ -1866,10 +1866,10 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
 
     const result = gts.validateEntity(baseId);
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/x-gts-ref/);
+    expect(result.error).toMatch(/x-gts-type-ref/);
   });
 
-  test('a materialized trait value that matches x-gts-ref passes completeness', () => {
+  test('a materialized trait value that matches x-gts-type-ref passes completeness', () => {
     const gts = new GTS({ validateRefs: false });
     const topicSchemaId = 'gts.x.unit.trxrefgood.topic.v1~';
     gts.register(baseType(topicSchemaId));
@@ -1880,10 +1880,10 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
         'x-gts-traits-schema': {
           type: 'object',
           required: ['topicRef'],
-          properties: { topicRef: { type: 'string', 'x-gts-ref': topicSchemaId } },
+          properties: { topicRef: { type: 'string', 'x-gts-type-ref': topicSchemaId } },
         },
-        // A registered entity id that matches the x-gts-ref pattern is a valid
-        // reference value; the schema's own id qualifies.
+        // A registered Type ID in the operand's scope is a valid reference
+        // value; the operand type itself qualifies.
         'x-gts-traits': { topicRef: topicSchemaId },
       })
     );
@@ -1891,27 +1891,9 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
     expect(gts.validateEntity(baseId).ok).toBe(true);
   });
 
-  test('a materialized trait value matching x-gts-ref FAILS completeness when the referenced entity is not registered (reconciled: issue #107)', () => {
-    // Previously this pinned the opposite behavior: `x-gts-traits` values
-    // were treated as schema-level example/default data documenting a
-    // type's shape, not live references, so only GTS-ID pattern/format
-    // validity was enforced and registry existence was deliberately skipped
-    // (the referenced entity below was "deliberately never registered").
-    // gts-spec v0.13.3 issue #107 reverses that rationale: a syntactically
-    // valid, correctly-prefixed `x-gts-traits` value that names an
-    // unregistered entity must now fail validation, matching the canonical
-    // conformance case `TestCaseOp13_TraitRef_TopicRefNonexistent`. This is
-    // not gated on `validateRefs` (still `false` here, the same
-    // configuration the server uses) - that option only governs the
-    // separate live-reference checks elsewhere.
-    //
-    // The registry-existence check only fires once the referenced type
-    // itself is registered (an x-gts-ref naming a wholly unregistered/
-    // foreign namespace is documentation, not a live reference - see
-    // `TestCaseOp13_TraitsValid_AllResolved` et al in the canonical suite,
-    // which reference `gts.x.core.events.topic.v1~` without ever
-    // registering it and still expect success), so `topicSchemaId` must be
-    // registered here for this test to actually exercise the check.
+  test('a materialized trait value naming an unregistered instance fails (issue #107)', () => {
+    // Under the default `any-valid` policy a trait value must name a
+    // registered, valid entity, whichever layer supplied it.
     const gts = new GTS({ validateRefs: false });
     const topicSchemaId = 'gts.x.unit.trxrefunreg.topic.v1~';
     gts.register(baseType(topicSchemaId));
@@ -1922,7 +1904,7 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
         'x-gts-traits-schema': {
           type: 'object',
           required: ['topicRef'],
-          properties: { topicRef: { type: 'string', 'x-gts-ref': topicSchemaId } },
+          properties: { topicRef: { type: 'string', 'x-gts-instance-ref': topicSchemaId } },
         },
         'x-gts-traits': { topicRef: `${topicSchemaId}x.unit._.orders.v1` },
       })
@@ -1933,7 +1915,7 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
     expect(result.error).toMatch(/not found in registry/);
   });
 
-  test('an abstract type with an unresolved x-gts-ref-constrained trait is still exempt', () => {
+  test('an abstract type need not supply an x-gts-instance-ref-constrained trait', () => {
     const gts = new GTS({ validateRefs: false });
     const topicSchemaId = 'gts.x.unit.trxrefabs.topic.v1~';
     gts.register(baseType(topicSchemaId));
@@ -1945,7 +1927,7 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
         'x-gts-traits-schema': {
           type: 'object',
           required: ['topicRef'],
-          properties: { topicRef: { type: 'string', 'x-gts-ref': topicSchemaId } },
+          properties: { topicRef: { type: 'string', 'x-gts-instance-ref': topicSchemaId } },
         },
       })
     );
@@ -1954,29 +1936,10 @@ describe('OP#13 - x-gts-ref is enforced against materialized trait values (§9.6
   });
 });
 
-// Phase 5 - trait-ref registry existence
+// Trait-value registry presence
 // (spec canonical suite: .gts-spec/tests/test_op13_schema_traits_validation.py,
-// TestCaseOp13_TraitRef_TopicRefNonexistent - "the regression scenario
-// described in issue #107").
-//
-// This is new behavior with no gts-rust reference to port: gts-rust's
-// `validate_trait_values` / `XGtsRefValidator` (schema_traits.rs,
-// x_gts_ref.rs) check only GTS-ID shape/pattern for trait values, never
-// registry presence. `validateSchemaTraits` in src/store.ts explicitly
-// mirrors that today - see the comment directly above its
-// `new XGtsRefValidator().validateInstance(materialized, effectiveSchema)`
-// call (no `store` argument passed) - and the pre-existing test in the
-// describe block directly above this one, 'a materialized trait value
-// matching x-gts-ref passes completeness even when the referenced entity is
-// not registered' (tests/traits.test.ts:1836), asserts exactly the opposite
-// of the canonical case below. That existing test is NOT modified here per
-// the phase-5 test-authoring rules (existing tests are never weakened,
-// skipped or rewritten in this step); it is flagged here as contradicting
-// the canonical behavior and will need to be reconciled once
-// registry-existence checking is implemented - most likely by
-// updating/removing it in the same change that makes the
-// `TODO(phase-5)` test below pass.
-describe('OP#13 - x-gts-ref trait values require a registered referent (canonical: TraitRef_TopicRefNonexistent, issue #107)', () => {
+// TestCaseOp13_TraitRef_TopicRefNonexistent - issue #107).
+describe('OP#13 - entity-reference trait values require a registered referent (canonical: TraitRef_TopicRefNonexistent, issue #107)', () => {
   test('control: a trait ref value with valid syntax, correct prefix, and a REGISTERED referent passes', () => {
     const gts = new GTS({ validateRefs: false });
     const topicTypeId = 'gts.x.test5.trefexist_ctl.topic.v1~';
@@ -1989,7 +1952,7 @@ describe('OP#13 - x-gts-ref trait values require a registered referent (canonica
       baseType(eventBaseId, {
         'x-gts-traits-schema': {
           type: 'object',
-          properties: { topicRef: { type: 'string', 'x-gts-ref': topicTypeId } },
+          properties: { topicRef: { type: 'string', 'x-gts-instance-ref': topicTypeId } },
         },
       })
     );
@@ -2011,7 +1974,7 @@ describe('OP#13 - x-gts-ref trait values require a registered referent (canonica
       baseType(eventBaseId, {
         'x-gts-traits-schema': {
           type: 'object',
-          properties: { topicRef: { type: 'string', 'x-gts-ref': topicTypeId } },
+          properties: { topicRef: { type: 'string', 'x-gts-instance-ref': topicTypeId } },
         },
       })
     );
@@ -2023,13 +1986,6 @@ describe('OP#13 - x-gts-ref trait values require a registered referent (canonica
     gts.register(derivedType(derivedBadId, eventBaseId, { 'x-gts-traits': { topicRef: nonexistentTopicId } }));
 
     const result = gts.validateEntity(derivedBadId);
-    // TODO(phase-5): fails today - `validateSchemaTraits` in src/store.ts
-    // calls `new XGtsRefValidator().validateInstance(...)` with no `store`
-    // argument, so only GTS-ID pattern validity is checked, never registry
-    // presence (result.ok is true today). The store itself has full access
-    // at that call site (`this.get(...)` is used throughout the same
-    // method), so passing `this` the way the instance-side check at
-    // src/store.ts:264 already does should be sufficient to add the check.
     expect(result.ok).toBe(false);
   });
 });

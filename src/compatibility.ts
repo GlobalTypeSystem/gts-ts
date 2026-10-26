@@ -10,6 +10,11 @@ import {
 } from './types';
 import { Gts } from './gts';
 import { compileSafePattern, RegexCompilationError, type SafePattern } from './regex-engine';
+import { clauseImplied, isComparedElsewhere, refClauses, usesRefKeywords, witnessCandidates } from './ref-scope';
+import { GTS_REF_KEYWORDS, isGtsRefKeyword, X_GTS_REF_SELF } from './ref-keywords';
+import { XGtsRefValidator } from './x-gts-ref';
+
+const SELF_OPERAND = JSON.stringify(X_GTS_REF_SELF);
 
 /**
  * Type Schema Evolution Compatibility (GTS spec 0.13 §4.2 - §4.5).
@@ -146,10 +151,10 @@ const KEYWORDS: Record<string, KeywordSpec> = {
   contains: { kind: 'unmodeled', values: 'schema' },
   additionalItems: { kind: 'unmodeled', values: 'schema' },
   uniqueItems: { kind: 'unmodeled' },
-  // Enforced against instances by OP#6 (§9.6), so it is an assertion, not an
-  // annotation - even though it shares the `x-gts-` prefix with the type-level
-  // keywords that genuinely are metadata.
-  'x-gts-ref': { kind: 'unmodeled' },
+  // Enforced against instances by OP#6 (§9.6), so they are assertions, not
+  // annotations - even though they share the `x-gts-` prefix with the
+  // type-level keywords that genuinely are metadata.
+  ...Object.fromEntries(GTS_REF_KEYWORDS.map((keyword): [string, KeywordSpec] => [keyword, { kind: 'unmodeled' }])),
 };
 
 /**
@@ -400,7 +405,8 @@ function impliedTypesOf(value: any): string[] {
     case 'boolean':
       return ['boolean'];
     case 'number':
-      return Number.isInteger(value) ? ['number', 'integer'] : ['number'];
+      // `number` covers `integer` (`widenNumeric`), so the narrower name is exact.
+      return Number.isInteger(value) ? ['integer'] : ['number'];
     case 'object':
       return ['object'];
     default:
@@ -408,18 +414,52 @@ function impliedTypesOf(value: any): string[] {
   }
 }
 
-function typeSet(schema: Schema): Set<string> | null {
-  if (typeof schema !== 'object' || schema === null) return null;
+function typeSet(schema: Schema, depth = 0): Set<string> | null {
+  if (typeof schema !== 'object' || schema === null || depth > MAX_SCHEMA_DEPTH) return null;
   const type = schema.type;
-  if (type !== undefined) return new Set(Array.isArray(type) ? type : [type]);
-
-  // No `type` keyword: a `const`/`enum` value set still implies a type - its
-  // values ARE that type - even though the schema never states it literally.
+  const declared = type === undefined ? null : new Set<string>(Array.isArray(type) ? type : [type]);
+  // A `const`/`enum` value set implies a type - its values ARE that type -
+  // and only the values the declared `type` admits are accepted.
   const values = fixedValues(schema);
-  if (values === null) return null; // genuinely unconstrained
-  const implied = new Set<string>();
-  for (const v of values) for (const t of impliedTypesOf(v)) implied.add(t);
-  return implied;
+  if (values !== null) {
+    const implied = values.flatMap(impliedTypesOf);
+    return new Set(declared === null ? implied : implied.filter((t) => typeSetAdmitsType(declared, t)));
+  }
+  if (declared !== null) return declared;
+
+  // Every value an `anyOf`/`oneOf` accepts is accepted by one of its branches.
+  for (const key of ['anyOf', 'oneOf']) {
+    const branches = schema[key];
+    if (!Array.isArray(branches) || branches.length === 0) continue;
+    const sets = branches.map((branch) => typeSet(branch, depth + 1));
+    if (sets.every((set): set is Set<string> => set !== null)) return new Set(sets.flatMap((set) => [...set]));
+  }
+  // Every value an `allOf` accepts has a type every typed conjunct admits.
+  if (Array.isArray(schema.allOf)) {
+    const sets = schema.allOf.map((branch: Schema) => typeSet(branch, depth + 1)).filter(Boolean) as Set<string>[];
+    if (sets.length > 0) {
+      const candidates = new Set(sets.flatMap((set) => [...set]));
+      return new Set([...candidates].filter((t) => sets.every((set) => typeSetAdmitsType(set, t))));
+    }
+  }
+  return null; // genuinely unconstrained, or constrained in a way not modeled
+}
+
+/** Whether a value of type `type` can satisfy a schema whose types are `types`. */
+function typeSetAdmitsType(types: Set<string>, type: string): boolean {
+  return types.has(type) || (type === 'integer' && types.has('number'));
+}
+
+/**
+ * Whether every value `schema` accepts has one of `types`, as far as its
+ * `type`, `const`/`enum`, `anyOf`, `oneOf` and `allOf` show, or `null` when
+ * they do not restrict its type at all.
+ */
+export function typesWithin(schema: Schema, types: string | string[]): boolean | null {
+  const own = typeSet(schema);
+  if (own === null) return null;
+  const accepted = new Set(Array.isArray(types) ? types : [types]);
+  return [...own].every((t) => typeSetAdmitsType(accepted, t));
 }
 
 /** `number` also accepts every `integer`, so widen the accepting side. */
@@ -549,6 +589,10 @@ function mergeSchemas(a: Schema, b: Schema): Schema {
       case 'items':
         out[key] = mergeSchemas(current, value);
         break;
+      case 'allOf':
+        // Residual conjuncts from earlier merges (see the default case).
+        out[key] = [...(Array.isArray(current) ? current : []), ...(Array.isArray(value) ? value : [])];
+        break;
       case 'minimum':
       case 'exclusiveMinimum':
       case 'minLength':
@@ -566,11 +610,65 @@ function mergeSchemas(a: Schema, b: Schema): Schema {
         }
         break;
       default:
-        // Keep the left-hand value; unmodeled divergence surfaces as `unknown`.
+        // Both values apply. Keeping only one would silently drop a conjunct,
+        // so a differing one is kept as a residual `allOf` branch; the
+        // comparison reasons about it or reports `unknown`. An annotation
+        // constrains nothing, so there is no conjunct to keep.
+        if (keywordKind(key) !== 'annotation' && !deepEqual(current, value)) {
+          out.allOf = [...(Array.isArray(out.allOf) ? out.allOf : []), { [key]: value }];
+        }
         break;
     }
   }
+  // A property only one side declares is still subject to the other side's
+  // `additionalProperties` (`patternProperties` names are not modeled, and
+  // make the comparison inconclusive anyway).
+  for (const [side, other] of [
+    [left, right],
+    [right, left],
+  ]) {
+    const extra = other.additionalProperties;
+    if (!isObject(side.properties) || extra === undefined || extra === true || hasPatternProperties(other)) continue;
+    const declared = isObject(other.properties) ? other.properties : {};
+    for (const prop of Object.keys(side.properties)) {
+      if (prop in declared) continue;
+      out.properties = { ...out.properties, [prop]: mergeSchemas(out.properties[prop], extra) };
+    }
+  }
   return out;
+}
+
+/** Keys of `schema` that hold reference constraints (`ref-scope.ts` reads them as clauses). */
+function isRefConstraint(key: string, value: unknown): boolean {
+  return isGtsRefKeyword(key) || (['not', 'anyOf', 'oneOf'].includes(key) && usesRefKeywords({ [key]: value }));
+}
+
+/**
+ * `schema` without its reference constraints, including residual `allOf`
+ * conjuncts that only hold such constraints. What remains is compared by the
+ * ordinary keyword rules.
+ */
+function withoutRefConstraints(schema: Schema): Schema {
+  if (!isObject(schema)) return schema;
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (isRefConstraint(key, value)) continue;
+    if (key === 'allOf' && Array.isArray(value)) {
+      const rest = value.filter(
+        (branch) => !(isObject(branch) && Object.entries(branch).every(([k, v]) => isRefConstraint(k, v)))
+      );
+      if (rest.length > 0) out.allOf = rest;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/** The selected type `/$id` names for each side of a comparison. */
+export interface RefSelves {
+  outer?: string;
+  inner?: string;
 }
 
 /**
@@ -780,8 +878,18 @@ export function findCrossedBound(subSchemas: Schema[]): string | null {
 
 class SubsumptionChecker {
   private resolver: SchemaResolver;
+  private evaluator = new XGtsRefValidator();
 
-  constructor(store: EntityLookup) {
+  /**
+   * `dialectSource` carries the `$schema` of the compared documents:
+   * `stripAnnotations` drops it from every compared fragment, but evaluating
+   * a counterexample depends on it (2020-12 `minContains`, for one).
+   */
+  constructor(
+    store: EntityLookup,
+    private selves: RefSelves = {},
+    private dialectSource: Schema = {}
+  ) {
     this.resolver = new SchemaResolver(store);
   }
 
@@ -829,8 +937,95 @@ class SubsumptionChecker {
 
     const outerNorm = stripAnnotations(outer);
     const innerNorm = stripAnnotations(inner);
-    if (deepEqual(outerNorm, innerNorm)) return this.finalize('compatible');
+    // Equal documents are equal schemas unless a `/$id` operand somewhere
+    // below names a different type on each side. This holds for reference
+    // constraints the clause rules cannot read as well.
+    const selfDependent = this.selves.outer !== this.selves.inner && JSON.stringify(outerNorm).includes(SELF_OPERAND);
+    if (!selfDependent && deepEqual(outerNorm, innerNorm)) return this.finalize('compatible');
+    if (usesRefKeywords(outerNorm) || usesRefKeywords(innerNorm)) {
+      return this.finalize(this.compareWithRefs(outerNorm, innerNorm, depth));
+    }
+    const branches = this.compareUnionBranches(outerNorm, innerNorm, depth);
+    if (branches !== null) return this.finalize(branches);
+    return this.finalize(this.compareKeywords(outerNorm, innerNorm, depth));
+  }
 
+  /**
+   * `inner` with an `anyOf` or `oneOf` accepts only values one of its
+   * branches, together with the rest of `inner`, accepts, so it is included
+   * when each such conjunction is. A `oneOf` also rejects a value several
+   * branches accept, so an excluded conjunction does not prove that `inner`
+   * is excluded. `null` when `inner` has no union.
+   */
+  private compareUnionBranches(outer: Schema, inner: Schema, depth: number): CompatVerdict | null {
+    for (const key of ['anyOf', 'oneOf']) {
+      const branches = inner[key];
+      if (!Array.isArray(branches) || branches.length === 0) continue;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { [key]: _union, ...rest } = inner;
+      let verdict: CompatVerdict = 'compatible';
+      for (const branch of branches) {
+        verdict = worst(verdict, this.subsumes(outer, { ...rest, allOf: [...(rest.allOf ?? []), branch] }, depth + 1));
+        if (verdict === 'incompatible') break;
+      }
+      return key === 'oneOf' && verdict === 'incompatible' ? 'unknown' : verdict;
+    }
+    return null;
+  }
+
+  /**
+   * Compares schemas that use GTS reference keywords (§9.6.1 "Derivation and
+   * evolution", §9.6.2). Inclusion of the reference constraints is proven
+   * from their clauses (`ref-scope.ts`); a non-inclusion is reported only
+   * with a concrete string that `inner` accepts and `outer` rejects, both
+   * evaluated as whole schemas. The remaining keywords are compared by the
+   * ordinary rules. Anything else is `unknown`; registry contents never
+   * decide a verdict.
+   */
+  private compareWithRefs(outer: Schema, inner: Schema, depth: number): CompatVerdict {
+    const outerClauses = refClauses(outer, this.selves.outer).filter((clause) => !isComparedElsewhere(clause));
+    const innerClauses = refClauses(inner, this.selves.inner);
+    const refsIncluded = outerClauses.every((clause) => clauseImplied(innerClauses, clause));
+
+    const innerRest = withoutRefConstraints(inner);
+    let rest = this.compareKeywords(withoutRefConstraints(outer), innerRest, depth);
+    // Without its reference constraints `inner` accepts more than it does, so
+    // a non-inclusion found there is not proven for `inner` itself.
+    if (rest === 'incompatible' && !deepEqual(innerRest, inner)) rest = 'unknown';
+
+    if (refsIncluded && rest === 'compatible') return 'compatible';
+    if (rest === 'incompatible') return 'incompatible';
+    const innerAccepts = this.compileEvaluation(inner, this.selves.inner);
+    const outerAccepts = this.compileEvaluation(outer, this.selves.outer);
+    for (const witness of witnessCandidates([...innerClauses, ...refClauses(outer, this.selves.outer)])) {
+      // A schema that cannot be evaluated proves nothing (tri-state).
+      if (innerAccepts(witness) === 'accept' && outerAccepts(witness) === 'reject') return 'incompatible';
+    }
+    return 'unknown';
+  }
+
+  /** `schema` compiled once for evaluating witnesses; a schema error evaluates to `'error'`. */
+  private compileEvaluation(
+    schema: Schema,
+    selectedTypeId: string | undefined
+  ): (value: unknown) => 'accept' | 'reject' | 'error' {
+    let accepts: (value: unknown) => boolean;
+    try {
+      accepts = this.evaluator.acceptor(schema, selectedTypeId, this.dialectSource);
+    } catch {
+      return () => 'error';
+    }
+    return (value) => {
+      try {
+        return accepts(value) ? 'accept' : 'reject';
+      } catch {
+        return 'error';
+      }
+    };
+  }
+
+  private compareKeywords(outerNorm: Schema, innerNorm: Schema, depth: number): CompatVerdict {
+    if (isEmptySchema(outerNorm)) return 'compatible';
     let verdict: CompatVerdict = 'compatible';
     verdict = worst(verdict, this.compareTypes(outerNorm, innerNorm));
     verdict = worst(verdict, this.compareFixedValues(outerNorm, innerNorm));
@@ -840,7 +1035,7 @@ class SubsumptionChecker {
     verdict = worst(verdict, this.compareNarrowing(outerNorm, innerNorm));
     verdict = worst(verdict, this.compareUnmodeled(outerNorm, innerNorm));
 
-    return this.finalize(verdict);
+    return verdict;
   }
 
   private compareTypes(outer: Schema, inner: Schema): CompatVerdict {
@@ -969,6 +1164,8 @@ class SubsumptionChecker {
     // so a keyword nobody has thought about yet fails closed to `unknown`
     // rather than being silently ignored.
     const keys = new Set([...Object.keys(outer), ...Object.keys(inner)]);
+    // A residual `allOf` holds conjuncts the resolver could not merge.
+    if (keys.has('allOf') && !deepEqual(outer.allOf, inner.allOf)) return 'unknown';
     for (const key of keys) {
       if (keywordKind(key) !== 'unmodeled') continue;
       if (deepEqual(outer[key], inner[key])) continue;
@@ -1049,6 +1246,11 @@ class SubsumptionChecker {
   }
 }
 
+/** The canonical GTS identifier a schema document's `$id` names, if any. */
+function selfId(schema: Schema): string | undefined {
+  return isObject(schema) && typeof schema.$id === 'string' ? stripUriPrefix(schema.$id) : undefined;
+}
+
 export class GtsCompatibility {
   /**
    * The dialect a `$schema` value names, with the spellings that carry no
@@ -1090,10 +1292,36 @@ export class GtsCompatibility {
       return { backward: 'unknown', forward: 'unknown' };
     }
 
+    const oldSelf = selfId(oldSchema);
+    const newSelf = selfId(newSchema);
+    const dialectSource = { $schema: oldDialect ?? newDialect };
     return {
-      backward: new SubsumptionChecker(store).subsumes(newSchema, oldSchema),
-      forward: new SubsumptionChecker(store).subsumes(oldSchema, newSchema),
+      backward: new SubsumptionChecker(store, { outer: newSelf, inner: oldSelf }, dialectSource).subsumes(
+        newSchema,
+        oldSchema
+      ),
+      forward: new SubsumptionChecker(store, { outer: oldSelf, inner: newSelf }, dialectSource).subsumes(
+        oldSchema,
+        newSchema
+      ),
     };
+  }
+
+  /**
+   * Verdict for `Valid(inner) ⊆ Valid(outer)` between two (sub)schemas, with
+   * `/$id` resolved per side and `dialectSource` (by default `outer`)
+   * supplying the `$schema` of the documents they come from. Used by OP#12
+   * to compare a restated property with the base declaration.
+   */
+  static includes(
+    store: EntityLookup,
+    outer: Schema,
+    inner: Schema,
+    selves: RefSelves = {},
+    dialectSource: Schema = outer
+  ): CompatVerdict {
+    const $schema = isObject(dialectSource) ? dialectSource.$schema : undefined;
+    return new SubsumptionChecker(store, selves, { $schema }).subsumes(outer, inner);
   }
 
   static checkCompatibility(
