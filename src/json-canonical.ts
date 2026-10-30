@@ -1,11 +1,11 @@
 /*
- * JSON canonicalization, hashing and safe deep-cloning helpers shared by the
- * store. Extracted from `store.ts` so these pure, dependency-light utilities
- * are independently testable and the store module stays focused on registry
- * behavior (a step toward the module seams gts-rust uses).
+ * JSON canonicalization, content comparison and safe deep-cloning helpers
+ * shared by the store. Extracted from `store.ts` so these pure,
+ * dependency-light utilities are independently testable and the store module
+ * stays focused on registry behavior (a step toward the module seams gts-rust
+ * uses).
  */
 
-import { createHash } from 'crypto';
 import { JsonEntity, JsonObject, JsonValue, MAX_SCHEMA_DEPTH, EntityContentDepthError } from './types';
 
 /**
@@ -45,13 +45,15 @@ export function canonicalJson(value: JsonValue, depth: number = 0): string {
 }
 
 /**
- * A stable SHA-256 hash of an entity's content, used to distinguish an
- * idempotent re-submission (identical content) from a conflicting update
- * (changed content) without a deep structural comparison. Mirrors gts-go's
- * `contentHash`.
+ * True when two entity contents serialize to the same canonical JSON, used to
+ * distinguish an idempotent re-submission (identical content) from a
+ * conflicting update (changed content) without a deep structural comparison.
+ * gts-go compares SHA-256 hashes of the same serialization (`contentHash`);
+ * comparing the strings gives the same answer without Node's `crypto`, which
+ * browsers do not have.
  */
-export function contentHash(content: JsonObject): string {
-  return createHash('sha256').update(canonicalJson(content)).digest('hex');
+export function sameContent(a: JsonObject, b: JsonObject): boolean {
+  return canonicalJson(a) === canonicalJson(b);
 }
 
 /**

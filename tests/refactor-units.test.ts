@@ -23,7 +23,7 @@ import {
 } from '../src';
 import {
   canonicalJson,
-  contentHash,
+  sameContent,
   cloneJsonValue,
   cloneJsonEntity,
   isPlainSchemaObject,
@@ -84,13 +84,15 @@ describe('prefix helpers', () => {
 });
 
 describe('json canonicalization', () => {
-  it('sorts object keys so equal content hashes equally regardless of order', () => {
+  it('sorts object keys so equal content compares equal regardless of order', () => {
     expect(canonicalJson({ b: 1, a: 2 })).toBe('{"a":2,"b":1}');
-    expect(contentHash({ b: 1, a: 2 })).toBe(contentHash({ a: 2, b: 1 }));
+    expect(sameContent({ b: 1, a: { d: 3, c: [4] } }, { a: { c: [4], d: 3 }, b: 1 })).toBe(true);
   });
 
   it('distinguishes different content', () => {
-    expect(contentHash({ a: 1 })).not.toBe(contentHash({ a: 2 }));
+    expect(sameContent({ a: 1 }, { a: 2 })).toBe(false);
+    expect(sameContent({ a: [1, 2] }, { a: [2, 1] })).toBe(false);
+    expect(sameContent({ a: 1 }, { a: '1' })).toBe(false);
   });
 
   it('throws on content nested past the depth bound', () => {

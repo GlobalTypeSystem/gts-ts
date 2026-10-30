@@ -6,7 +6,7 @@ import * as path from 'path';
 import type { AddressInfo } from 'net';
 import * as fs from 'fs';
 
-// Loads the core bundle (dist/index.js closure, crypto aliased to the SHA-256 shim) in
+// Loads the core bundle (dist/index.js closure) in
 // headless Chromium under a strict CSP + Trusted Types header and asserts that the
 // issue-28 repro runs with zero violations. A control page that deliberately breaks the
 // policy must fire violations, otherwise the test would be vacuous.
@@ -79,9 +79,9 @@ test.beforeAll(async () => {
     platform: 'browser',
     format: 'iife',
     outfile: bundleFile,
-    // Node's crypto (core uses createHash('sha256') once) is replaced by a pure-JS shim.
+    // No Node built-in is aliased: esbuild cannot resolve one for the browser, so a core import
+    // of any built-in except the external `path` below fails the build.
     alias: {
-      crypto: path.join(root, 'tests', 'csp', 'sha256-shim.js'),
       // core `require('jsonc-parser')` makes esbuild pick the UMD `main`, whose `require` indirection
       // breaks bundling; the package's own ES-module build is used instead.
       'jsonc-parser': path.join(root, 'node_modules', 'jsonc-parser', 'lib', 'esm', 'main.js'),

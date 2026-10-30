@@ -3,8 +3,7 @@
 //
 // Default mode: resolves the closure from dist/index.js (require / import / import()
 // through relative files and bare packages in node_modules), skips dist/server and
-// dist/cli, adds tests/csp/sha256-shim.js, scans each file with comments and string
-// contents removed. Only standalone sinks are flagged (no method names on other objects).
+// dist/cli, scans each file with comments and string contents removed. Only standalone sinks are flagged (no method names on other objects).
 // Exit codes: 0 clean, 1 findings (or selftest failure), 2 scope failure / usage error.
 //
 // Options:
@@ -390,9 +389,8 @@ function runClosure() {
     console.error('csp-scan: dist/index.js missing (run `npm run build` first)');
     return 2;
   }
-  const shim = path.join(repoRoot, 'tests', 'csp', 'sha256-shim.js');
   const skip = [path.join(repoRoot, 'dist', 'server'), path.join(repoRoot, 'dist', 'cli')];
-  const { files, unresolved } = resolveClosure([entry, shim], skip);
+  const { files, unresolved } = resolveClosure([entry], skip);
   const required = ['json-schema-library', 're2js'];
   const missing = required.filter((pkg) => !files.some((f) => f.includes(`${path.sep}node_modules${path.sep}${pkg}${path.sep}`)));
   if (missing.length > 0) {
