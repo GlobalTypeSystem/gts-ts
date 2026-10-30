@@ -1,5 +1,5 @@
 import { createSchemaEngine, type SchemaEngine } from './schema-engine';
-import { isPlainSchemaObject, contentHash, cloneJsonEntity, canonicalJson } from './json-canonical';
+import { isPlainSchemaObject, sameContent, cloneJsonEntity, canonicalJson } from './json-canonical';
 import { dialectOf, canonicalDialectUri } from './schema-dialect';
 import { assertSafeSchemaPatterns } from './schema-safety';
 import {
@@ -772,11 +772,11 @@ export class GtsStore {
 
     // Protect registry state: unless entity updates are allowed, re-registering
     // an id with *different* content is rejected (EntityConflictError, surfaced
-    // as HTTP 409), while an identical re-submission stays idempotent. Stored
-    // both hashes are computed from the current values rather than relying on
+    // as HTTP 409), while an identical re-submission stays idempotent. Both
+    // contents are serialized from their current values rather than relying on
     // a cached snapshot.
     const previous = this.byId.get(entity.id);
-    const replacing = !!previous && contentHash(previous.content) !== contentHash(entity.content);
+    const replacing = !!previous && !sameContent(previous.content, entity.content);
     if (replacing && !this.config.allowEntityUpdates) {
       throw new EntityConflictError(entity.id);
     }
@@ -888,11 +888,7 @@ export class GtsStore {
     }
 
     const committed = this.byId.get(entity.id);
-    if (
-      committed &&
-      contentHash(committed.content) !== contentHash(entity.content) &&
-      !this.config.allowEntityUpdates
-    ) {
+    if (committed && !sameContent(committed.content, entity.content) && !this.config.allowEntityUpdates) {
       throw new EntityConflictError(entity.id);
     }
 
@@ -925,11 +921,7 @@ export class GtsStore {
     if (!entry) return 'conflict';
     this.removeStaged(token, entry);
     const committed = this.byId.get(entry.key);
-    if (
-      committed &&
-      contentHash(committed.content) !== contentHash(entry.entity.content) &&
-      !this.config.allowEntityUpdates
-    ) {
+    if (committed && !sameContent(committed.content, entry.entity.content) && !this.config.allowEntityUpdates) {
       return 'conflict';
     }
     this.byId.set(entry.key, entry.entity);
@@ -966,7 +958,7 @@ export class GtsStore {
       entries.push(entry);
       const existing = pendingByKey.get(entry.key) ?? this.byId.get(entry.key);
       if (existing) {
-        const identical = contentHash(existing.content) === contentHash(entry.entity.content);
+        const identical = sameContent(existing.content, entry.entity.content);
         const outcome: CommitOutcome = identical ? 'unchanged' : this.config.allowEntityUpdates ? 'added' : 'conflict';
         if (outcome === 'conflict') anyConflict = true;
         outcomes.push(outcome);

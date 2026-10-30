@@ -244,9 +244,10 @@ The core library creates no Trusted Types policies, starts no workers and makes 
 - the jest suite in a no-codegen environment (`npm run test:csp`);
 - a headless Chromium test that loads the core bundle under the full header above and asserts zero `securitypolicyviolation` events (`npm run test:csp:browser`).
 
-The browser test bundle differs from a plain bundle in three ways (test harness only, `src/` is unchanged):
+The core library imports no Node built-in module, so it bundles for the browser without stubs or aliases. A jest test (`tests/core-node-builtins.test.ts`) fails when a file under `src/` outside `cli/` and `server/` imports one, and the browser test bundles the core without aliasing any.
 
-- Node `crypto` is aliased to a pure-JavaScript synchronous SHA-256 shim (`tests/csp/sha256-shim.js`, `createHash('sha256')` only). The shim is part of the scan scope.
+The browser test bundle differs from a plain bundle in two ways (test harness only, `src/` is unchanged):
+
 - Node `path` is marked `external`; it is used only inside the issue reproduction's `require.main` guard and is inert in the browser.
 - `jsonc-parser` is aliased to its ES-module build (`lib/esm/main.js`), because esbuild would otherwise pick the UMD build, whose dynamic `require` fails at runtime. Bundlers that honor the package `module` field are not affected.
 

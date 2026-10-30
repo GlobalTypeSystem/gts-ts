@@ -2,41 +2,44 @@
 
 <!-- toc -->
 
+- [0.11.1 - 2026-10-30](#0111---2026-10-30)
+  - [Fixed](#fixed)
+  - [Changed](#changed)
 - [0.11.0 - 2026-10-24](#0110---2026-10-24)
   - [Breaking](#breaking)
   - [Added](#added)
-  - [Changed](#changed)
-  - [Fixed](#fixed)
+  - [Changed](#changed-1)
+  - [Fixed](#fixed-1)
 - [0.10.0 - 2026-10-22](#0100---2026-10-22)
   - [Breaking](#breaking-1)
-  - [Changed](#changed-1)
+  - [Changed](#changed-2)
   - [Security](#security)
-  - [Fixed](#fixed-1)
+  - [Fixed](#fixed-2)
 - [0.9.0 - 2026-10-09](#090---2026-10-09)
   - [Breaking](#breaking-2)
-  - [Changed](#changed-2)
+  - [Changed](#changed-3)
   - [Security](#security-1)
 - [0.8.0 - 2026-09-25](#080---2026-09-25)
   - [Breaking](#breaking-3)
-  - [Fixed](#fixed-2)
+  - [Fixed](#fixed-3)
 - [0.7.0 - 2026-09-21](#070---2026-09-21)
   - [Added](#added-1)
-  - [Fixed](#fixed-3)
+  - [Fixed](#fixed-4)
 - [0.6.0 - 2026-09-16](#060---2026-09-16)
   - [Breaking](#breaking-4)
   - [Added](#added-2)
-  - [Fixed](#fixed-4)
+  - [Fixed](#fixed-5)
 - [0.5.0 - 2026-09-15](#050---2026-09-15)
   - [Breaking](#breaking-5)
   - [Added](#added-3)
-  - [Fixed](#fixed-5)
+  - [Fixed](#fixed-6)
 - [0.4.0 - 2026-08-10](#040---2026-08-10)
   - [Breaking - HTTP API](#breaking---http-api)
   - [Breaking - library API](#breaking---library-api)
   - [Changed - compatibility semantics (spec 0.13 §4)](#changed---compatibility-semantics-spec-013-4)
   - [Added](#added-4)
   - [Changed - traits (§9.7.5, ADR-0002/0003/0004)](#changed---traits-975-adr-000200030004)
-  - [Fixed](#fixed-6)
+  - [Fixed](#fixed-7)
   - [Notes for implementers](#notes-for-implementers)
 - [0.3.0](#030)
 
@@ -46,6 +49,16 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.11.1] - 2026-10-30
+
+### Fixed
+
+- The core library no longer imports Node's `crypto`, which browsers do not have. `register`, `stage`, `commit` and `commitBatch` compared SHA-256 hashes of the stored and the incoming content when an id was already present, so in a browser bundle that replaces `crypto` with an empty module, as Vite does, they threw `TypeError: (0 , crypto_1.createHash) is not a function`. The two contents are now compared by their canonical JSON strings, which gives the same answer.
+
+### Changed
+
+- The headless Chromium test bundles the core without aliasing `crypto`, and the SHA-256 shim it was aliased to is removed, so the test fails if the core imports a Node built-in again. A jest test (`tests/core-node-builtins.test.ts`) fails when a file under `src/` outside `cli/` and `server/` imports one.
 
 ## [0.11.0] - 2026-10-24
 
