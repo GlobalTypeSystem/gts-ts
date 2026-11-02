@@ -1,9 +1,12 @@
 {
   "name": "@globaltypesystem/gts-ts",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "description": "TypeScript library for working with GTS (Global Type System) identifiers and JSON/JSON Schema artifacts",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "browser": {
+    "jsonc-parser": "jsonc-parser/lib/esm/main.js"
+  },
   "bin": {
     "gts": "./dist/cli/index.js",
     "gts-server": "./dist/server/index.js"

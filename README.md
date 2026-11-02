@@ -246,10 +246,9 @@ The core library creates no Trusted Types policies, starts no workers and makes 
 
 The core library imports no Node built-in module, so it bundles for the browser without stubs or aliases. A jest test (`tests/core-node-builtins.test.ts`) fails when a file under `src/` outside `cli/` and `server/` imports one, and the browser test bundles the core without aliasing any.
 
-The browser test bundle differs from a plain bundle in two ways (test harness only, `src/` is unchanged):
+The core loads `jsonc-parser` with `require`. For a `require`, esbuild resolves a package's `main` field, which for jsonc-parser is its UMD build, and that build's dynamic `require` throws in the browser. The package's `browser` field therefore maps `jsonc-parser` to its ES-module build (`lib/esm/main.js`). esbuild honors it with `platform: 'browser'`, as do other bundlers that read the `browser` field, and the browser test bundles the core without aliasing it.
 
-- Node `path` is marked `external`; it is used only inside the issue reproduction's `require.main` guard and is inert in the browser.
-- `jsonc-parser` is aliased to its ES-module build (`lib/esm/main.js`), because esbuild would otherwise pick the UMD build, whose dynamic `require` fails at runtime. Bundlers that honor the package `module` field are not affected.
+The browser test bundle differs from a plain bundle in one way (test harness only, `src/` is unchanged): Node `path` is marked `external`. It is used only inside the issue reproduction's `require.main` guard and is inert in the browser.
 
 The `server/` and CLI entry points are out of scope: the Fastify server keeps its own Ajv and is Node-only.
 
