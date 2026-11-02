@@ -45,7 +45,7 @@ GTS 0.17 replaces `x-gts-ref` with the kind-specific [entity references](#gts-re
 
 `pattern`, `patternProperties`, `propertyNames` and `format: "regex"`, including trait, casting and OP#8 checks, follow the GTS [safe regular-expression profile](https://github.com/GlobalTypeSystem/gts-spec/blob/main/README.md#1101-regular-expression-execution-safety) (spec §11.0.1, version 0.15).
 
-- **Engine:** [re2js](https://github.com/le0pard/re2js) 2.8 (tested with 2.8.6), `RE2JS.compile(source)` without flags; no native `RegExp` fallback.
+- **Engine:** [re2js](https://github.com/le0pard/re2js) 2.8 (tested with 2.8.7), `RE2JS.compile(source)` without flags; no native `RegExp` fallback.
 - **Declared behavior:** reference for `digit`, `word` and `space`; no permitted deviation is used.
 - **Unpaired surrogates** (no result defined by GTS): rejected in expressions; read as one code point in matched strings.
 
