@@ -2,49 +2,57 @@
 
 <!-- toc -->
 
-- [0.11.1 - 2026-11-02](#0111---2026-11-02)
+- [0.11.2 - 2026-11-02](#0112---2026-11-02)
   - [Fixed](#fixed)
+- [0.11.1 - 2026-11-02](#0111---2026-11-02)
+  - [Fixed](#fixed-1)
   - [Changed](#changed)
   - [Security](#security)
 - [0.11.0 - 2026-10-24](#0110---2026-10-24)
   - [Breaking](#breaking)
   - [Added](#added)
   - [Changed](#changed-1)
-  - [Fixed](#fixed-1)
+  - [Fixed](#fixed-2)
 - [0.10.0 - 2026-10-22](#0100---2026-10-22)
   - [Breaking](#breaking-1)
   - [Changed](#changed-2)
   - [Security](#security-1)
-  - [Fixed](#fixed-2)
+  - [Fixed](#fixed-3)
 - [0.9.0 - 2026-10-09](#090---2026-10-09)
   - [Breaking](#breaking-2)
   - [Changed](#changed-3)
   - [Security](#security-2)
 - [0.8.0 - 2026-09-25](#080---2026-09-25)
   - [Breaking](#breaking-3)
-  - [Fixed](#fixed-3)
+  - [Fixed](#fixed-4)
 - [0.7.0 - 2026-09-21](#070---2026-09-21)
   - [Added](#added-1)
-  - [Fixed](#fixed-4)
+  - [Fixed](#fixed-5)
 - [0.6.0 - 2026-09-16](#060---2026-09-16)
   - [Breaking](#breaking-4)
   - [Added](#added-2)
-  - [Fixed](#fixed-5)
+  - [Fixed](#fixed-6)
 - [0.5.0 - 2026-09-15](#050---2026-09-15)
   - [Breaking](#breaking-5)
   - [Added](#added-3)
-  - [Fixed](#fixed-6)
+  - [Fixed](#fixed-7)
 - [0.4.0 - 2026-08-10](#040---2026-08-10)
   - [Breaking - HTTP API](#breaking---http-api)
   - [Breaking - library API](#breaking---library-api)
   - [Changed - compatibility semantics (spec 0.13 §4)](#changed---compatibility-semantics-spec-013-4)
   - [Added](#added-4)
   - [Changed - traits (§9.7.5, ADR-0002/0003/0004)](#changed---traits-975-adr-000200030004)
-  - [Fixed](#fixed-7)
+  - [Fixed](#fixed-8)
   - [Notes for implementers](#notes-for-implementers)
 - [0.3.0](#030)
 
 <!-- /toc -->
+
+## 0.11.2 - 2026-11-02
+
+### Fixed
+
+- The core bundles for the browser with esbuild's default settings. The core loads `jsonc-parser` with `require`, for which esbuild resolves the package's `main`: jsonc-parser's UMD build, whose dynamic `require` of `./impl/format` threw in the browser as the core loaded. The package's `browser` field now maps `jsonc-parser` to its ES-module build. The browser test no longer aliases jsonc-parser, so it covers this.
 
 All notable changes to this project are documented in this file.
 

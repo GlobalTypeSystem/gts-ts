@@ -79,13 +79,9 @@ test.beforeAll(async () => {
     platform: 'browser',
     format: 'iife',
     outfile: bundleFile,
-    // No Node built-in is aliased: esbuild cannot resolve one for the browser, so a core import
-    // of any built-in except the external `path` below fails the build.
-    alias: {
-      // core `require('jsonc-parser')` makes esbuild pick the UMD `main`, whose `require` indirection
-      // breaks bundling; the package's own ES-module build is used instead.
-      'jsonc-parser': path.join(root, 'node_modules', 'jsonc-parser', 'lib', 'esm', 'main.js'),
-    },
+    // Nothing is aliased: esbuild cannot resolve a Node built-in for the browser, so a core import
+    // of any built-in except the external `path` below fails the build, and jsonc-parser resolves
+    // through the package's own `browser` field, as it does in a consumer's bundle.
     // repro.cjs requires `path` only inside its `require.main === module` guard (inert here).
     external: ['path'],
     logLevel: 'silent',
