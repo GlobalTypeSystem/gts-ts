@@ -2,9 +2,10 @@
 
 <!-- toc -->
 
-- [0.11.1 - 2026-10-30](#0111---2026-10-30)
+- [0.11.1 - 2026-11-02](#0111---2026-11-02)
   - [Fixed](#fixed)
   - [Changed](#changed)
+  - [Security](#security)
 - [0.11.0 - 2026-10-24](#0110---2026-10-24)
   - [Breaking](#breaking)
   - [Added](#added)
@@ -13,12 +14,12 @@
 - [0.10.0 - 2026-10-22](#0100---2026-10-22)
   - [Breaking](#breaking-1)
   - [Changed](#changed-2)
-  - [Security](#security)
+  - [Security](#security-1)
   - [Fixed](#fixed-2)
 - [0.9.0 - 2026-10-09](#090---2026-10-09)
   - [Breaking](#breaking-2)
   - [Changed](#changed-3)
-  - [Security](#security-1)
+  - [Security](#security-2)
 - [0.8.0 - 2026-09-25](#080---2026-09-25)
   - [Breaking](#breaking-3)
   - [Fixed](#fixed-3)
@@ -50,7 +51,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.1] - 2026-10-30
+## [0.11.1] - 2026-11-02
 
 ### Fixed
 
@@ -59,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The headless Chromium test bundles the core without aliasing `crypto`, and the SHA-256 shim it was aliased to is removed, so the test fails if the core imports a Node built-in again. A jest test (`tests/core-node-builtins.test.ts`) fails when a file under `src/` outside `cli/` and `server/` imports one.
+
+### Security
+
+- Raise `re2js` to `^2.8.7` (lockfile 2.8.7) for [GHSA-gg6h-894w-4m9c](https://github.com/advisories/GHSA-gg6h-894w-4m9c), quadratic-time matching with the `LOOKBEHINDS` flag. gts-ts compiles every expression without flags, so it never took that path, but the previous `^2.8.6` range still allowed the affected 2.8.6.
 
 ## [0.11.0] - 2026-10-24
 
