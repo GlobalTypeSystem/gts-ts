@@ -30,6 +30,8 @@ GTS [Global Type System](https://github.com/globaltypesystem/gts-spec) is a simp
 
 **Targets gts-spec [v0.17.0](https://github.com/GlobalTypeSystem/gts-spec/releases/tag/v0.17.0)** — recorded in [`.gts-spec-version`](.gts-spec-version) and pinned by the `.gts-spec` submodule. Run `make update-spec` to check the pinned release out. See the [CHANGELOG](CHANGELOG.md) for breaking changes.
 
+Requires Node 20 or later, as re2js, the regular-expression engine, does.
+
 GTS 0.17 replaces `x-gts-ref` with the kind-specific [entity references](#gts-references) `x-gts-type-ref` and `x-gts-instance-ref`, and 0.16 adds `x-gts-pattern-ref` with a formal pattern grammar and coverage relation (spec README §9.6, §10, ADR-0007, ADR-0008). Regular expressions follow the GTS 0.15 [safe regular-expression profile](#regular-expressions) (spec README §11.0.1, ADR-0006). The conformance tests run against the released `v0.17.0` pinned above.
 
 ### GTS references
