@@ -4,23 +4,24 @@
 
 - [0.11.2 - 2026-11-02](#0112---2026-11-02)
   - [Fixed](#fixed)
+  - [Changed](#changed)
 - [0.11.1 - 2026-11-02](#0111---2026-11-02)
   - [Fixed](#fixed-1)
-  - [Changed](#changed)
+  - [Changed](#changed-1)
   - [Security](#security)
 - [0.11.0 - 2026-10-24](#0110---2026-10-24)
   - [Breaking](#breaking)
   - [Added](#added)
-  - [Changed](#changed-1)
+  - [Changed](#changed-2)
   - [Fixed](#fixed-2)
 - [0.10.0 - 2026-10-22](#0100---2026-10-22)
   - [Breaking](#breaking-1)
-  - [Changed](#changed-2)
+  - [Changed](#changed-3)
   - [Security](#security-1)
   - [Fixed](#fixed-3)
 - [0.9.0 - 2026-10-09](#090---2026-10-09)
   - [Breaking](#breaking-2)
-  - [Changed](#changed-3)
+  - [Changed](#changed-4)
   - [Security](#security-2)
 - [0.8.0 - 2026-09-25](#080---2026-09-25)
   - [Breaking](#breaking-3)
@@ -53,6 +54,10 @@
 ### Fixed
 
 - The core bundles for the browser with esbuild's default settings. The core loads `jsonc-parser` with `require`, for which esbuild resolves the package's `main`: jsonc-parser's UMD build, whose dynamic `require` of `./impl/format` threw in the browser as the core loaded. The package's `browser` field now maps `jsonc-parser` to its ES-module build. The browser test no longer aliases jsonc-parser, so it covers this.
+
+### Changed
+
+- The package requires Node 20 or later: `engines.node` is `>=20`, up from `>=18`. re2js 2.8.7, the first release with the GHSA-gg6h-894w-4m9c fix that 0.11.1 moved to, requires Node 20, so `>=18` named a runtime the dependency does not support. CI already runs on Node 20 only.
 
 All notable changes to this project are documented in this file.
 
